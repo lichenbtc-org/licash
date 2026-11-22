@@ -1432,12 +1432,13 @@ fn input_claim_conflicts_preserve_certified_outputs_but_retire_all_own_outputs()
             signers.extend(inputs.iter().cloned());
             Source::OwnInputs {
                 id,
-                inputs: signed
-                    .proposal()
-                    .inputs()
-                    .iter()
-                    .map(|m| m.identifier().unwrap())
-                    .collect(),
+                inputs: {
+                    let mut ys: Vec<_> = (signed.proposal().inputs().iter())
+                        .map(|m| m.identifier().unwrap())
+                        .collect();
+                    ys.sort_unstable();
+                    ys
+                },
                 terms: terms(),
             }
         };
@@ -2422,10 +2423,10 @@ fn a_compact_filing_is_owed_what_a_legacy_one_is_and_is_smaller() {
     let (l, c) = (owed_of(&legacy, &lr, &lb), owed_of(&compact, &cr, &cb));
     assert_eq!((l.owed, l.ineligible), (28, None));
     assert_eq!((c.owed, c.ineligible), (28, None));
-    // A settled note saves its item's fields repeated as its record (104
-    // of 168, for 66) and its witness's keyset and fields (146): 248 of
-    // 619, to 371.
-    assert_eq!(lb.len() - cb.len(), 7 * 248);
+    // A settled note saves its item's fields repeated as its record (72
+    // of 136, for 66) and its witness's keyset and fields (114): 184 of
+    // 523, to 339.
+    assert_eq!(lb.len() - cb.len(), 7 * 184);
     assert!(cb.starts_with(b"LICASH-F\x11"));
     // It decodes to what it was filed as, and encodes to the same bytes.
     let keyset = compact.base.parts().keyset.clone();
@@ -3288,13 +3289,11 @@ fn a_spend_cited_by_its_signatures_decides_as_the_spend_whole() {
             preimage: None,
         },
     ];
-    let sources = vec![Source::Plain {
-        id,
-        inputs: notes[..2]
-            .iter()
-            .map(|n| n.message().identifier().unwrap())
-            .collect(),
-    }];
+    let mut inputs: Vec<_> = (notes[..2].iter())
+        .map(|n| n.message().identifier().unwrap())
+        .collect();
+    inputs.sort_unstable();
+    let sources = vec![Source::Plain { id, inputs }];
     let held: Vec<_> = a.iter().cloned().chain([change.clone()]).collect();
     let unsigned = claim(&o, items, sources, vec![], &held, 12);
     let p = Publication::sign(unsigned.clone(), &hold_keys(&held), LIMIT).unwrap();

@@ -538,16 +538,16 @@ mod tests {
             (
                 None,
                 [
-                    "476f9e498fc8b19e3b07497e9646d485fd5d4883050575cdc2ad3c2834929fe5",
-                    "1c1647e070bf5f1b99b80674c2dac326367392429990bafd87272736a27a6550",
+                    "30809d646d382766f77114311ffef4031e556b2f03505934a47e6a94a11f7fa8",
+                    "ce437f59f881e2c6ba564cf5847da678d8f8fd9ac0e8633f8468ec72cc15e1f9",
                 ],
                 3_000,
             ),
             (
                 Some(RANGE),
                 [
-                    "e682f1e3f95bced8bb376b7e369186d9d6e56ea1fc8cb44730bc41d0353c5f2e",
-                    "3b319313315749bdf132ef8ab5e48da366832b3c187fb185920ea48e119b5a33",
+                    "54d70ef6780e5bec58a88e3e972e86d46b85406804b77ad6698928c471df68e9",
+                    "440d6f591159a77d7531a4080e983498dae5a10888ac0a29bc403f135882320e",
                 ],
                 3_024,
             ),

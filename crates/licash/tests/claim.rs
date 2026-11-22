@@ -207,8 +207,7 @@ fn context_amount_item_order_keyset_and_full_messages_change_e() {
             3 => parts.items.reverse(),
             _ => {
                 let old = parts.items[0].message();
-                parts.items[0] =
-                    Item::Settled(Message::new(4, *old.owner(), [53; 32], *old.hold()).unwrap());
+                parts.items[0] = Item::Settled(Message::new(4, *old.hold(), *old.owner()).unwrap());
                 parts.authorizations =
                     canonical(parts.items.iter().map(|i| i.message().clone()).collect());
             }

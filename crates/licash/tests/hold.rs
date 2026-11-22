@@ -57,9 +57,9 @@ fn thirty_two_hold_records_sign_only_with_their_independent_q_keys() {
         assert!(crypto::schnorr_verify(record.message.owner(), &digest, &record.sig).is_err());
     }
     let bytes = envelope.to_bytes();
-    assert_eq!(RECORD_BYTES, 168);
-    assert_eq!(bytes.len(), b"LICASH-HOLD\x02".len() + 104 + 4 + 32 * 168);
-    assert_eq!(bytes.len(), 5_496);
+    assert_eq!(RECORD_BYTES, 136);
+    assert_eq!(bytes.len(), b"LICASH-HOLD\x02".len() + 104 + 4 + 32 * 136);
+    assert_eq!(bytes.len(), 4_472);
     assert_eq!(
         Envelope::from_bytes(&ctx, &root, 32, &bytes).unwrap(),
         envelope
@@ -151,7 +151,7 @@ fn zero_wrong_and_spending_keys_are_not_hold_authority() {
 #[test]
 fn notes_sharing_a_hold_key_cannot_exchange_authorization_signatures() {
     let (first, key) = entries(1).remove(0);
-    let second = Message::new(8, *first.owner(), *first.nonce(), *first.hold()).unwrap();
+    let second = Message::new(8, *first.owner(), *first.hold()).unwrap();
     let mut entries = vec![(first, key), (second, key)];
     entries.sort_by_key(|(m, _)| m.identifier().unwrap());
     let root = authorization_root(&messages(&entries), 2).unwrap();

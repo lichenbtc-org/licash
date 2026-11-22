@@ -100,7 +100,7 @@ pub struct Uncitable {
 /// of `max_authorizations` (its Base's limit) cannot cite: of more notes,
 /// of a signed proposal or a note over a statement's blob limit, or with no
 /// signed proposal kept at all. Read-only, without opening a hub, and of a
-/// ledger of this release (schema 3) or one before (schema 1 or 2), whose
+/// ledger of this release (schema 4) or one before (schema 1 to 3), whose
 /// tables are the same: what an operator checks before closing the
 /// contracts of an earlier release. Each claim on Bitcoin of one of these
 /// spends' notes is unanswered and paid whole.
@@ -110,8 +110,8 @@ pub fn uncitable(db: &Path, max_authorizations: u64) -> Result<Vec<Uncitable>, E
         .map_err(setup)?
         .ok_or_else(|| Error::Setup(format!("no hub database at {}", db.display())))?;
     match licash_store::component_version(&conn, crate::store::COMPONENT).map_err(setup)? {
-        Some(1..=3) => {}
-        Some(v) => return Err(Error::Setup(format!("ledger schema {v}, not 1 to 3"))),
+        Some(1..=4) => {}
+        Some(v) => return Err(Error::Setup(format!("ledger schema {v}, not 1 to 4"))),
         None => return Err(Error::Setup("no ledger in the hub's database".into())),
     }
     let mut stmt = conn.prepare(

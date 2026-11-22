@@ -384,7 +384,7 @@ fn contextual_verification_is_required_after_successful_structural_decoding() {
         .verify(ledger.keyset(), &notes)
         .is_err());
     let mut bytes = proposal.commitment_bytes();
-    bytes[HEADER + 4 + 86..HEADER + 4 + 118].copy_from_slice(&point(71).x_only());
+    bytes[HEADER + 4 + 54..HEADER + 4 + 86].copy_from_slice(&point(71).x_only());
     let changed_q = Proposal::from_commitment_bytes(&bytes).unwrap();
     assert_ne!(changed_q.id(), proposal.id());
     assert!(changed_q.verify(ledger.keyset(), &notes).is_err());
@@ -440,9 +440,9 @@ fn all_valid_issuance_evidence_variants_share_the_same_proposal_identity() {
     let mut records = 4u64.to_be_bytes().to_vec();
     records.extend(public.0);
     let format = crypto::tagged_hash(
-        "licash/note-format/v4",
+        "licash/note-format/v5",
         &[
-            b"licash/note/v2",
+            b"licash/note/v3",
             b"LICASH-V2-secp256k1_XMD:SHA-256_SSWU_RO_",
         ],
     );
@@ -450,7 +450,7 @@ fn all_valid_issuance_evidence_variants_share_the_same_proposal_identity() {
         "licash/keyset/v2",
         &[&format, &credential, &1u32.to_be_bytes(), &records],
     );
-    let mut encoded = b"LICASH-KS\x04".to_vec();
+    let mut encoded = b"LICASH-KS\x05".to_vec();
     encoded.extend(id);
     encoded.extend(credential);
     encoded.extend(1u32.to_be_bytes());
@@ -515,5 +515,5 @@ fn all_valid_issuance_evidence_variants_share_the_same_proposal_identity() {
             expected = Some(proposal.id());
         }
     }
-    assert!(Message::new(0, point(17).x_only(), [0; 32], point(19).x_only()).is_err());
+    assert!(Message::new(0, point(17).x_only(), point(19).x_only()).is_err());
 }

@@ -72,13 +72,7 @@ fn wrong_roots_seeds_and_invalid_points_do_not_establish_ownership() {
 #[test]
 fn an_arbitrary_owner_field_does_not_gain_root_authority() {
     let output = output();
-    let unrelated = Message::new(
-        4,
-        point(17).x_only(),
-        *output.message().nonce(),
-        *output.message().hold(),
-    )
-    .unwrap();
+    let unrelated = Message::new(4, point(17).x_only(), *output.message().hold()).unwrap();
     assert!(output.ownership().verify(&point(17), &unrelated).is_err());
     // The verifier has no supplied-tweak parameter. It always recomputes the
     // root-bound hash, including for a related root, rather than trusting data.
@@ -95,7 +89,7 @@ fn an_arbitrary_owner_field_does_not_gain_root_authority() {
 fn ownership_alone_is_not_note_authentication_or_hold_root_derivation() {
     let output = output();
     let original = output.message();
-    let changed = Message::new(8, *original.owner(), [31; 32], point(37).x_only()).unwrap();
+    let changed = Message::new(8, *original.owner(), point(37).x_only()).unwrap();
     output.ownership().verify(&point(17), &changed).unwrap();
     assert_ne!(
         original.identifier().unwrap(),

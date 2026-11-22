@@ -14,7 +14,7 @@ fn fresh_keys_and_strict_metadata_are_namespaced() {
         keyset.id()
     );
     let bytes = keyset.to_bytes();
-    let records = &bytes[b"LICASH-KS\x04".len() + 68..];
+    let records = &bytes[b"LICASH-KS\x05".len() + 68..];
     let mut old_parts: Vec<&[u8]> = vec![keyset.issuer()];
     for record in records.as_chunks::<41>().0 {
         old_parts.push(record);
@@ -34,7 +34,7 @@ fn fresh_keys_and_strict_metadata_are_namespaced() {
 fn metadata_rejects_wrong_ids_lengths_order_and_curve_keys() {
     let keyset = IssuerKeys::random(2).unwrap().keyset().unwrap();
     let original = keyset.to_bytes();
-    let tag = b"LICASH-KS\x04".len();
+    let tag = b"LICASH-KS\x05".len();
     let records = tag + 32 + 32 + 4;
     for mutation in 0..7 {
         let mut bytes = original.clone();
@@ -94,7 +94,7 @@ fn blinded_proof_is_scoped_to_the_new_keyset_denomination_and_target() {
 #[test]
 fn signing_keys_cannot_be_reused_even_with_a_recomputed_metadata_id() {
     let original = IssuerKeys::random(2).unwrap().keyset().unwrap().to_bytes();
-    let tag = b"LICASH-KS\x04".len();
+    let tag = b"LICASH-KS\x05".len();
     let start = tag + 68;
     for mutation in 0..4 {
         let mut bytes = original.clone();
@@ -113,9 +113,9 @@ fn signing_keys_cannot_be_reused_even_with_a_recomputed_metadata_id() {
             _ => bytes[start + 8..start + 41].fill(0),
         }
         let format = crypto::tagged_hash(
-            "licash/note-format/v4",
+            "licash/note-format/v5",
             &[
-                b"licash/note/v2",
+                b"licash/note/v3",
                 b"LICASH-V2-secp256k1_XMD:SHA-256_SSWU_RO_",
             ],
         );
@@ -154,7 +154,7 @@ fn seeded_issuer_keys_are_deterministic_and_independent_per_index_and_size() {
     // Hubs check their stored keysets against this derivation at startup.
     assert_eq!(
         hex::encode(keyset.id()),
-        "8ad81ac14ea0f8010491db5955735de79d6695b063213b1b003b24b413f76818"
+        "348c118699ce7f6244a6c6bc1d01d52b50d10debbd298d67d3041bc0272066bd"
     );
     let again = IssuerKeys::from_seed(&[5; 32], 0, 3).unwrap();
     assert_eq!(again.keyset().unwrap(), keyset);

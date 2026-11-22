@@ -146,11 +146,7 @@ fn public_metadata_contains_ys_and_terms_not_the_payer_note_openings() {
         &cert.metadata().terms().to_bytes()
     );
     for note in &notes {
-        for secret_field in [
-            note.message().owner(),
-            note.message().nonce(),
-            note.message().hold(),
-        ] {
+        for secret_field in [note.message().owner(), note.message().hold()] {
             assert!(!metadata.windows(32).any(|window| window == secret_field));
         }
     }
@@ -484,7 +480,7 @@ fn receipt_authentication_rechecks_the_expected_keyset_and_each_declared_denomin
     ] {
         let mut bytes = signed.proposal().commitment_bytes();
         let amount_at = if at == input_at {
-            at + b"licash/note/v2".len()
+            at + b"licash/note/v3".len()
         } else {
             at
         };

@@ -9,7 +9,7 @@ use licash::{
 };
 
 /// Tag, keyset, public fields, C, evidence tag, DLEQ.
-const UNLINKED_NOTE_BYTES: usize = 10 + 32 + 104 + 33 + 1 + 64;
+const UNLINKED_NOTE_BYTES: usize = 10 + 32 + 72 + 33 + 1 + 64;
 /// Where the request's capability starts: tag, keyset, denomination, B.
 const CAPABILITY_AT: usize = 10 + 32 + 8 + 33;
 

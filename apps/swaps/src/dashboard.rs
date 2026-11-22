@@ -18,7 +18,7 @@ use licash_store::Kind;
 use rusqlite::Connection;
 
 /// The versions of the components read: the wallet's and the provider's.
-const WALLET_VERSION: i64 = 5;
+const WALLET_VERSION: i64 = 6;
 const PROVIDER_VERSION: i64 = 1;
 
 /// Why a swap ended without paying, beside a reason recorded.

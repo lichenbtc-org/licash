@@ -15,26 +15,24 @@ fn derive(index: u32, hold: &HoldRoot) -> Derivation {
 }
 
 #[test]
-fn canonical_message_binds_amount_owner_nonce_and_hold_key() {
+fn canonical_message_binds_amount_owner_and_hold_key() {
     let root = HoldRoot::from_scalar(Scalar::from(29u64)).unwrap();
     let output = derive(0, &root);
     let message = output.message();
     let bytes = message.to_bytes();
-    assert_eq!(MESSAGE_BYTES, 118);
-    assert_eq!(&bytes[..14], b"licash/note/v2");
+    assert_eq!(MESSAGE_BYTES, 86);
+    assert_eq!(&bytes[..14], b"licash/note/v3");
     assert_eq!(&bytes[14..22], &1u64.to_be_bytes());
     assert_eq!(&bytes[22..54], message.owner());
-    assert_eq!(&bytes[54..86], message.nonce());
-    assert_eq!(&bytes[86..], message.hold());
+    assert_eq!(&bytes[54..], message.hold());
     assert_eq!(Message::from_bytes(&bytes).unwrap(), *message);
     let y = message.identifier().unwrap();
-    for field in 0..4 {
+    for field in 0..3 {
         let mut altered = bytes;
         match field {
             0 => altered[14..22].copy_from_slice(&2u64.to_be_bytes()),
             1 => altered[22..54].copy_from_slice(&point(31).x_only()),
-            2 => altered[54] ^= 1,
-            _ => altered[86..].copy_from_slice(&point(37).x_only()),
+            _ => altered[54..].copy_from_slice(&point(37).x_only()),
         }
         assert_ne!(
             Message::from_bytes(&altered).unwrap().identifier().unwrap(),
@@ -48,16 +46,16 @@ fn invalid_encodings_do_not_acquire_default_authority() {
     let root = HoldRoot::from_seed(&[3; 32]).unwrap();
     let output = derive(0, &root);
     let bytes = output.message().to_bytes();
-    assert!(Message::from_bytes(&bytes[..117]).is_err());
+    assert!(Message::from_bytes(&bytes[..85]).is_err());
     let mut trailing = bytes.to_vec();
     trailing.push(0);
     assert!(Message::from_bytes(&trailing).is_err());
     let mut wrong_tag = bytes;
     wrong_tag[13] = b'1';
     assert!(Message::from_bytes(&wrong_tag).is_err());
-    assert!(Message::new(0, point(17).x_only(), [0; 32], point(29).x_only()).is_err());
-    assert!(Message::new(1, [0xff; 32], [0; 32], point(29).x_only()).is_err());
-    assert!(Message::new(1, point(17).x_only(), [0; 32], [0xff; 32]).is_err());
+    assert!(Message::new(0, point(17).x_only(), point(29).x_only()).is_err());
+    assert!(Message::new(1, [0xff; 32], point(29).x_only()).is_err());
+    assert!(Message::new(1, point(17).x_only(), [0xff; 32]).is_err());
     assert!(Derivation::derive(1, Point([0; 33]), root.public(), &[23; 32], 0).is_err());
     assert!(Derivation::derive(1, point(17), Point([0; 33]), &[23; 32], 0).is_err());
 }
@@ -86,7 +84,7 @@ fn root_derivation_is_independent_and_secret_debug_output_is_redacted() {
 fn what_is_derived_for_an_output_prints_no_key() {
     let receipt = licash::note::derive_output(&point(17), &[23; 32], 1).unwrap();
     let printed = format!("{receipt:?} {receipt:#?}");
-    for key in [&receipt.seed[..], &receipt.secret.nonce[..]] {
+    for key in [&receipt.seed[..], &receipt.blinding.0[..]] {
         assert!(!printed.contains(&hex::encode(key)), "{printed}");
         assert!(!printed.contains(&format!("{key:?}")), "{printed}");
     }
@@ -130,7 +128,6 @@ fn hold_root_rotation_changes_y_not_the_existing_spending_derivation() {
     let before = derive(2, &old);
     let after = derive(2, &new);
     assert_eq!(before.message().owner(), after.message().owner());
-    assert_eq!(before.message().nonce(), after.message().nonce());
     assert_ne!(before.message().hold(), after.message().hold());
     assert_ne!(
         before.message().identifier().unwrap(),
@@ -206,7 +203,7 @@ fn all_32_outputs_have_independent_hold_keys_and_identifiers() {
 /// neither equality nor what a copy or a re-decoded message computes.
 #[test]
 fn a_remembered_identifier_does_not_change_the_message() {
-    let fresh = || Message::new(8, point(17).x_only(), [7; 32], point(29).x_only()).unwrap();
+    let fresh = || Message::new(8, point(17).x_only(), point(29).x_only()).unwrap();
     let (used, untouched) = (fresh(), fresh());
     let y = used.identifier().unwrap();
     assert_eq!(used.identifier().unwrap(), y);
@@ -220,6 +217,6 @@ fn a_remembered_identifier_does_not_change_the_message() {
             .unwrap(),
         y
     );
-    let other = Message::new(8, point(17).x_only(), [8; 32], point(29).x_only()).unwrap();
+    let other = Message::new(8, point(17).x_only(), point(31).x_only()).unwrap();
     assert!(other != used && other.identifier().unwrap() != y);
 }

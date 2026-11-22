@@ -20,13 +20,13 @@ use crate::{
     Error,
 };
 
-const TAG: &[u8] = b"licash/note/v2";
-const NOTE_TAG: &[u8] = b"LICASH-NT\x04";
+const TAG: &[u8] = b"licash/note/v3";
+const NOTE_TAG: &[u8] = b"LICASH-NT\x05";
 const DST: &[u8] = b"LICASH-V2-secp256k1_XMD:SHA-256_SSWU_RO_";
-const KEYSET_TAG: &[u8] = b"LICASH-KS\x04";
-const ISSUED_TAG: &[u8] = b"LICASH-IS\x04";
+const KEYSET_TAG: &[u8] = b"LICASH-KS\x05";
+const ISSUED_TAG: &[u8] = b"LICASH-IS\x05";
 const MAX_KEYS: usize = 64;
-pub const PUBLIC_FIELDS_BYTES: usize = 8 + 32 + 32 + 32;
+pub const PUBLIC_FIELDS_BYTES: usize = 8 + 32 + 32;
 pub const MESSAGE_BYTES: usize = TAG.len() + PUBLIC_FIELDS_BYTES;
 
 fn bad(reason: &str) -> Error {
@@ -46,10 +46,12 @@ pub(crate) fn non_identity(point: &Point) -> Result<ProjectivePoint, Error> {
 /// ([`crate::crypto::dleq_prove`]). v4 is v3 with grants anyone verifies
 /// ([`crate::authorization::Grant`]): a note opened from one carries its
 /// packet's proof ([`Evidence::Granted`]), and its owners sign the grant's
-/// head. A note, keyset or Base of an earlier format is refused by its
-/// framing and id, never verified under the other rule.
+/// head. v5 is v4 with a message of the denomination, owner key and hold
+/// key alone: the owner key is one-time, so a nonce made nothing unique
+/// that it did not. A note, keyset or Base of an earlier format is refused
+/// by its framing and id, never verified under the other rule.
 fn format_commitment() -> [u8; 32] {
-    tagged_hash("licash/note-format/v4", &[TAG, DST])
+    tagged_hash("licash/note-format/v5", &[TAG, DST])
 }
 
 /// Separately typed public issuer metadata. Its ID commits the exact note
@@ -732,7 +734,6 @@ impl MintLedger {
 pub struct Message {
     denom: u64,
     owner: [u8; 32],
-    nonce: [u8; 32],
     hold: [u8; 32],
 }
 
@@ -743,23 +744,13 @@ impl std::fmt::Debug for Message {
 }
 
 impl Message {
-    pub fn new(
-        denom: u64,
-        owner: [u8; 32],
-        nonce: [u8; 32],
-        hold: [u8; 32],
-    ) -> Result<Self, Error> {
+    pub fn new(denom: u64, owner: [u8; 32], hold: [u8; 32]) -> Result<Self, Error> {
         if denom == 0 {
             return Err(bad("zero note denomination"));
         }
         k256::schnorr::VerifyingKey::from_bytes(&owner).map_err(|_| Error::InvalidPoint)?;
         k256::schnorr::VerifyingKey::from_bytes(&hold).map_err(|_| Error::InvalidPoint)?;
-        Ok(Self {
-            denom,
-            owner,
-            nonce,
-            hold,
-        })
+        Ok(Self { denom, owner, hold })
     }
 
     pub fn denomination(&self) -> u64 {
@@ -767,9 +758,6 @@ impl Message {
     }
     pub fn owner(&self) -> &[u8; 32] {
         &self.owner
-    }
-    pub fn nonce(&self) -> &[u8; 32] {
-        &self.nonce
     }
     pub fn hold(&self) -> &[u8; 32] {
         &self.hold
@@ -788,8 +776,7 @@ impl Message {
         let mut bytes = [0; PUBLIC_FIELDS_BYTES];
         bytes[..8].copy_from_slice(&self.denom.to_be_bytes());
         bytes[8..40].copy_from_slice(&self.owner);
-        bytes[40..72].copy_from_slice(&self.nonce);
-        bytes[72..].copy_from_slice(&self.hold);
+        bytes[40..].copy_from_slice(&self.hold);
         bytes
     }
 
@@ -800,8 +787,7 @@ impl Message {
         Self::new(
             u64::from_be_bytes(bytes[..8].try_into().expect("checked field length")),
             bytes[8..40].try_into().expect("checked field length"),
-            bytes[40..72].try_into().expect("checked field length"),
-            bytes[72..].try_into().expect("checked field length"),
+            bytes[40..].try_into().expect("checked field length"),
         )
     }
 
@@ -932,7 +918,7 @@ impl Ownership {
     }
 
     /// Recompute H("licash/tweak", compressed root, seed), then root+tG.
-    /// This checks only the owner field. Issuance, monetary denomination/nonce,
+    /// This checks only the owner field. Issuance, monetary denomination,
     /// Q authorization and eligibility remain separate predicate obligations.
     pub fn verify(&self, root: &Point, message: &Message) -> Result<(), Error> {
         non_identity(root)?;
@@ -1000,8 +986,7 @@ impl Derivation {
         }
         let message = Message::new(
             denom,
-            derived.secret.owner,
-            derived.secret.nonce,
+            derived.owner_point.x_only(),
             Point::from_projective(&point).x_only(),
         )?;
         Ok(Self {
@@ -1062,20 +1047,6 @@ impl Derivation {
 }
 
 // Owner keys and issuance evidence (the paper's "Owner keys" and "Notes").
-
-/// A note's secret: its one-time owner key and a nonce. The public identifier
-/// hashes these with the denomination, never the secret independently of value.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Secret {
-    pub owner: [u8; 32],
-    pub nonce: [u8; 32],
-}
-
-impl std::fmt::Debug for Secret {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Secret(owner {}..)", hex::encode(&self.owner[..6]))
-    }
-}
 
 /// What shows anyone that `C = k Y` for the denomination's key, without
 /// the key: a spend's recipient, a claim statement, a counter's checker.
@@ -1181,14 +1152,13 @@ pub fn bound_tweak(spend: &Point, seed: &[u8; 32]) -> ScalarBytes {
 /// under shared secret `shared`.
 #[derive(Clone)]
 pub struct Derived {
-    pub secret: Secret,
     pub tweak: ScalarBytes,
     pub seed: [u8; 32],
     pub blinding: ScalarBytes,
     pub owner_point: Point,
 }
 
-/// Names the point alone: the seed and the nonce in the secret are keys,
+/// Names the point alone: the seed, the tweak and the blinding are keys,
 /// which no log or panic message may print.
 impl std::fmt::Debug for Derived {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1199,20 +1169,16 @@ impl std::fmt::Debug for Derived {
 }
 
 pub fn derive_output(recipient_spend: &Point, shared: &[u8; 32], j: u32) -> Result<Derived, Error> {
-    // Reusing an ephemeral/index can reuse this owner key across amounts;
-    // message(denom) still produces distinct monetary identifiers Y_d.
+    // The owner key is one-time only if the shared secret is: a payer
+    // draws its ephemeral key anew for each spend. Reusing one gives the
+    // same output again, which the hub issues once.
     let jb = j.to_be_bytes();
     let seed = tagged_hash("licash/seed", &[shared, &jb]);
     let tweak = bound_tweak(recipient_spend, &seed).to_scalar()?;
     let owner = recipient_spend.to_projective()? + generator_mul(&tweak);
     let owner_point = Point::from_projective(&owner);
-    let nonce = tagged_hash("licash/nonce", &[shared, &jb]);
     let blinding = scalar_from_hash(&tagged_hash("licash/blind", &[shared, &jb]));
     Ok(Derived {
-        secret: Secret {
-            owner: owner_point.x_only(),
-            nonce,
-        },
         tweak: ScalarBytes::from_scalar(&tweak),
         seed,
         blinding: ScalarBytes::from_scalar(&blinding),

@@ -66,13 +66,12 @@ fn every_public_message_field_remains_bound_after_minting() {
         .unwrap()
         .open(ledger.keyset(), &output)
         .unwrap();
-    for field in 0..4 {
+    for field in 0..3 {
         let mut bytes = note.message().to_bytes();
         match field {
             0 => bytes[14..22].copy_from_slice(&2u64.to_be_bytes()),
             1 => bytes[22..54].copy_from_slice(&point(31).x_only()),
-            2 => bytes[54] ^= 1,
-            _ => bytes[86..].copy_from_slice(&point(37).x_only()),
+            _ => bytes[54..].copy_from_slice(&point(37).x_only()),
         }
         assert!(Note::from_parts(
             ledger.keyset(),

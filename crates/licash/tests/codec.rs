@@ -8,9 +8,9 @@ use licash::{
     spend::{Output, Proposal},
 };
 
-const NOTE_TAG: &[u8] = b"LICASH-NT\x04";
+const NOTE_TAG: &[u8] = b"LICASH-NT\x05";
 /// Tag, keyset, public fields, C, evidence tag, DLEQ, blinding, commitment.
-const LINKED_NOTE_BYTES: usize = 10 + 32 + 104 + 33 + 1 + 64 + 32 + 66;
+const LINKED_NOTE_BYTES: usize = 10 + 32 + 72 + 33 + 1 + 64 + 32 + 66;
 
 struct Fixture {
     keys: IssuerKeys,
@@ -142,7 +142,7 @@ fn notes_roundtrip_and_decode_only_under_their_keyset() {
 fn note_decoding_verifies_the_signature_and_evidence() {
     let f = fixture();
     let bytes = f.inputs[0].1.to_bytes();
-    let evidence = 10 + 32 + 104 + 33;
+    let evidence = 10 + 32 + 72 + 33;
     // Any change to C, the evidence tag, the DLEQ or the blinding is refused.
     // The unlink commitment that follows is the issuer's, checked only when
     // unlinking, not by the evidence.
@@ -177,7 +177,7 @@ fn a_peek_reads_what_a_note_claims_without_verifying_it() {
     assert!(!peek.unlinked);
     refuses_framing_errors(&bytes, |b| Note::peek(b).is_ok());
     // An unlinked form that does not verify still frames, and says so.
-    let evidence = 10 + 32 + 104 + 33;
+    let evidence = 10 + 32 + 72 + 33;
     let unlinked = [
         &bytes[..evidence],
         &[0],
