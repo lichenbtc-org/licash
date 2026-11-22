@@ -17,7 +17,7 @@
 \renewcommand\@seccntformat[1]{\csname the#1\endcsname.\hspace{0.7em}}
 \makeatother
 
-\newcommand{\paperversion}{0.13}
+\newcommand{\paperversion}{0.14}
 
 \newcommand{\vmax}{V_{\max}}
 \newcommand{\wH}{w_H}
@@ -87,9 +87,9 @@ The difference is also one of privacy. Routing nodes see the hops they forward, 
 \begin{gather*}
 \varsigma = \Ht{ecdh}(\mathsf{xcoord}(aB_v)),\qquad s_j = \Ht{seed}(\varsigma, j),\\
 P_j = B_s + \Ht{tweak}(B_s, s_j)\,G,\qquad Q_j = B_h + \Ht{hold}(B_h,B_s,s_j)\,G,\\
-x_j = (d_j, P_j, \nu_j, Q_j),\qquad B_j = \htc(x_j) + r_jG,
+x_j = (d_j, P_j, Q_j),\qquad B_j = \htc(x_j) + r_jG,
 \end{gather*}
-with the nonce $\nu_j$ and blinding $r_j$ also derived from $\varsigma$. The recipient recomputes both keys from $A$ before accepting an output. Only she can sign for the \emph{owner key} $P_j$, which authorizes spending the note, and for the \emph{hold key} $Q_j$, which authorizes claiming it on Bitcoin. Change is derived the same way and is not marked as change. Neither key reveals the address or any other note of its owner.
+with the blinding $r_j$ also derived from $\varsigma$. Unlike in Cashu, the message has no nonce, since $P_j$ is used once. The payer draws $A$ anew for each spend, since the same $A$ to the same recipient would give the same outputs, which the hub issues once. The recipient recomputes both keys from $A$ before accepting an output. Only she can sign for the \emph{owner key} $P_j$, which authorizes spending the note, and for the \emph{hold key} $Q_j$, which authorizes claiming it on Bitcoin. Change is derived the same way and is not marked as change. Neither key reveals the address or any other note of its owner.
 
 \paragraph{Unlinking.} The proof received at issuance contains $B$, so it would link a later spend to that issuance. At any time after issuance, the holder can replace it with a proof on $(Y,C)$, made in a separate session with the hub in which the Chaum-Pedersen protocol is blinded the way one blinds a Schnorr signature. With the issuance the hub sends $(R_1,R_2)=(wG,wB)$ for a nonce $w$. To unlink, the holder picks blinding scalars $\alpha,\beta$ and sends the blinded challenge $\gamma$:
 \[
@@ -170,7 +170,7 @@ A claim lists items of four kinds, at most a number that the contract's terms fi
 \end{itemize}
 The digest $E$ is a hash of the contract's digest $D$, the hub's note keys, $b$, the items, the spends, locks and activations that the items refer to, and the public fields of every note whose hold key must sign. It leaves out the signatures themselves. Each item carries a \emph{hold authorization}, a BIP340 signature under its hold key $Q_j$ over the note's public fields, $D$, $b$ and $E$. That signature is the whole of the authority to recover the item: the claim does not name an address and does not contain a proof. The publication holds, after the claim, the data that lets anyone check it: the issuance proof of each settled note, the body of each spend or lock whose outputs it claims, and the Bitcoin inclusion of any lock activation that it relies on. The amount satisfies $b \le \min(\vmax, \sum_{i\notin F} d_i)$, where $F$ is the set of fallbacks.
 
-\paragraph{The size of a claim.} Notes have fixed denominations, so a wallet that receives many payments holds many notes, and the publication that lists them is a Bitcoin transaction. The limit on items keeps it small enough to be relayed and the proof of a dispute affordable. In the current implementation a claim lists up to 32 items and takes at most about 12~kvB, well below the standard transaction limit. A recovery that is not disputed is about 15~kvB in all; the hub's assertion of a proof adds about 8~kvB, and a challenge, made only against a false proof, about 20~kvB. The hub's proof takes about ten minutes on a consumer GPU. Notes beyond the limit, as after receiving offline, are held on trust until the wallet merges them with the hub. Merging may cost the hub's fee and shows the hub that the notes belong together, so a wallet merges notes after they rest, and sooner as it nears the limit.
+\paragraph{The size of a claim.} Notes have fixed denominations, so a wallet that receives many payments holds many notes, and the publication that lists them is a Bitcoin transaction. The limit on items keeps it small enough to be relayed and the proof of a dispute affordable. In the current implementation a claim lists up to 32 items and takes at most about 13~kvB, well below the standard transaction limit. A recovery that is not disputed is about 15~kvB in all; the hub's assertion of a proof adds about 8~kvB, and a challenge, made only against a false proof, about 20~kvB. The hub's proof takes about ten minutes on a consumer GPU. Notes beyond the limit, as after receiving offline, are held on trust until the wallet merges them with the hub. Merging may cost the hub's fee and shows the hub that the notes belong together, so a wallet merges notes after they rest, and sooner as it nears the limit.
 
 Once a publication confirms, the hub records the notes and outputs that it claims as spent, before it decides on the claim. Whatever the holder is paid, she has given up her claimed notes for it, so no note is paid both on Bitcoin and by the hub. The hub keeps each claim's hold authorizations, to cite against a claim of the same notes in another contract. A contract pays once, so within one contract a later claim replaces an earlier one.
 
