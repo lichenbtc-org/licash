@@ -834,7 +834,7 @@ impl Hub {
                 return Err(Refusal::Offered.into());
             }
             for output in proposal.outputs() {
-                if issued(tx, keyset.id(), output)? {
+                if issued(tx, output)? {
                     return Err(Refusal::Reissued.into());
                 }
             }
@@ -1130,11 +1130,12 @@ impl Hub {
     }
 }
 
-fn issued(tx: &Transaction<'_>, keyset: &[u8; 32], output: &Output) -> Result<bool, Error> {
+/// Whether `output` was issued or reserved before, under any keyset.
+fn issued(tx: &Transaction<'_>, output: &Output) -> Result<bool, Error> {
     Ok(tx
         .query_row(
-            "SELECT 1 FROM issued WHERE keyset = ?1 AND denom = ?2 AND blinded = ?3",
-            params![keyset, sql(output.denomination())?, &output.blinded().0],
+            "SELECT 1 FROM issued WHERE blinded = ?1",
+            [&output.blinded().0],
             |_| Ok(()),
         )
         .optional()?

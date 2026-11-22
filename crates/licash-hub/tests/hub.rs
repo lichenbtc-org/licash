@@ -812,6 +812,47 @@ fn outputs_are_issued_once() {
     assert_eq!(refused(copy.offer(&hub)), Refusal::Reissued);
 }
 
+/// An output made again under another keyset, as by a payer who uses an
+/// ephemeral key twice across keysets, is the same note: its identifier
+/// does not name its keyset, so only one copy could be spent. It is
+/// refused as under the first, before the payer's inputs are retired.
+#[test]
+fn outputs_are_issued_once_whatever_their_keyset() {
+    let files = files();
+    let hub = open(&files, Policy::default());
+    let (_, keyset) = issuer(&files);
+    let (alice, bob) = (owner(1), owner(2));
+    let first = Spend::new(&keyset, &[mint(&files, &alice, 8)], &[(bob.address(), 8)]);
+    first.complete(&hub, &keyset);
+    drop(hub);
+    let mut seed = [0; 32];
+    let text = std::fs::read_to_string(&files.seed).unwrap();
+    hex::decode_to_slice(text.trim(), &mut seed).unwrap();
+    let keys = IssuerKeys::from_seed(&seed, 1, MAX_POW).unwrap();
+    sql(&files.db)
+        .execute(
+            "INSERT INTO keysets (id, idx, max_pow, created_at) VALUES (?1, 1, ?2, 0)",
+            rusqlite::params![keys.id(), MAX_POW],
+        )
+        .unwrap();
+    let hub = open(&files, Policy::default());
+    let other = keys.keyset().unwrap();
+    let input = mint_under(&keys, &other, &alice, 8);
+    let mut copy = Spend::new(&other, std::slice::from_ref(&input), &[(bob.address(), 8)]);
+    copy.outputs = first.outputs.clone();
+    copy.proposal = Proposal::new(
+        &other,
+        &copy.notes(),
+        first.proposal.ephemeral(),
+        first.proposal.outputs().to_vec(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(refused(copy.offer(&hub)), Refusal::Reissued);
+    // The same input, to outputs of its own, is served under that keyset.
+    Spend::new(&other, &[input], &[(bob.address(), 8)]).complete(&hub, &other);
+}
+
 #[test]
 fn only_the_hubs_own_offers_release_and_only_untimed_spends_are_served() {
     let files = files();

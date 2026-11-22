@@ -24,9 +24,10 @@ use crate::Error;
 pub(crate) use licash_store::now;
 
 /// The component the ledger's tables are, and its version. 4 issues notes
-/// of the note format v5 (a message without a nonce); a ledger of 3 holds
-/// v4 notes, one of 2 v3 notes and grants, one of 1 v2 notes, keysets and
-/// proofs: each is refused rather than read under the other rule.
+/// of the note format v5 (a message without a nonce), each blinded point
+/// once whatever its keyset; a ledger of 3 holds v4 notes, one of 2 v3
+/// notes and grants, one of 1 v2 notes, keysets and proofs: each is
+/// refused rather than read under the other rule.
 pub(crate) const COMPONENT: &str = "ledger";
 pub(crate) const VERSION: i64 = 4;
 
@@ -128,7 +129,10 @@ CREATE TABLE spent (
 CREATE INDEX spent_proposal ON spent (proposal, position);
 -- Each output the hub issued or, without a boot, reserved for a lock's
 -- branch; a lock's with its issuance, and once answered, its unlink
--- record. A reserved output is issued to nobody else.
+-- record. A reserved output is issued to nobody else. A blinded point is
+-- issued once under any keyset: one made again, as by an ephemeral key
+-- used twice, is the same note, whose identifier does not name its keyset
+-- and would be spent once.
 CREATE TABLE issued (
     keyset BLOB NOT NULL REFERENCES keysets (id),
     denom INTEGER NOT NULL,
@@ -139,7 +143,7 @@ CREATE TABLE issued (
     boot BLOB,
     issuance BLOB CHECK (issuance IS NULL OR boot IS NOT NULL),
     answered BLOB CHECK (answered IS NULL OR boot IS NOT NULL),
-    PRIMARY KEY (keyset, denom, blinded)
+    PRIMARY KEY (blinded)
 ) STRICT;
 -- Notes paid to the hub, a lock's refund branch from `REFUND_INDEX`.
 CREATE TABLE income (
