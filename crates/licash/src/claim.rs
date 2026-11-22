@@ -401,8 +401,7 @@ impl UnsignedClaim {
                 &tagged_hash("licash/claim-activations/v2", &[&activation_bytes]),
             ],
         );
-        let no_exemptions = tagged_hash("licash/hold-exemptions/v2", &[&0u32.to_be_bytes()]);
-        let digest = tagged_hash("licash/claim/v2", &[&body_root, &hold_root, &no_exemptions]);
+        let digest = tagged_hash("licash/claim/v3", &[&body_root, &hold_root]);
         parts.sources = sources.into_values().collect();
         Ok(Self {
             context,

@@ -181,14 +181,7 @@ fn the_e_formula_counts_and_binds_every_item() {
     let hold = hold::authorization_root(&claim.parts().authorizations, 2).unwrap();
     assert_eq!(
         claim.digest(),
-        &crypto::tagged_hash(
-            "licash/claim/v2",
-            &[
-                &body,
-                &hold,
-                &crypto::tagged_hash("licash/hold-exemptions/v2", &[&empty])
-            ]
-        )
+        &crypto::tagged_hash("licash/claim/v3", &[&body, &hold])
     );
 }
 
