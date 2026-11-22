@@ -43,13 +43,14 @@ pub(super) const HEADER_CYCLES: u64 = 28_000;
 /// header once, on the zkVM's accelerator: 3,000 headers more took 28.2 M
 /// cycles on 73.0 M (9.4 k each), 10 k with a margin of its own.
 pub(super) const COMPACT_HEADER_CYCLES: u64 = 10_000;
-/// Of the program of note format v4, which verifies each note a spend is
-/// read with once: the benchmark's answered input (`r0/host/bench.bin`, a
-/// spend cited whole), 15 headers and 35.2 kB more, took 61.1 M cycles
-/// (79.2 M under the program before). The statement's answered test input
-/// of funded notes, 18.8 kB, took 35.4 M: they cost more a byte, and the
-/// model reads them 7% under.
-pub(super) const BYTE_CYCLES: u64 = 1_740;
+/// Of the program of note format v5, whose notes are 32 bytes less for
+/// the same work: the benchmark's answered input (`r0/host/bench.bin`), 15
+/// headers and 26.1 kB more of which 2.0 kB of a spend's body cited by its
+/// signatures, took 50.7 M cycles (51.7 M under the program of v4, of its
+/// like 3.6 kB longer); the statement's input of funded notes, 20.7 kB,
+/// 40.6 M; and of 32 notes each cited from a spend of one output, 34.4 kB
+/// of which 7.8 kB of bodies, 56.1 M. Read 5% over, 5% under and 1% over.
+pub(super) const BYTE_CYCLES: u64 = 2_200;
 
 /// Cycles each byte of a spend's body costs where the spend is cited by
 /// its owners' signatures ([`Evidence::Signed`]): hashed to its id and read
@@ -1181,38 +1182,41 @@ mod tests {
             tail: 100.0,
         };
         assert_eq!(speed.seconds(500_001), MARGIN * (3.0 * 3.0 + 100.0));
-        // The benchmark's answered input, 36,399 bytes of which 15
-        // headers, under the program of note format v4: 61.1 M measured.
-        let measured: f64 = 61_103_704.0;
-        let estimated = cycles(COMPACT_HEADER_CYCLES, 15, 36_399 - 15 * 80) as f64;
-        assert!((estimated / measured - 1.0).abs() < 0.01, "{estimated}");
-        // The statement's answered test input of funded notes, 20,009
-        // bytes: 35.4 M, read 7% under.
-        let estimated = cycles(COMPACT_HEADER_CYCLES, 15, 20_009 - 15 * 80) as f64;
-        assert!((estimated / 35_358_443.0 - 1.0).abs() < 0.08, "{estimated}");
+        // The benchmark's answered input, 27,309 bytes of which 15 headers
+        // and 2,044 of a body, under the program of note format v5: 50.7 M
+        // measured, read 5% over.
+        let read = |bytes: u64| {
+            cycles_with_bodies(COMPACT_HEADER_CYCLES, 15, bytes - 15 * 80, 2_044) as f64
+        };
+        let estimated = read(27_309) / 50_667_588.0;
+        assert!((1.0..1.06).contains(&estimated), "{estimated}");
+        // The statement's answered input of funded notes, 20,714 bytes, the
+        // same body: 40.6 M, read 5% under.
+        let estimated = read(20_714) / 40_620_898.0;
+        assert!((0.94..1.0).contains(&estimated), "{estimated}");
     }
 
     /// The bodies of spends cited by their signatures are hashed, not read:
     /// the statement's input of 32 notes each cited from a spend of the
-    /// largest body, 565,134 bytes of which 543,360 of bodies, took 42.9 M
-    /// cycles, and of each cited from a spend of the least, 30,574 bytes of
-    /// which 8,800, 32.2 M. Read over, never under; as bytes like others,
-    /// 23 times over.
+    /// largest body, 504,486 bytes of which 477,824 of bodies, took 65.4 M
+    /// cycles, and of each cited from a spend of the least, 34,438 bytes of
+    /// which 7,776, 56.1 M. Read over, never under; as bytes like others,
+    /// 17 times over.
     #[test]
     fn a_spends_body_cited_by_signatures_costs_its_hashing() {
         let read = |bytes: u64, bodies: u64| {
             cycles_with_bodies(COMPACT_HEADER_CYCLES, 15, bytes - 15 * 80, bodies) as f64
         };
         for (bytes, bodies, measured) in [
-            (565_134, 543_360, 42_891_265.0),
-            (30_574, 8_800, 32_239_253.0),
+            (504_486, 477_824, 65_425_267.0),
+            (34_438, 7_776, 56_071_660.0),
         ] {
             let estimated = read(bytes, bodies);
             assert!((1.0..1.4).contains(&(estimated / measured)), "{estimated}");
         }
-        assert!(read(565_134, 0) > 20.0 * 42_891_265.0);
+        assert!(read(504_486, 0) > 15.0 * 65_425_267.0);
         // Bodies are at most the bytes they are of.
-        assert_eq!(read(30_574, 10_000_000), read(30_574, 30_574 - 15 * 80));
+        assert_eq!(read(34_438, 10_000_000), read(34_438, 34_438 - 15 * 80));
         // An input that does not read counts all its bytes as others'.
         let mut bytes = Vec::new();
         bytes.extend(3u32.to_be_bytes());
@@ -1227,14 +1231,14 @@ mod tests {
 
     /// The largest proof a contract of the hub citing spends by their
     /// signatures commits it to ([`licash::recovery::SIGNED_FROM`]) is a
-    /// chained one's, and bounds the most evidence a claim may need: 42.9 M
+    /// chained one's, and bounds the most evidence a claim may need: 65.4 M
     /// measured with every spend's body the largest.
     #[test]
     fn a_contract_citing_by_signatures_bounds_its_worst_evidence() {
         use licash::recovery::{BOUND_BASE_FROM, SIGNED_FROM};
         let worst = |graph| worst_cycles(105_120, 64_000, 4_000, graph);
         assert_eq!(worst(SIGNED_FROM), worst(BOUND_BASE_FROM));
-        assert!(worst(SIGNED_FROM) > 42_891_265);
+        assert!(worst(SIGNED_FROM) > 65_425_267);
         assert_eq!(
             worst(SIGNED_FROM),
             worst_cycles(1, 64_000, 4_000, SIGNED_FROM)
