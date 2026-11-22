@@ -837,12 +837,13 @@ async fn visited(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
         collected(&dave, 60).await? == 800,
         "Dave got other than 800"
     );
-    let after = changed(phone, held, 30).await?;
-    ensure!(
-        held - after > 800,
-        "{} spent swapping for 800",
-        held - after
-    );
+    // More than the 800 gone: waited for as such, not for any change, the
+    // wallet's own upkeep taking a few sat at any time (NOTES_UPKEEP).
+    let after = until("more than 800 spent swapping for 800", 30, || async {
+        let now = phone.balance().await?;
+        Ok((held.saturating_sub(now) > 800).then_some(now))
+    })
+    .await?;
 
     // What is left there, apart: added with a tap and a word of warning.
     phone.tap_id("balance").await?;
@@ -856,8 +857,11 @@ async fn visited(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     phone.by_id("onchain", 30).await?;
     phone.gone("visited", 60).await?;
     phone.back_to("receive").await?;
-    let now = changed(phone, after, 60).await?;
-    ensure!(now > after, "{now} held once the hub was added");
+    until("more held once the hub was added", 60, || async {
+        let now = phone.balance().await?;
+        Ok((now > after).then_some(now))
+    })
+    .await?;
     Ok(())
 }
 
