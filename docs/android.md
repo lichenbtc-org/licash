@@ -534,6 +534,15 @@ fallback address. The app has no screen for it yet.
   way are untouched. Nothing runs on its own: existing wallets see no change
   until a backup, restore or reset is asked for.
 
+## Upgrading from note format v4
+
+A wallet of the release before note format v5 (wallet schema 5) holds notes
+whose messages carry a nonce, which this version does not read. As from v3
+(below), it is refused when the app starts and its file left as it is:
+before updating, spend or pay out its notes, and let its contracts close,
+with the release before, then clear the app's data and create a new
+wallet. Hubs of v5 are new hubs.
+
 ## Upgrading from note format v3
 
 A wallet of the release before note format v4 (wallet schema 4) holds notes

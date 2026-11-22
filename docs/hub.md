@@ -772,7 +772,7 @@ docker run -d -p 8338:8338 -v licash-hub:/data licash-hub
 ## Upgrading
 
 Stop the hub, back up `<data>` (see the backups above), replace the binary and start it
-again, except from a ledger of schema 2 or 1, whose hub is not replaced (below).
+again, except from a ledger of schema 3, 2 or 1, whose hub is not replaced (below).
 Before starting it:
 
 - Install every program of `r0/programs/` (see `docs/r0.md`): a contract
@@ -780,6 +780,20 @@ Before starting it:
   lacking one responds to none of its contested claims.
 - Expect no migration: a database or file of an earlier layout is refused
   by name, never read nor replaced.
+
+### From a ledger of schema 3
+
+A hub of note format v5 reads a `hub.sqlite` of ledger schema 4 only. A
+note's message is its denomination, owner key and hold key, without the
+nonce that made nothing unique that the one-time owner key did not, so
+every note identifier differs; it issues a blinded point once whatever
+its keyset, and its contracts run a rebuilt program. A ledger of schema 3
+is refused at start, saying so, and left as it is, as from schema 2
+(below): its contracts end under the hub that opened them, which keeps
+its binary, its programs and its URL, and a Docker hub that follows `main`
+must be pinned to its own `sha-` tag first. The steps are those below:
+`licash-hub audit` reads ledgers of schema 1 to 4, and the swaps wallet
+of that release is of wallet schema 5.
 
 ### From a ledger of schema 2
 
