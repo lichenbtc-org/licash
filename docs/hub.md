@@ -363,7 +363,10 @@ hub first saw it, or once F may no longer fund its contract, the hub
 spends one of its own coins F spends back to its wallet, then gives the
 opening up once that is deep. At most 16 signed openings may wait unfunded
 like this; past that, new openings are refused as unavailable, and the
-operator is alerted once. Since graph id 8, a contract's graph returns
+operator is alerted once. F's fee stays within the quote's ceiling (10
+sat/vB) over F unsigned, as wallets check it: when the node estimates a rate
+near or above the ceiling, F is funded again at a lower one. Since graph id 8,
+a contract's graph returns
 the hub its reserve if it never responds. Apps older than the graph id a
 hub quotes open no contract at it until they are updated, while contracts
 opened before keep their terms (see [Upgrading](#upgrading)). Openings are kept in `hub.sqlite`, as sensitive as the seed. Each

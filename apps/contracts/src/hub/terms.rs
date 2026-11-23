@@ -60,7 +60,7 @@ pub fn step(live: usize, max: usize) -> Option<u32> {
 }
 
 /// The most F's and the graph's transactions pay, in sat per 1 000 vB.
-const MAX_RATE_SAT_PER_KVB: u64 = 10_000;
+pub(super) const MAX_RATE_SAT_PER_KVB: u64 = 10_000;
 
 /// The most F's and the graph's transactions pay, in sat/vB.
 pub fn quote_ceiling() -> f64 {

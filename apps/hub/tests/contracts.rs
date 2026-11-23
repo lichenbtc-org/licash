@@ -72,6 +72,17 @@ async fn hub_serving(
     dir: &Path,
     range: Option<Range>,
 ) -> Result<(String, Source, Arc<Hub>)> {
+    serve(rt, dir, range, None).await
+}
+
+/// As [`hub_serving`], its openings' chain the node estimating every fee at
+/// `rate` sat/vB, if any.
+async fn serve(
+    rt: &Regtest,
+    dir: &Path,
+    range: Option<Range>,
+    rate: Option<f64>,
+) -> Result<(String, Source, Arc<Hub>)> {
     std::fs::create_dir_all(dir)?;
     let (seed, db) = (dir.join("seed"), dir.join("hub.sqlite"));
     Hub::init(&seed, &db, NOTE_POW)?;
@@ -83,7 +94,11 @@ async fn hub_serving(
     );
     let source: Source = url.parse()?;
     let keyset = hub.info().keysets[0].clone();
-    let openings = Openings::with_wallet(dir, source.clone(), source.clone(), keyset, range);
+    let chain = match rate {
+        Some(rate) => estimating(source.clone(), rate).await?,
+        None => source.clone(),
+    };
+    let openings = Openings::with_wallet(dir, chain, source.clone(), keyset, range);
     let openings = openings.await?;
     let deposits = deposits_for(&hub, &source, dir, &openings)?;
     // An opening takes a deposit of the hub's for her reserve, which it
@@ -99,6 +114,48 @@ async fn hub_serving(
     let url = format!("http://{}", listener.local_addr()?);
     tokio::spawn(async move { axum::serve(listener, app).await });
     Ok((url, source, hub))
+}
+
+/// The node of `real`, but estimating every fee at `rate` sat/vB: a JSON-RPC
+/// in front of it.
+async fn estimating(real: Source, rate: f64) -> Result<Source> {
+    use axum::{extract::State, routing::post, Json};
+    use serde_json::{json, Value};
+    async fn answer(
+        State((real, rate)): State<(Source, f64)>,
+        Json(call): Json<Value>,
+    ) -> Json<Value> {
+        let (method, params) = (
+            call["method"].as_str().unwrap_or_default(),
+            call["params"].clone(),
+        );
+        let id = call["id"].clone();
+        if method == "estimatesmartfee" {
+            let feerate = rate / 100_000.0;
+            return Json(
+                json!({ "result": { "feerate": feerate, "blocks": 6 }, "error": null, "id": id }),
+            );
+        }
+        Json(match real.rpc_optional::<Value>(method, params).await {
+            Ok(result) => json!({ "result": result, "error": null, "id": id }),
+            Err(e) => {
+                // "...: message (code)", as the client words a node's error.
+                let e = e.to_string();
+                let code = e
+                    .rsplit_once('(')
+                    .and_then(|(_, c)| c.trim_end_matches(')').parse::<i64>().ok())
+                    .unwrap_or(-1);
+                json!({ "result": null, "error": { "code": code, "message": e }, "id": id })
+            }
+        })
+    }
+    let app = axum::Router::new()
+        .fallback(post(answer))
+        .with_state((real, rate));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    url.parse()
 }
 
 /// What the wallet finds on the chain to the tip: its coins' total.
@@ -446,6 +503,45 @@ async fn a_wallet_opens_contracts_at_a_hub_and_sees_them_confirm() -> Result<()>
     let again = holder::resume(&wallet, &chain, &mine.join("wallet.sqlite")).await?;
     ensure!(again == contracts);
     ensure!(holder::list(&mine.join("wallet.sqlite"))? == contracts);
+    Ok(())
+}
+
+/// A hub whose node estimates fees above the quote's ceiling funds F at the
+/// ceiling, its fee within it as she checks it (over F unsigned): she signs
+/// F, and it confirms.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_hub_funds_f_within_the_fee_ceiling_however_high_fees_are() -> Result<()> {
+    let rt = Regtest::start_standard()?;
+    let dir = tempfile::tempdir()?;
+    let (url, source, _) = serve(&rt, &dir.path().join("hub"), None, Some(25.0)).await?;
+    let chain = Node(source);
+    let path = dir.path().join("wallet.sqlite");
+    let regtest = ChainProfile::Core30DefaultRegtest;
+    let wallet = Wallet::create(&path, &[8; 32], regtest, Http::new(None)?)?;
+    wallet.add_hub(&url).await?;
+    wallet.watch_silent(None, rt.height()?)?;
+    rt.fund(
+        &wallet.fallback_address()?.script_pubkey(),
+        Amount::from_sat(COIN),
+    )?;
+    rt.mine(1)?;
+    ensure!(scan(&wallet, &chain).await? == COIN);
+
+    let opened = holder::open(&wallet, &chain, &path, &url, ask()).await?;
+    ensure!(opened.phase == Phase::Funded, "{opened:?}");
+    let f = opened.funding.context("no F")?;
+    // Near the ceiling of 10 sat/vB, F signed.
+    let entry: serde_json::Value = chain
+        .0
+        .rpc("getmempoolentry", serde_json::json!([f.to_string()]))
+        .await?;
+    let fee = entry["fees"]["base"].as_f64().context("fee")? * 1e8;
+    let rate = fee.round() / entry["vsize"].as_f64().context("vsize")?;
+    ensure!((8.0..=10.0).contains(&rate), "F at {rate} sat/vB");
+    rt.mine(1)?;
+    let contracts = holder::resume(&wallet, &chain, &path).await?;
+    ensure!(contracts[0].fate == Some(Fate::Live), "{contracts:?}");
     Ok(())
 }
 

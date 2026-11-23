@@ -15,6 +15,25 @@ const KEY_SPEND_WEIGHT: u64 = 230;
 /// The rate F pays when the node estimates none, in sat/vB.
 const FALLBACK_RATE: f64 = 2.0;
 
+/// How many times F is funded again at a lower rate to fit the ceiling.
+const FITS: usize = 3;
+
+/// F's fee, of `prevouts`, and the most the quote's ceiling lets it pay:
+/// its rate over F unsigned, as the opening checks it.
+fn fee_and_ceiling(funding: &Transaction, prevouts: &[TxOut]) -> Result<(u64, u64)> {
+    let sum = |outputs: &[TxOut]| {
+        outputs
+            .iter()
+            .try_fold(0u64, |s, o| s.checked_add(o.value.to_sat()))
+    };
+    let fee = sum(prevouts)
+        .zip(sum(&funding.output))
+        .and_then(|(in_, out)| in_.checked_sub(out))
+        .context("F creates money")?;
+    let most = terms::MAX_RATE_SAT_PER_KVB * funding.vsize() as u64 / 1000;
+    Ok((fee, most))
+}
+
 /// Whether a coin is to lock, as `gettxout` (`found`) says of it: not
 /// when it says none, spent; when it cannot say, as before.
 fn unspent(found: &Result<Value>) -> bool {
@@ -36,6 +55,38 @@ impl Openings {
         value: &TxOut,
         outputs: Vec<TxOut>,
     ) -> Result<(Transaction, Vec<TxOut>)> {
+        let mut rate = self.rate().await;
+        // Its fee at most the quote's ceiling on F unsigned, as she checks
+        // it: a rate near the ceiling, over F signed, pays more. Funded again
+        // at a rate lowered by as much.
+        for _ in 0..FITS {
+            let (funding, prevouts) = self.fund_at(deposit, value, &outputs, rate).await?;
+            let (fee, most) = fee_and_ceiling(&funding, &prevouts)?;
+            if fee <= most || rate <= 1.0 {
+                return Ok((funding, prevouts));
+            }
+            tracing::debug!(
+                fee,
+                most,
+                rate,
+                "F over the fee ceiling at its rate: funded again lower"
+            );
+            // To 0.001 sat/vB, the finest rate the node takes.
+            let lower = (rate * most as f64 / fee as f64 * 0.98 * 1_000.0).floor() / 1_000.0;
+            rate = lower.max(1.0);
+        }
+        self.fund_at(deposit, value, &outputs, rate).await
+    }
+
+    /// [`Openings::fund`] at `rate`, in sat/vB.
+    async fn fund_at(
+        &self,
+        deposit: OutPoint,
+        value: &TxOut,
+        outputs: &[TxOut],
+        rate: f64,
+    ) -> Result<(Transaction, Vec<TxOut>)> {
+        let outputs = outputs.to_vec();
         let unsigned = Transaction {
             version: transaction::Version::TWO,
             lock_time: absolute::LockTime::ZERO,
@@ -48,7 +99,7 @@ impl Openings {
         let options = json!({
             "add_inputs": true,
             "lock_unspents": false,
-            "fee_rate": self.rate().await,
+            "fee_rate": rate,
             "changePosition": unsigned.output.len(),
             "input_weights": [{
                 "txid": deposit.txid.to_string(),
@@ -195,5 +246,29 @@ mod tests {
         assert!(!unspent(&Ok(Value::Null)));
         assert!(unspent(&Ok(json!({ "confirmations": 3, "value": 0.001 }))));
         assert!(unspent(&Err(anyhow::anyhow!("HTTP 403 Forbidden"))));
+    }
+
+    /// F's fee is what its coins hold beyond its outputs, its ceiling the
+    /// quote's rate over F unsigned, as `check_funds` judges it.
+    #[test]
+    fn fs_fee_is_judged_against_the_ceiling_over_f_unsigned() {
+        let coin = |sat| TxOut {
+            value: bitcoin::Amount::from_sat(sat),
+            script_pubkey: bitcoin::ScriptBuf::new_op_return([1]),
+        };
+        // As the node funds it: unsigned.
+        let funding = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn::default(), TxIn::default()],
+            output: vec![coin(60_000), coin(30_000)],
+        };
+        let (fee, most) = fee_and_ceiling(&funding, &[coin(50_000), coin(41_000)]).unwrap();
+        assert_eq!(fee, 1_000);
+        assert_eq!(
+            most,
+            terms::MAX_RATE_SAT_PER_KVB * funding.vsize() as u64 / 1000
+        );
+        assert!(fee_and_ceiling(&funding, &[coin(1), coin(1)]).is_err());
     }
 }
