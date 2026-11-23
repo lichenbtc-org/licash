@@ -641,6 +641,96 @@ async fn an_invoice_is_read_and_what_paying_it_costs_said_before_paying() {
     assert!(refused.contains("final delta"), "{refused}");
 }
 
+/// The service, advertising a spend fee older than it charges until it
+/// refuses an offer for its fee: a hub that raised it since.
+#[derive(Clone)]
+struct Raising {
+    local: Local,
+    advertised: Arc<Mutex<Option<Fee>>>,
+}
+
+impl Transport for Raising {
+    fn request(
+        &self,
+        url: &str,
+        body: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = Result<Response, String>> + Send {
+        let (this, url) = (self.clone(), url.to_owned());
+        async move {
+            let mut response = this.local.request(&url, body).await?;
+            let advertised = *this.advertised.lock().unwrap();
+            if let (true, Some(fee)) = (url.ends_with(licash_api::INFO), advertised) {
+                let mut info: Info = serde_json::from_slice(&response.body).unwrap();
+                info.fees.spend = fee;
+                response.body = serde_json::to_vec(&info).unwrap();
+            }
+            let refused = serde_json::from_slice::<Problem>(&response.body);
+            if refused.is_ok_and(|p| p.code == licash_api::Code::Fee) {
+                *this.advertised.lock().unwrap() = None;
+            }
+            Ok(response)
+        }
+    }
+}
+
+/// An invoice whose lock needs exact notes made first pays its hub's fee
+/// on them only within the fee approved: a hub raising it after the quote
+/// is paid nothing. Within it, the invoice is paid.
+#[tokio::test]
+async fn exact_notes_for_an_invoice_are_made_only_within_its_approved_fee() {
+    let net = Net::with(Policy {
+        spend: Fee { base: 3, ppm: 0 },
+        timing: TIMING,
+        ..Policy::default()
+    });
+    net.gateway.round().await;
+    // Free to spend, it said when its fee was quoted.
+    let advertised = Arc::new(Mutex::new(Some(Fee { base: 0, ppm: 0 })));
+    let local = Local(net.app.clone());
+    let path = net.dir.path().join("alice.sqlite");
+    let raising = Raising {
+        local,
+        advertised: advertised.clone(),
+    };
+    let regtest = ChainProfile::Core30DefaultRegtest;
+    let wallet = Wallet::create(&path, &[1; 32], regtest, raising).unwrap();
+    let invoice = wallet.invoice(HUB, 40).await.unwrap();
+    net.pay_held(&invoice.hash);
+    net.gateway.round().await;
+    let invoice = wallet.follow_invoice(&invoice.hash).await.unwrap();
+    assert_eq!(invoice.state, InvoiceState::Received);
+    net.gateway.round().await;
+
+    let preimage = [5; 32];
+    let request = net
+        .node
+        .invoice(21_000, lock_hash(&preimage), 18, Outcome::Pay(preimage));
+    // The gateway's 2, and nothing for the exact notes of 23, it says.
+    assert_eq!(wallet.invoice_fee(HUB, &request).unwrap(), 2);
+    let refused = wallet.pay_invoice_within(HUB, &request, Some(2)).await;
+    match refused {
+        Err(licash_wallet::Error::FeeRose { agreed, asked, .. }) => {
+            assert_eq!((agreed, asked), (2, 5))
+        }
+        other => panic!("{other:?}"),
+    }
+    let held =
+        |w: &Wallet<Raising>| -> u64 { w.balance().unwrap().iter().map(|b| b.available).sum() };
+    assert_eq!(held(&wallet), 40, "nothing paid");
+    assert!(wallet.locks().unwrap().is_empty());
+    assert!(net.node.sent().is_empty());
+
+    // Its fee learned, 5 in all: paid within it.
+    assert_eq!(wallet.invoice_fee(HUB, &request).unwrap(), 5);
+    let lock = wallet.pay_invoice_within(HUB, &request, Some(5)).await;
+    let lock = lock.unwrap();
+    assert_eq!(lock.amount, 23);
+    net.gateway.round().await;
+    let lock = wallet.follow_lock(&lock.id).await.unwrap();
+    assert_eq!(lock.state, LockState::Paid(preimage));
+    assert_eq!(held(&wallet), 40 - 23 - 3);
+}
+
 #[tokio::test]
 async fn a_failed_payment_refunds_its_lock_at_once() {
     let net = Net::new().await;

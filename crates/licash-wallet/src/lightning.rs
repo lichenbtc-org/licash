@@ -337,6 +337,29 @@ impl<T: Transport> Wallet<T> {
                     ),
                 });
             }
+            // The exact notes to lock made first, within what is left of
+            // the fee once the gateway's: a hub refusing the fee it
+            // advertised is paid its new one only that far.
+            if self.exact(hub, amount)?.is_none() {
+                let gateway = amount - msat.div_ceil(1000);
+                let left = Some(agreed.saturating_sub(gateway));
+                tracing::info!(%url, amount, "making exact notes to lock");
+                let me = self.address();
+                match self.send_with(&url, &me, amount, None, None, left).await {
+                    Err(Error::FeeRose { asked, .. }) => {
+                        let asked = gateway.saturating_add(asked);
+                        return Err(Error::FeeRose {
+                            who: url.clone(),
+                            agreed,
+                            asked,
+                            reason: format!(
+                                "hub {url} asks {asked} sat to pay the invoice, more than {agreed}"
+                            ),
+                        });
+                    }
+                    made => made.map(drop)?,
+                }
+            }
         }
         let request = invoice.to_string();
         tracing::info!(%url, msat, amount, "paying an invoice");
