@@ -22,7 +22,11 @@
 //! are the application's to broadcast, again after each follow, until they
 //! confirm.
 
-use std::{str::FromStr, sync::PoisonError};
+use std::{
+    collections::HashMap,
+    str::FromStr,
+    sync::{LazyLock, Mutex, PoisonError},
+};
 
 use bitcoin::{
     absolute::LOCK_TIME_THRESHOLD,
@@ -1464,13 +1468,27 @@ fn claim_vsize(script: &ScriptBuf, amount: u64) -> Result<u64, Error> {
 /// The first spend of `coin`, paid to `script`, in the best chain's blocks
 /// at `heights`, and the block it is in: blocks whose filter matches
 /// `script` are fetched, and checked against their hashes.
+///
+/// A search that stopped partway, as on a chain source limiting its rate,
+/// goes on from where it stopped the next time, in this process: the
+/// blocks found holding no spend of `coin` are remembered while the last
+/// of them is still the best chain's (`UNSPENT`).
 pub async fn first_spend(
     chain: &impl Blocks,
     coin: OutPoint,
     script: &bitcoin::Script,
     heights: std::ops::RangeInclusive<u32>,
 ) -> Result<Option<(u32, Transaction)>, Error> {
-    for height in heights {
+    let (start, end) = heights.into_inner();
+    let key = (coin, script.to_owned());
+    let (mut from, mut height) = (start, start);
+    let known = unspent().get(&key).copied();
+    if let Some(known) = known.filter(|k| k.from <= start && start <= k.to && k.to <= end) {
+        if chain.hash(known.to).await.map_err(Error::Chain)? == known.hash {
+            (from, height) = (known.from, known.to.saturating_add(1));
+        }
+    }
+    while height <= end {
         let block_hash = chain.hash(height).await.map_err(Error::Chain)?;
         let matched = match chain.filter(&block_hash).await.map_err(Error::Chain)? {
             None => true,
@@ -1478,19 +1496,49 @@ pub async fn first_spend(
                 .match_any(&block_hash, std::iter::once(script.as_bytes()))
                 .map_err(|e| Error::Chain(format!("the filter of block {block_hash}: {e}")))?,
         };
-        if !matched {
-            continue;
+        if matched {
+            let block = checked_block(chain, &block_hash).await?;
+            let spend = block
+                .txdata
+                .into_iter()
+                .find(|tx| tx.input.iter().any(|i| i.previous_output == coin));
+            if let Some(spend) = spend {
+                return Ok(Some((height, spend)));
+            }
         }
-        let block = checked_block(chain, &block_hash).await?;
-        let spend = block
-            .txdata
-            .into_iter()
-            .find(|tx| tx.input.iter().any(|i| i.previous_output == coin));
-        if let Some(spend) = spend {
-            return Ok(Some((height, spend)));
+        let mut unspent = unspent();
+        if unspent.len() >= UNSPENT_KEPT && !unspent.contains_key(&key) {
+            unspent.clear();
+        }
+        let to = height;
+        let hash = block_hash;
+        unspent.insert(key.clone(), Unspent { from, to, hash });
+        match height.checked_add(1) {
+            Some(next) => height = next,
+            None => break,
         }
     }
     Ok(None)
+}
+
+/// Blocks from `from` to `to`, then of hash `hash`, hold no spend of a coin.
+#[derive(Clone, Copy)]
+struct Unspent {
+    from: u32,
+    to: u32,
+    hash: bitcoin::BlockHash,
+}
+
+/// The coins searched for the spend of lately ([`first_spend`]), by coin
+/// and the script it pays, and the blocks found holding none.
+static UNSPENT: LazyLock<Mutex<HashMap<(OutPoint, ScriptBuf), Unspent>>> =
+    LazyLock::new(Mutex::default);
+
+/// The most coins [`UNSPENT`] keeps: all forgotten past it.
+const UNSPENT_KEPT: usize = 4096;
+
+fn unspent() -> std::sync::MutexGuard<'static, HashMap<(OutPoint, ScriptBuf), Unspent>> {
+    UNSPENT.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The best chain's block at `height`, checked against its hash.
@@ -1551,4 +1599,168 @@ fn payout_of(r: &Row<'_>) -> rusqlite::Result<Payout> {
         state,
         created_at: r.get(13)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use bitcoin::{
+        absolute::LockTime,
+        block::{Header, Version},
+        hashes::Hash,
+        pow::CompactTarget,
+        transaction, Block, BlockHash, Sequence, TxIn, TxMerkleNode, TxOut, Witness,
+    };
+
+    use super::*;
+
+    /// A chain without filters, as an Esplora's: each block fetched, the
+    /// fetch of one failing once if asked.
+    struct Chain {
+        blocks: Mutex<Vec<Block>>,
+        failing: Mutex<Option<u32>>,
+        fetched: Mutex<Vec<BlockHash>>,
+    }
+
+    impl Blocks for Chain {
+        async fn height(&self) -> Result<u32, String> {
+            Ok(self.blocks.lock().unwrap().len() as u32 - 1)
+        }
+
+        async fn hash(&self, height: u32) -> Result<BlockHash, String> {
+            let blocks = self.blocks.lock().unwrap();
+            let block = blocks.get(height as usize).ok_or("no block")?;
+            Ok(block.block_hash())
+        }
+
+        async fn filter(&self, _: &BlockHash) -> Result<Option<Vec<u8>>, String> {
+            Ok(None)
+        }
+
+        async fn block(&self, hash: &BlockHash) -> Result<Block, String> {
+            let blocks = self.blocks.lock().unwrap();
+            let at = blocks.iter().position(|b| b.block_hash() == *hash);
+            let at = at.ok_or("no block")? as u32;
+            if *self.failing.lock().unwrap() == Some(at) {
+                *self.failing.lock().unwrap() = None;
+                return Err("HTTP 429 Too Many Requests".into());
+            }
+            self.fetched.lock().unwrap().push(*hash);
+            Ok(blocks[at as usize].clone())
+        }
+    }
+
+    fn tx(input: OutPoint, tag: u8) -> Transaction {
+        Transaction {
+            version: transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: input,
+                script_sig: ScriptBuf::from_bytes(vec![tag]),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new_op_return([tag]),
+            }],
+        }
+    }
+
+    /// Blocks 0 to `count - 1` after `previous`, of a transaction tagged
+    /// `tag` each, block `spending` spending `coin`.
+    fn mine(blocks: &mut Vec<Block>, count: u32, tag: u8, coin: OutPoint, spending: u32) {
+        for _ in 0..count {
+            let height = blocks.len() as u32;
+            let input = match height == spending {
+                true => coin,
+                false => OutPoint::new(Txid::all_zeros(), height),
+            };
+            let prev = blocks
+                .last()
+                .map_or(BlockHash::all_zeros(), Block::block_hash);
+            let mut block = Block {
+                header: Header {
+                    version: Version::TWO,
+                    prev_blockhash: prev,
+                    merkle_root: TxMerkleNode::all_zeros(),
+                    time: height,
+                    bits: CompactTarget::from_consensus(0x207f_ffff),
+                    nonce: 0,
+                },
+                txdata: vec![tx(input, tag)],
+            };
+            block.header.merkle_root = block.compute_merkle_root().unwrap();
+            blocks.push(block);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_search_for_a_spend_failing_partway_goes_on_where_it_stopped() {
+        let coin = OutPoint::new(Txid::from_byte_array([7; 32]), 1);
+        let script = ScriptBuf::new_op_return([9]);
+        let mut blocks = Vec::new();
+        mine(&mut blocks, 10, 0, coin, 8);
+        let chain = Chain {
+            blocks: Mutex::new(blocks),
+            failing: Mutex::new(Some(6)),
+            fetched: Mutex::default(),
+        };
+        let fetched = || std::mem::take(&mut *chain.fetched.lock().unwrap()).len();
+        first_spend(&chain, coin, &script, 2..=9).await.unwrap_err();
+        assert_eq!(fetched(), 4);
+        // From block 6 on, where it stopped.
+        let (at, spend) = first_spend(&chain, coin, &script, 2..=9)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((at, fetched()), (8, 3));
+        assert_eq!(spend.input[0].previous_output, coin);
+        // Searched again, from a later block among those: from the block
+        // of its spend. Another coin, or from an earlier block: all of it.
+        assert_eq!(
+            first_spend(&chain, coin, &script, 4..=9)
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            8
+        );
+        assert_eq!(fetched(), 1);
+        assert_eq!(
+            first_spend(&chain, coin, &script, 1..=9)
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            8
+        );
+        assert_eq!(fetched(), 8);
+        let other = OutPoint::new(coin.txid, 2);
+        assert_eq!(
+            first_spend(&chain, other, &script, 2..=9).await.unwrap(),
+            None
+        );
+        assert_eq!(fetched(), 8);
+
+        // The blocks from 5 on replaced, the spend in block 7 now: none
+        // passed over, nor any block of the chain replaced remembered.
+        let mut blocks = chain.blocks.lock().unwrap().clone();
+        blocks.truncate(5);
+        mine(&mut blocks, 5, 1, coin, 7);
+        *chain.blocks.lock().unwrap() = blocks;
+        assert_eq!(
+            first_spend(&chain, coin, &script, 1..=9)
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            7
+        );
+        assert_eq!(fetched(), 7);
+        assert_eq!(
+            first_spend(&chain, other, &script, 2..=9).await.unwrap(),
+            None
+        );
+        assert_eq!(fetched(), 8);
+    }
 }
