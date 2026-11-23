@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 licash.workspace = true
 licash-api.workspace = true
+licash-contracts = { path = "../contracts" }
 licash-nostr = { workspace = true, features = ["wallet"] }
 licash-observatory.workspace = true
 licash-onchain.workspace = true

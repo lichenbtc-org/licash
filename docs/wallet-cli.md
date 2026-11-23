@@ -323,6 +323,23 @@ their own coin. No contract opens at a hub charging more than is sane (over
 10 sat or 1% on a payment, lock or refund, over 1 sat for each note made, or
 over 20% of a chosen cap a year) unless `--any-fees` asks all the same.
 
+With no coin on Bitcoin, `open-contract <hub> --pay-with <provider-url>
+--chain <url>` pays for one with notes instead, in two steps. First a payout:
+the swap provider pays the wallet's own fallback address a coin worth the
+contract's price and 1,000 sat of it yours (the hub funds the rest), for notes
+locked to it at `--from` (by default the hub holding the most; another hub's
+notes do, the provider swapping them), the claim's, provider's and lock's fees
+at most `--max-fee` (by default 1% and 2,000), the claim budgeted at
+`--fee-rate`. Then, once the claim is buried and the wallet found the coin
+(looking for it in the blocks since it last looked), the contract opens on it
+as on any coin, as `contracts --chain` carries it on (the command does both at
+once if it can). Each step is the usual one, trusting nobody new: should the
+opening fail three times, or a claim bumped to a higher fee leave a coin that
+no longer fits the contract (about all of your part spent on fees), the coin
+stays yours to open with or spend. Notes on Lightning pay for it once received
+at a hub (`receive`). A wallet file without paid openings is unchanged by
+them: their table is made with the first one.
+
 A contract that runs out with no claim ends by default, and your reserve goes
 to a deposit of the hub's that the contract names, not to a coin of yours:
 the contract's end then pays your wallet nothing that links it to your other

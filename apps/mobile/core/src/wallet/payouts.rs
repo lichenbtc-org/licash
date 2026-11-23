@@ -22,13 +22,13 @@ const CLAIM_RATE: u64 = 2;
 /// Quotes fitted again at most, to pay out all a hub's notes pay.
 const FIT_ROUNDS: usize = 6;
 
-fn claim_rate() -> FeeRate {
+pub(super) fn claim_rate() -> FeeRate {
     FeeRate::from_sat_per_vb(CLAIM_RATE).expect("a rate")
 }
 
 /// What a payout of `amount` may cost on top to be quoted at all: 5% and
 /// 5000 sat. The user sees what it costs before paying.
-fn max_fee(amount: u64) -> u64 {
+pub(super) fn max_fee(amount: u64) -> u64 {
     amount / 20 + 5_000
 }
 
@@ -299,7 +299,7 @@ impl Wallet {
     }
 
     /// The hub trusted holding the most.
-    fn richest(&self) -> Result<String, LicashError> {
+    pub(super) fn richest(&self) -> Result<String, LicashError> {
         let balance = self.wallet.balance()?.into_iter();
         let richest = balance.max_by_key(|b| b.available).map(|b| b.hub);
         richest.ok_or_else(|| LicashError::invalid("no hub trusted holds notes"))

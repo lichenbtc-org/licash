@@ -153,6 +153,82 @@ pub async fn open(
     Ok(())
 }
 
+/// Pay for a contract at `hub` as `asked`, its deposit a coin paid to the
+/// wallet for notes at the hub `from` through the swap provider `provider`
+/// ([`holder::paid`]), the claim's, provider's and lock fees `max_fee` at
+/// most [default: 1% of the coin and 2000], the claim budgeted at
+/// `fee_rate`. Opened once the coin is the wallet's, as [`list`] with a
+/// chain carries it on: at once if it already is.
+pub async fn open_paid(
+    wallet: &Wallet<Http>,
+    path: &Path,
+    chain: Option<&str>,
+    hub: &str,
+    asked: Asked,
+    (provider, from, max_fee, fee_rate): (String, String, Option<u64>, Option<u64>),
+    json: bool,
+) -> anyhow::Result<()> {
+    let node = node(chain)?;
+    let hub = hub.trim_end_matches('/');
+    let hubs = wallet.hubs()?;
+    let (_, info) = hubs
+        .iter()
+        .find(|(url, _)| url == hub)
+        .with_context(|| format!("{hub} is no hub this wallet trusts: add-hub first"))?;
+    let offered = info
+        .contracts
+        .with_context(|| format!("{hub} opens no contracts"))?;
+    let ask = Ask {
+        blocks: asked.blocks.unwrap_or(offered.blocks),
+        max_price: asked.max_price.unwrap_or(u64::MAX),
+        cap: asked.cap,
+        deposit: None,
+    };
+    let source = crate::payout::source(chain.unwrap_or_default())?;
+    let rate = crate::onchain::rate(&source, fee_rate).await?;
+    let payment = holder::paid::Payment {
+        provider,
+        from,
+        max_fee: max_fee.map_or(
+            holder::paid::MaxFee::Usual(crate::payout::USUAL_MAX_FEE),
+            holder::paid::MaxFee::At,
+        ),
+        rate,
+    };
+    let paid = holder::paid::pay(wallet, path, hub, ask, &payment).await?;
+    // Its coin perhaps confirmed already: opened if so.
+    let contracts = holder::resume(wallet, &node, path).await?;
+    let payouts = wallet.payouts()?;
+    let claim = payouts
+        .iter()
+        .find(|p| p.hash == paid.ticket)
+        .and_then(|p| p.claim);
+    let opened = claim.and_then(|claim| contracts.iter().find(|c| c.deposit.txid == claim));
+    let coin = opened.map(|c| c.deposit);
+    let value = json!({
+        "ticket": paid.ticket,
+        "hub": hub,
+        "provider": payment.provider,
+        "from": payment.from,
+        "value": paid.value,
+        "price": paid.price,
+        "cap": paid.fit.cap,
+        "funded": paid.fit.funded,
+        "coin": coin.map(|c| c.to_string()),
+        "contract": opened.map(contract_json),
+    });
+    let line = match opened {
+        Some(contract) => contract_line(contract),
+        None => format!(
+            "paying for a coin of {} sat (the price {} and {} yours) to open a contract of {} sat \
+             at {hub}: it opens once the coin is the wallet's, as `contracts --chain` carries it on",
+            paid.value, paid.price, paid.fit.funded, paid.fit.cap,
+        ),
+    };
+    show(json, value, line);
+    Ok(())
+}
+
 /// What a contract at `hub` costs, itemized, before it is opened: `cap`
 /// sat over `blocks` [default: the hub's fixed terms], `funded` of it hers,
 /// and the sizes it lets holders choose.

@@ -108,6 +108,12 @@ the coin on chain pays, and a provider upgraded with payouts open reads
 the claims of the coins it made unsized, or takes them back, by the script
 it recorded each paying.
 
+A wallet pays for a coin to open a recovery contract with as any payout, to
+its own address (see `open-contract --pay-with` in the wallet's reference),
+then opens the contract on it. Lightning pays for such a coin in two steps:
+notes received at a hub over Lightning first, then locked to the provider as
+any.
+
 A client who never claims its coin costs the provider the fees of that coin
 and of its refund, and holds the coin until it times out, while its own
 lock simply expires back to it. So the provider bounds what such payouts can

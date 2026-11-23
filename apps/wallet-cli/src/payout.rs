@@ -13,9 +13,9 @@ use crate::{onchain, show};
 
 /// The payout's costs at most on top of its amount by default: 1% and
 /// this, room for the coin's claim at a few times the fee rate.
-const USUAL_MAX_FEE: u64 = 2_000;
+pub(crate) const USUAL_MAX_FEE: u64 = 2_000;
 
-fn source(chain: &str) -> anyhow::Result<Source> {
+pub(crate) fn source(chain: &str) -> anyhow::Result<Source> {
     chain.parse().context("--chain")
 }
 

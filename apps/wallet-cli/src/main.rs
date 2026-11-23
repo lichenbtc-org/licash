@@ -543,6 +543,28 @@ enum Command {
         /// 20% of the cap chosen a year.
         #[arg(long)]
         any_fees: bool,
+        /// With no coin of the wallet's: pay for one with notes, through
+        /// the swap provider at this URL, to the wallet's own address. Its
+        /// coin is worth the price and 1000 sat of the contract yours, the
+        /// hub funding the rest. The contract opens on it once the coin is
+        /// the wallet's, as `contracts --chain` carries it on; should it
+        /// not, the coin stays yours. For notes on Lightning, receive them
+        /// at a hub first.
+        #[arg(long, value_name = "URL", conflicts_with_all = ["coin", "any_fees"])]
+        pay_with: Option<String>,
+        /// The hub whose notes pay for the coin [default: the one holding
+        /// the most].
+        #[arg(long, requires = "pay_with")]
+        from: Option<String>,
+        /// What the coin costs at most on top of its value, in sat: its
+        /// claim's fee, the provider's and the hub's [default: 1% and
+        /// 2000].
+        #[arg(long, requires = "pay_with")]
+        max_fee: Option<u64>,
+        /// The fee rate the coin's claim is budgeted at least, in sat/vB
+        /// [default: the chain's estimate within 6 blocks, at least 1].
+        #[arg(long, requires = "pay_with")]
+        fee_rate: Option<u64>,
         /// The chain to check the hub's quote on and broadcast to.
         #[arg(long, env = "LICASH_WALLET_CHAIN")]
         chain: Option<String>,
@@ -1485,6 +1507,10 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
             cap,
             coin,
             any_fees,
+            pay_with,
+            from,
+            max_fee,
+            fee_rate,
             chain,
         } => {
             let ask = contract::Asked {
@@ -1494,6 +1520,15 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
                 coin,
                 any_fees,
             };
+            if let Some(provider) = pay_with {
+                let from = match from {
+                    Some(from) => from,
+                    None => richest_but(&wallet, "")?,
+                };
+                let payment = (provider, from, max_fee, fee_rate);
+                let chain = chain.as_deref();
+                return contract::open_paid(&wallet, &path, chain, &hub, ask, payment, json).await;
+            }
             return contract::open(&wallet, &path, chain.as_deref(), &hub, ask, json).await;
         }
         Command::ContractTerms {

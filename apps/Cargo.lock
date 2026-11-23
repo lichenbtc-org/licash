@@ -3490,6 +3490,7 @@ dependencies = [
  "hex",
  "licash",
  "licash-api",
+ "licash-contracts",
  "licash-nostr",
  "licash-observatory",
  "licash-onchain",
