@@ -6,7 +6,7 @@
 use std::{
     path::Path,
     sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{ensure, Context};
@@ -154,15 +154,91 @@ impl Tweaks {
     }
 }
 
+/// The longest the index waits between rounds failing one after another.
+const MOST_WAIT: Duration = Duration::from_secs(5 * 60);
+
+/// How long the index fails to move on before the operator is alerted.
+const STUCK: Duration = Duration::from_secs(30 * 60);
+
+/// How often a failure that does not change is logged as a warning again.
+const WARN_AGAIN: Duration = Duration::from_secs(60 * 60);
+
+/// Rounds failing one after another: since when the index has not moved
+/// on, and what was told of it.
+#[derive(Default)]
+struct Failing {
+    rounds: u32,
+    /// The newest block indexed when it last moved on, and since when.
+    top: Option<(Option<u32>, Instant)>,
+    /// The failure last warned of, and when.
+    warned: Option<(String, Instant)>,
+    alerted: bool,
+}
+
+impl Failing {
+    /// After a round failing with `text`, the newest block indexed `top`,
+    /// at `now`: how long to wait for the next, twice as long as the
+    /// last up to [`MOST_WAIT`], whether to warn of it (a failure new, or
+    /// [`WARN_AGAIN`] since told), and what to alert the operator of, once,
+    /// stuck [`STUCK`] at a block.
+    fn failed(
+        &mut self,
+        text: &str,
+        top: Option<u32>,
+        every: Duration,
+        now: Instant,
+    ) -> (Duration, bool, Option<String>) {
+        match self.top {
+            Some((at, _)) if at == top => {}
+            _ => {
+                self.top = Some((top, now));
+                self.alerted = false;
+            }
+        }
+        self.rounds = self.rounds.saturating_add(1);
+        let doubled = every.saturating_mul(1 << self.rounds.saturating_sub(1).min(16));
+        let wait = doubled.min(MOST_WAIT.max(every));
+        let warn = match &self.warned {
+            Some((told, at)) => told != text || now.duration_since(*at) >= WARN_AGAIN,
+            None => true,
+        };
+        if warn {
+            self.warned = Some((text.to_owned(), now));
+        }
+        let since = self.top.map_or(now, |(_, since)| since);
+        let stuck = now.duration_since(since);
+        let alert = (!self.alerted && stuck >= STUCK).then(|| {
+            self.alerted = true;
+            let next = top.map_or_else(|| "its first block".into(), |t| format!("block {}", t + 1));
+            format!(
+                "the silent payment tweaks are not indexed past {next} for {} minutes: \
+                 wallets scanning with this hub's tweaks wait. {text}",
+                stuck.as_secs() / 60
+            )
+        });
+        (wait, warn, alert)
+    }
+
+    /// After a round that did not fail: whether those before did.
+    fn recovered(&mut self) -> bool {
+        let failed = self.rounds > 0;
+        *self = Self::default();
+        failed
+    }
+}
+
 /// Index the tweaks of `source`'s best chain into `tweaks`, a round every
 /// `every`, for good, if it follows `network`: from block `from` on, or
-/// from the tip, once, when the index is new.
+/// from the tip, once, when the index is new. Rounds failing one after
+/// another wait longer each time, up to `MOST_WAIT`; stuck at a block
+/// for `STUCK`, the operator is told through `alert`, once.
 pub async fn index(
     tweaks: Arc<Tweaks>,
     source: Source,
     network: ChainProfile,
     from: Option<u32>,
     every: Duration,
+    alert: impl Fn(&str) + Send + Sync,
 ) {
     let profile = loop {
         match source.profile().await {
@@ -184,23 +260,32 @@ pub async fn index(
         ),
         _ => {}
     }
-    let mut failing: Option<String> = None;
+    let mut failing = Failing::default();
     loop {
-        match step(&tweaks, &source, from).await {
+        let wait = match step(&tweaks, &source, from).await {
             Ok(()) => {
-                if failing.take().is_some() {
+                if failing.recovered() {
                     tracing::info!(chain = %source, "indexing tweaks again");
                 }
+                every
             }
             Err(e) => {
                 let text = format!("{e:#}");
-                if failing.as_ref() != Some(&text) {
-                    tracing::warn!(chain = %source, "indexing tweaks: {text}");
+                let top = tweaks.top().ok().flatten().map(|(height, _)| height);
+                let (wait, warn, stuck) = failing.failed(&text, top, every, Instant::now());
+                let secs = wait.as_secs();
+                if warn {
+                    tracing::warn!(chain = %source, "indexing tweaks, again in {secs} s: {text}");
+                } else {
+                    tracing::debug!(chain = %source, "indexing tweaks, again in {secs} s: {text}");
                 }
-                failing = Some(text);
+                if let Some(message) = stuck {
+                    alert(&message);
+                }
+                wait
             }
-        }
-        tokio::time::sleep(every).await;
+        };
+        tokio::time::sleep(wait).await;
     }
 }
 
@@ -243,4 +328,62 @@ pub async fn step(tweaks: &Tweaks, source: &Source, from: Option<u32>) -> anyhow
         tracing::debug!(height = next, tweaks = found.len(), "indexed tweaks");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rounds_failing_wait_longer_warn_once_and_alert_once_stuck() {
+        let every = Duration::from_secs(10);
+        let start = Instant::now();
+        let mut failing = Failing::default();
+        let mut waits = Vec::new();
+        let mut warned = 0;
+        let mut alerts = Vec::new();
+        let mut now = start;
+        // Stuck at block 41 for over an hour.
+        while now.duration_since(start) < Duration::from_secs(65 * 60) {
+            let (wait, warn, alert) = failing.failed("no block", Some(40), every, now);
+            waits.push(wait.as_secs());
+            warned += u32::from(warn);
+            alerts.extend(alert);
+            now += wait;
+        }
+        assert_eq!(&waits[..7], [10, 20, 40, 80, 160, 300, 300]);
+        assert!(waits.iter().all(|w| *w <= 300));
+        // Warned on its first failure, then once more after an hour.
+        assert_eq!(warned, 2);
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert!(alerts[0].contains("past block 41"), "{}", alerts[0]);
+        assert!(alerts[0].contains("no block"), "{}", alerts[0]);
+
+        // Another failure is warned of at once, not waited on less.
+        let (wait, warn, alert) = failing.failed("another", Some(40), every, now);
+        assert_eq!((wait.as_secs(), warn, alert), (300, true, None));
+
+        // Moved on, then stuck again: alerted again, once stuck as long.
+        let (wait, warn, alert) = failing.failed("another", Some(45), every, now);
+        assert_eq!((wait.as_secs(), warn, alert), (300, false, None));
+        let later = now + STUCK;
+        let (_, _, alert) = failing.failed("another", Some(45), every, later);
+        assert!(alert.unwrap().contains("past block 46"));
+
+        // Recovered: from the start again.
+        assert!(failing.recovered());
+        assert!(!failing.recovered());
+        let (wait, warn, alert) = failing.failed("no block", Some(45), every, later);
+        assert_eq!((wait.as_secs(), warn, alert), (10, true, None));
+    }
+
+    #[test]
+    fn a_round_slower_than_the_longest_wait_waits_its_round() {
+        let every = Duration::from_secs(600);
+        let mut failing = Failing::default();
+        let (wait, ..) = failing.failed("x", None, every, Instant::now());
+        assert_eq!(wait, every);
+        let (wait, ..) = failing.failed("x", None, every, Instant::now());
+        assert_eq!(wait, every);
+    }
 }

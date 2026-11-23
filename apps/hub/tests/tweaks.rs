@@ -41,6 +41,8 @@ struct Backend {
     /// Serving a block's transactions as mempool's backend: ten a page,
     /// and of each the spends of its first [`TOLD`] inputs only.
     mempool: bool,
+    /// The blocks asked for whole.
+    fetched: usize,
 }
 
 /// Inputs mempool's backend tells the spends of, in a block's pages.
@@ -71,9 +73,13 @@ async fn block(
     State(backend): State<Shared>,
     Path((hash, part)): Path<(String, String)>,
 ) -> Response {
-    match (find(&backend.lock().unwrap(), &hash), part.as_str()) {
+    let mut backend = backend.lock().unwrap();
+    match (find(&backend, &hash), part.as_str()) {
         (Some(block), "header") => hex::encode(serialize(&block.header)).into_response(),
-        (Some(block), "raw") => serialize(&block).into_response(),
+        (Some(block), "raw") => {
+            backend.fetched += 1;
+            serialize(&block).into_response()
+        }
         _ => (StatusCode::NOT_FOUND, "Block not found").into_response(),
     }
 }
@@ -213,6 +219,7 @@ async fn the_hub_indexes_and_serves_the_tweaks_of_its_chain() {
         chain: chain::Chain::new(),
         spent: HashMap::new(),
         mempool: false,
+        fetched: 0,
     }));
     for _ in 0..3 {
         backend.lock().unwrap().chain.mine(None);
@@ -345,6 +352,7 @@ async fn the_index_reads_alone_a_transaction_whose_page_tells_part_of_its_spends
         chain: chain::Chain::new(),
         spent: HashMap::new(),
         mempool: true,
+        fetched: 0,
     }));
     backend.lock().unwrap().chain.mine(None);
     let source = esplora(backend.clone()).await;
@@ -409,6 +417,56 @@ async fn the_index_reads_alone_a_transaction_whose_page_tells_part_of_its_spends
     assert_eq!(found.len(), 1);
 }
 
+/// A block no source tells the spends of fails each round: the index
+/// waits longer after each, asking for it a handful of times rather than
+/// once a round, and moves on once it is told.
+#[tokio::test]
+async fn an_index_failing_on_a_block_asks_for_it_less_and_less() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend: Shared = Arc::new(Mutex::new(Backend {
+        chain: chain::Chain::new(),
+        spent: HashMap::new(),
+        mempool: false,
+        fetched: 0,
+    }));
+    backend.lock().unwrap().chain.mine(None);
+    let source = esplora(backend.clone()).await;
+    let index = Arc::new(Tweaks::open(&dir.path().join("tweaks.sqlite")).unwrap());
+    step(&index, &source, None).await.unwrap();
+    let sender = SecretKey::from_slice(&[2; 32]).unwrap();
+    let taproot = ScriptBuf::from_bytes([&[0x51, 0x20][..], &[7; 32]].concat());
+    let payment = spending(&backend, &sender, 1, vec![taproot]);
+    // What it spends, unknown.
+    let unknown = payment.input[0].previous_output;
+    let told = backend.lock().unwrap().spent.remove(&unknown).unwrap();
+    backend.lock().unwrap().chain.mine_with(None, vec![payment]);
+    backend.lock().unwrap().fetched = 0;
+
+    let every = std::time::Duration::from_millis(20);
+    let indexing = tokio::spawn(licash_hub_service::tweaks::index(
+        index.clone(),
+        source.clone(),
+        ChainProfile::Core30DefaultRegtest,
+        None,
+        every,
+        |_: &str| {},
+    ));
+    // At 20, 40, 80, 160, 320 and 640 ms: 7 rounds in 1.5 s, not 75.
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    let fetched = backend.lock().unwrap().fetched;
+    assert!((3..=10).contains(&fetched), "{fetched} rounds");
+    assert_eq!(index.top().unwrap().map(|(h, _)| h), Some(1));
+
+    // Told: indexed at the next round, within the longest wait yet.
+    backend.lock().unwrap().spent.insert(unknown, told);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while index.top().unwrap().map(|(h, _)| h) != Some(2) {
+        assert!(std::time::Instant::now() < deadline, "never indexed");
+        tokio::time::sleep(every).await;
+    }
+    indexing.abort();
+}
+
 #[tokio::test]
 async fn an_index_starts_where_asked_and_only_in_its_own_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -416,6 +474,7 @@ async fn an_index_starts_where_asked_and_only_in_its_own_file() {
         chain: chain::Chain::new(),
         spent: HashMap::new(),
         mempool: false,
+        fetched: 0,
     }));
     for _ in 0..5 {
         backend.lock().unwrap().chain.mine(None);
@@ -444,6 +503,7 @@ async fn an_index_starts_where_asked_and_only_in_its_own_file() {
         ChainProfile::Core30Mainnet,
         None,
         std::time::Duration::from_millis(10),
+        |_: &str| {},
     );
     tokio::time::timeout(std::time::Duration::from_secs(10), indexing)
         .await

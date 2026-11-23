@@ -1775,7 +1775,16 @@ async fn serve(
         critical.spawn("the contracts' responder", openings.respond_every(every));
     }
     if let (Some((source, network, every)), Some((index, from))) = (&chain, tweaks) {
-        let indexing = tweaks::index(index, source.clone(), *network, from, *every);
+        let notify = hub.clone();
+        let alert = move |message: &str| {
+            let (hub, message) = (notify.clone(), message.to_owned());
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = hub.alert(&message) {
+                    tracing::error!("notifying an alert: {e:#}");
+                }
+            });
+        };
+        let indexing = tweaks::index(index, source.clone(), *network, from, *every, alert);
         critical.spawn("the tweaks' index", indexing);
     }
     match chain {

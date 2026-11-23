@@ -216,6 +216,11 @@ With `--tweaks` (and `--chain`), the hub indexes the silent payment
 (BIP352) tweaks of the chain's blocks from `--tweaks-from` (by default, the
 tip at the first start) in `<data>/tweaks.sqlite`, and serves them to light
 wallets at `/v1/chain/tweaks`. Deleting the file only loses the index.
+A block the index fails on is tried again after a wait that doubles each
+time, up to 5 minutes; stuck at one block for 30 minutes, the hub alerts
+its operator (`--notify`). An Esplora that tells part of a transaction's
+spends in a block's pages, as mempool's backend does past its 13th
+input, is asked for that transaction alone.
 
 The hub keeps the payments it releases for their payees when their payers
 ask, for 14 days, in `hub.sqlite`: payees collect them at
