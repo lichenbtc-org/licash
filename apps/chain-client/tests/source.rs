@@ -442,6 +442,27 @@ async fn esplora_tip(State(chain): State<Arc<Chain>>) -> String {
     (chain.blocks.len() - 1).to_string()
 }
 
+/// Times the throttled Esplora was asked for its tip.
+static THROTTLED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// An Esplora limiting its rate: the tip, once asked twice before.
+async fn throttled_tip(State(chain): State<Arc<Chain>>) -> Response {
+    match THROTTLED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+        0 => (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, "0")]).into_response(),
+        1 => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        _ => esplora_tip(State(chain)).await.into_response(),
+    }
+}
+
+/// One asking to be asked again only in an hour.
+async fn refusing_tip() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, "3600")],
+    )
+        .into_response()
+}
+
 async fn esplora_hash(State(chain): State<Arc<Chain>>, Path(height): Path<usize>) -> Response {
     match chain.blocks.get(height) {
         Some(block) => block.block_hash().to_string().into_response(),
@@ -593,6 +614,9 @@ async fn serve(
         .route("/mempool/api/tx/{txid}", get(esplora_tx))
         .route("/stingy/api/block/{hash}/txs/{start}", get(mempool_txs))
         .route("/stingy/api/tx/{txid}", get(stingy_tx))
+        .route("/throttled/api/blocks/tip/height", get(throttled_tip))
+        .route("/throttled/api/block-height/{height}", get(esplora_hash))
+        .route("/refusing/api/blocks/tip/height", get(refusing_tip))
         .route("/api/txs/package", post(esplora_package))
         .route("/api/fee-estimates", get(esplora_fees))
         .route("/api/address/{address}/utxo", get(esplora_utxo))
@@ -1077,4 +1101,29 @@ async fn mempools_backend_is_read_as_esplora() {
             "{blocks}"
         );
     }
+}
+
+#[tokio::test]
+async fn an_esplora_limiting_its_rate_is_asked_again_as_it_tells() {
+    let blocks = mine(4);
+    let address = serve(blocks.clone(), PASSWORD, None).await;
+    let throttled: Source = format!("esplora+http://{address}/throttled/api")
+        .parse()
+        .unwrap();
+    // Refused (429, asked again at once), overloaded (503, asked again a
+    // while later), then the tip.
+    let started = std::time::Instant::now();
+    let tip = throttled.tip().await.unwrap();
+    assert_eq!(tip.height as usize, blocks.len() - 1);
+    assert_eq!(tip.hash, blocks.last().unwrap().block_hash());
+    assert_eq!(THROTTLED.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+    // Asked to wait longer than it is waited on: refused at once.
+    let refusing: Source = format!("esplora+http://{address}/refusing/api")
+        .parse()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let error = format!("{:#}", refusing.tip().await.unwrap_err());
+    assert!(error.contains("429"), "{error}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }

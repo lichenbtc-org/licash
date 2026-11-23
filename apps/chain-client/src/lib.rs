@@ -818,15 +818,53 @@ impl Source {
         Ok(self.get(&format!("{base}/{path}")).await?.text().await?)
     }
 
+    /// GET `url` of an Esplora: asked again, as it tells (`Retry-After`)
+    /// or after a wait twice as long each time, while it limits the rate
+    /// it answers at or is overloaded, for [`MOST_THROTTLED`] at most. A
+    /// scan of thousands of blocks goes at the rate it allows, rather than
+    /// failing partway to start over.
     async fn get(&self, url: &str) -> anyhow::Result<reqwest::Response> {
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("{self}: {}", e.without_url()))?;
-        let status = response.status();
-        ensure!(status.is_success(), "{self}: {url}: HTTP {status}");
-        Ok(response)
+        let mut waited = Duration::ZERO;
+        let mut backoff = Duration::from_secs(1);
+        loop {
+            let response = self
+                .client
+                .get(url)
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("{self}: {}", e.without_url()))?;
+            let status = response.status();
+            if let Some(wait) = throttled(&response, backoff) {
+                if waited + wait <= MOST_THROTTLED {
+                    tokio::time::sleep(wait).await;
+                    waited += wait;
+                    backoff = (backoff * 2).min(MOST_BACKOFF);
+                    continue;
+                }
+            }
+            ensure!(status.is_success(), "{self}: {url}: HTTP {status}");
+            return Ok(response);
+        }
     }
+}
+
+/// How long one request to an Esplora limiting its rate is waited on.
+const MOST_THROTTLED: Duration = Duration::from_secs(120);
+
+/// The longest wait between asking a throttled Esplora again.
+const MOST_BACKOFF: Duration = Duration::from_secs(30);
+
+/// How long to wait before asking again, if `response` refuses for now:
+/// too many requests (429), or overloaded (503). As long as it asks, in
+/// seconds; else `backoff`.
+fn throttled(response: &reqwest::Response, backoff: Duration) -> Option<Duration> {
+    let status = response.status();
+    let refused = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::SERVICE_UNAVAILABLE;
+    if !refused {
+        return None;
+    }
+    let asked = response.headers().get(reqwest::header::RETRY_AFTER);
+    let asked = asked.and_then(|v| v.to_str().ok()?.trim().parse::<u64>().ok());
+    Some(asked.map_or(backoff, Duration::from_secs))
 }
