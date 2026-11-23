@@ -431,6 +431,11 @@ enum Command {
         /// notes stay locked should it never pay.
         #[arg(long, default_value_t = SwapLimits::usual(0).margin)]
         max_margin: u32,
+        /// The chain, for its height: the provider's lock is claimed only
+        /// with blocks left at the highest of this, the last block the
+        /// wallet scanned, and the heights both hubs say.
+        #[arg(long, env = "LICASH_WALLET_CHAIN")]
+        chain: Option<String>,
     },
     /// The swaps made, newest first.
     Swaps,
@@ -1418,7 +1423,11 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
             from,
             max_fee,
             max_margin,
+            chain,
         } => {
+            if let Some(chain) = &chain {
+                contract::saw_tip(&wallet, chain).await?;
+            }
             let from = match from {
                 Some(from) => from,
                 None => richest_but(&wallet, &to)?,

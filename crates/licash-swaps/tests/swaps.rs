@@ -1128,6 +1128,36 @@ async fn a_client_reveals_nothing_for_a_lock_that_does_not_pay_it_the_swap() {
     }
 }
 
+/// A provider's lock its hub says is far from expiry, while the hub of the
+/// client's lock is past it: its preimage is not revealed, the chain being
+/// where the higher of the two says. Every lock is refunded once expired.
+#[tokio::test]
+async fn a_client_reveals_nothing_for_a_lock_its_hub_says_is_not_expired_yet() {
+    let eco = Eco::new(200).await;
+    let provider = eco.provider();
+    let payer = provider.wallet();
+    let swap = eco.pending(20).await;
+    let height = eco.net.view(B).height();
+    let me = eco.client.address();
+    let lock = payer.lock(B, &me, 20, hash_of(&swap), Some(height + 8));
+    let lock = lock.await.unwrap();
+    // A is 6 blocks on, B behind it: 3 blocks are left as A sees it.
+    eco.net.mine(A, 6, None);
+    let lied = eco.lie(&swap, &lock.id).await;
+    assert!(
+        matches!(&lied.state, SwapState::Failed(why) if why.contains("too late to claim")),
+        "{lied:?}"
+    );
+    assert!(payer
+        .locks()
+        .unwrap()
+        .iter()
+        .all(|l| l.state == licash_wallet::LockState::Locked));
+    eco.mine(44);
+    eco.client.resume().await.unwrap();
+    assert_eq!(held(&eco.client, A), 100 - FEE.base);
+}
+
 #[tokio::test]
 async fn the_operator_is_alerted_once_of_each_hub_the_provider_cannot_swap_to() {
     let eco = Eco::new(30).await;

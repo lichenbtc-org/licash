@@ -327,7 +327,20 @@ impl<T: Transport> Wallet<T> {
             }
         };
         let theirs = hex::encode(theirs);
-        match self.claim(&record.to, &theirs, &record.preimage).await {
+        // The chain as the hub of the wallet's lock says it is, too: a
+        // provider's hub saying it is behind, to have the preimage of an
+        // expired lock revealed, is believed only if both say so. As last
+        // said, should it not answer now.
+        let from = &record.from.1;
+        let info = match self.refresh(from).await {
+            Ok((_, info)) => info,
+            Err(e) => {
+                tracing::warn!(hub = %from, "the chain as the hub says it is, last said: {e}");
+                self.hub(from)?.1
+            }
+        };
+        let seen = info.locks.map_or(0, |l| l.height);
+        match (self.claim_seen(&record.to, &theirs, &record.preimage, seen)).await {
             Ok(_) | Err(Error::AlreadyReceived) => {}
             Err(e @ (Error::Invalid(_) | Error::PaysNothing)) => {
                 return self.fail_swap(hash, &format!("the provider's lock was not claimed: {e}"));

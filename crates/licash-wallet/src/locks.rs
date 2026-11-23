@@ -712,8 +712,21 @@ impl<T: Transport> Wallet<T> {
     /// revealing it within [`CLAIM_MARGIN`] blocks of the lock's expiry, as
     /// the hub could then refund the lock and keep what the preimage buys.
     pub async fn claim(&self, url: &str, id: &str, preimage: &[u8; 32]) -> Result<Received, Error> {
-        self.claim_with(url, id, preimage, Reveal::Margin, None)
+        self.claim_with(url, id, preimage, Reveal::Margin, None, 0)
             .await
+    }
+
+    /// [`Wallet::claim`], the chain at `seen` at least, as another hub
+    /// says it is: one the lock's hub, saying it is behind, does not
+    /// overrule.
+    pub(crate) async fn claim_seen(
+        &self,
+        url: &str,
+        id: &str,
+        preimage: &[u8; 32],
+        seen: u32,
+    ) -> Result<Received, Error> {
+        (self.claim_with(url, id, preimage, Reveal::Margin, None, seen)).await
     }
 
     /// Claim only if this verified proposal pays at least the promised
@@ -726,7 +739,7 @@ impl<T: Transport> Wallet<T> {
         preimage: &[u8; 32],
         least: u64,
     ) -> Result<Received, Error> {
-        self.claim_with(url, id, preimage, Reveal::Margin, Some(least))
+        self.claim_with(url, id, preimage, Reveal::Margin, Some(least), 0)
             .await
     }
 
@@ -740,7 +753,7 @@ impl<T: Transport> Wallet<T> {
         preimage: &[u8; 32],
         least: u64,
     ) -> Result<Received, Error> {
-        self.claim_with(url, id, preimage, Reveal::Protected, Some(least))
+        self.claim_with(url, id, preimage, Reveal::Protected, Some(least), 0)
             .await
     }
 
@@ -754,7 +767,7 @@ impl<T: Transport> Wallet<T> {
         id: &str,
         preimage: &[u8; 32],
     ) -> Result<Received, Error> {
-        self.claim_with(url, id, preimage, Reveal::Public, None)
+        self.claim_with(url, id, preimage, Reveal::Public, None, 0)
             .await
     }
 
@@ -769,7 +782,7 @@ impl<T: Transport> Wallet<T> {
         id: &str,
         preimage: &[u8; 32],
     ) -> Result<Received, Error> {
-        self.claim_with(url, id, preimage, Reveal::Issued, None)
+        self.claim_with(url, id, preimage, Reveal::Issued, None, 0)
             .await
     }
 
@@ -780,6 +793,7 @@ impl<T: Transport> Wallet<T> {
         preimage: &[u8; 32],
         reveal: Reveal,
         least: Option<u64>,
+        seen: u32,
     ) -> Result<Received, Error> {
         let url = hub_url(url)?;
         let id = payment_id(id)?;
@@ -828,9 +842,9 @@ impl<T: Transport> Wallet<T> {
             _ => {
                 let hub = info.locks.as_ref().map_or(u32::MAX, |l| l.height);
                 // A hub behind the chain as the wallet knows it of itself,
-                // or saying it is, is not believed.
+                // or as another hub says it is, is not believed.
                 let own = self.tip()?;
-                let height = hub.max(own.unwrap_or(0));
+                let height = hub.max(own.unwrap_or(0)).max(seen);
                 let too_late = match reveal {
                     // Protected by what the wallet does on Bitcoin in the
                     // blocks left, which only a height of its own counts.

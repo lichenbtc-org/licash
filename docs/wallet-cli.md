@@ -248,7 +248,13 @@ within `--max-fee` and `--max-margin` (200 blocks by default: what a
 provider other than the hub swapped to needs at a hub of the usual
 144-block window): one it swapped through before, else the cheapest. A
 swap is refused before anything is locked unless the source hub admits a
-lock that outlasts the provider's by that margin.
+lock that outlasts the provider's by that margin. The provider's lock is
+claimed only with more than 3 blocks left at the highest of the heights
+both hubs say and the wallet's own: with `--chain` (or
+`LICASH_WALLET_CHAIN`), its tip, else the last block it scanned. So a
+provider and its hub saying the chain is behind cannot have an expired
+lock's preimage revealed unless the source hub says so too, or the wallet
+knows the tip itself.
 
 `payout <amount> --to <address> --chain <url>` pays
 `amount` to an address on Bitcoin, a silent payment address, or a
