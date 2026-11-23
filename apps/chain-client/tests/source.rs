@@ -96,23 +96,74 @@ fn mine(n: u32) -> Vec<Block> {
             }],
             output,
         };
-        let mut block = Block {
-            header: Header {
-                version: Version::from_consensus(0x2000_0000),
-                prev_blockhash: previous.block_hash(),
-                merkle_root: TxMerkleNode::all_zeros(),
-                time: previous.time + 600,
-                bits: CompactTarget::from_consensus(0x207f_ffff),
-                nonce: 0,
-            },
-            txdata: std::iter::once(coinbase).chain(spends).collect(),
-        };
-        block.header.merkle_root = block.compute_merkle_root().unwrap();
-        while block.header.validate_pow(block.header.target()).is_err() {
-            block.header.nonce += 1;
-        }
-        blocks.push(block);
+        let txdata = std::iter::once(coinbase).chain(spends).collect();
+        blocks.push(seal(&previous, txdata));
     }
+    blocks
+}
+
+/// The block of `txdata` after `previous`, mined.
+fn seal(previous: &Header, txdata: Vec<Transaction>) -> Block {
+    let mut block = Block {
+        header: Header {
+            version: Version::from_consensus(0x2000_0000),
+            prev_blockhash: previous.block_hash(),
+            merkle_root: TxMerkleNode::all_zeros(),
+            time: previous.time + 600,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce: 0,
+        },
+        txdata,
+    };
+    block.header.merkle_root = block.compute_merkle_root().unwrap();
+    while block.header.validate_pow(block.header.target()).is_err() {
+        block.header.nonce += 1;
+    }
+    block
+}
+
+/// The inputs of a consolidation spending outputs 2 on of the coinbase of
+/// the last of `blocks`: more than mempool's backend tells the spends of.
+const CONSOLIDATED: u32 = COINBASE_OUTPUTS - 2;
+
+/// `blocks` and one more: its coinbase, and a transaction spending outputs
+/// 2 on of the last block's coinbase, which pays a taproot output.
+fn consolidate(mut blocks: Vec<Block>) -> Vec<Block> {
+    let previous = blocks.last().unwrap();
+    let height = blocks.len() as u32;
+    let coinbase = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(vec![0x01, height as u8, 0x00]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(50),
+            script_pubkey: script(height, 0),
+        }],
+    };
+    let txid = previous.txdata[0].compute_txid();
+    let consolidation = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: (2..COINBASE_OUTPUTS)
+            .map(|vout| TxIn {
+                previous_output: OutPoint { txid, vout },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            })
+            .collect(),
+        output: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: ScriptBuf::from_bytes([&[0x51, 0x20][..], &[7; 32]].concat()),
+        }],
+    };
+    let block = seal(&previous.header, vec![coinbase, consolidation]);
+    blocks.push(block);
     blocks
 }
 
@@ -425,25 +476,74 @@ async fn esplora_txs(
     let txs: Vec<Value> = block.txdata[start..]
         .iter()
         .take(25)
-        .map(|tx| {
-            let vin: Vec<Value> = tx
-                .input
-                .iter()
-                .map(|input| {
-                    let spent = chain.outputs.get(&input.previous_output);
-                    json!({
-                        "is_coinbase": spent.is_none(),
-                        "prevout": spent.map(|o| json!({
-                            "scriptpubkey": o.script_pubkey.to_hex_string(),
-                            "value": o.value.to_sat(),
-                        })),
-                    })
-                })
-                .collect();
-            json!({"txid": tx.compute_txid().to_string(), "vin": vin})
-        })
+        .map(|tx| esplora_json(&chain, tx, usize::MAX))
         .collect();
     Json(txs).into_response()
+}
+
+/// Inputs mempool's backend tells the spends of, in a block's pages.
+const TOLD: usize = 13;
+
+/// A block's transactions as mempool's backend serves them: ten from
+/// `start`, and of each the spends of its first [`TOLD`] inputs only.
+async fn mempool_txs(
+    State(chain): State<Arc<Chain>>,
+    Path((hash, start)): Path<(String, usize)>,
+) -> Response {
+    let Some(block) = chain.by_hash.get(&hash) else {
+        return (StatusCode::NOT_FOUND, "Block not found").into_response();
+    };
+    let txs: Vec<Value> = block.txdata[start.min(block.txdata.len())..]
+        .iter()
+        .take(10)
+        .map(|tx| esplora_json(&chain, tx, TOLD))
+        .collect();
+    Json(txs).into_response()
+}
+
+fn tx_of(chain: &Chain, txid: &str) -> Option<Transaction> {
+    let mut txs = chain.blocks.iter().flat_map(|b| &b.txdata);
+    txs.find(|tx| tx.compute_txid().to_string() == txid)
+        .cloned()
+}
+
+/// A transaction with what each of its inputs spends.
+async fn esplora_tx(State(chain): State<Arc<Chain>>, Path(txid): Path<String>) -> Response {
+    match tx_of(&chain, &txid) {
+        Some(tx) => Json(esplora_json(&chain, &tx, usize::MAX)).into_response(),
+        None => (StatusCode::NOT_FOUND, "Transaction not found").into_response(),
+    }
+}
+
+/// [`esplora_tx`], telling as few spends as [`mempool_txs`].
+async fn stingy_tx(State(chain): State<Arc<Chain>>, Path(txid): Path<String>) -> Response {
+    match tx_of(&chain, &txid) {
+        Some(tx) => Json(esplora_json(&chain, &tx, TOLD)).into_response(),
+        None => (StatusCode::NOT_FOUND, "Transaction not found").into_response(),
+    }
+}
+
+/// `tx` as Esplora tells it, with the spends of its first `told` inputs.
+fn esplora_json(chain: &Chain, tx: &Transaction, told: usize) -> Value {
+    let vin: Vec<Value> = tx
+        .input
+        .iter()
+        .enumerate()
+        .map(|(i, input)| {
+            let spent = chain.outputs.get(&input.previous_output);
+            if i >= told && spent.is_some() {
+                return json!({"is_coinbase": false, "prevout": null, "lazy": true});
+            }
+            json!({
+                "is_coinbase": spent.is_none(),
+                "prevout": spent.map(|o| json!({
+                    "scriptpubkey": o.script_pubkey.to_hex_string(),
+                    "value": o.value.to_sat(),
+                })),
+            })
+        })
+        .collect();
+    json!({"txid": tx.compute_txid().to_string(), "vin": vin})
 }
 
 /// Serves `blocks` as a node at `/` and as Esplora under `/api`, with
@@ -485,6 +585,14 @@ async fn serve(
         .route("/api/block/{hash}/{part}", get(esplora_block))
         .route("/api/block/{hash}/txs/{start}", get(esplora_txs))
         .route("/api/tx", post(esplora_send))
+        .route("/api/tx/{txid}", get(esplora_tx))
+        // mempool's backend, and one telling no more of a transaction alone.
+        .route("/mempool/api/blocks/tip/height", get(esplora_tip))
+        .route("/mempool/api/block-height/{height}", get(esplora_hash))
+        .route("/mempool/api/block/{hash}/txs/{start}", get(mempool_txs))
+        .route("/mempool/api/tx/{txid}", get(esplora_tx))
+        .route("/stingy/api/block/{hash}/txs/{start}", get(mempool_txs))
+        .route("/stingy/api/tx/{txid}", get(stingy_tx))
         .route("/api/txs/package", post(esplora_package))
         .route("/api/fee-estimates", get(esplora_fees))
         .route("/api/address/{address}/utxo", get(esplora_utxo))
@@ -589,6 +697,38 @@ async fn both_read_what_the_transactions_paying_taproot_outputs_spend() {
         let error = source.taproot_spends(&forged).await.unwrap_err();
         assert!(format!("{error:#}").contains("are not its"), "{error:#}");
     }
+}
+
+#[tokio::test]
+async fn esplora_asks_for_a_transaction_alone_what_its_page_leaves_out() {
+    let blocks = consolidate(mine(4));
+    let address = serve(blocks.clone(), PASSWORD, None).await;
+    let [node, esplora] = sources(&address);
+    let mempool: Source = format!("esplora+http://{address}/mempool/api")
+        .parse()
+        .unwrap();
+    // Pages of ten of 31 transactions, and one of more inputs than told.
+    assert_eq!(blocks[3].txdata.len(), 31);
+    assert!(CONSOLIDATED as usize > TOLD);
+    for block in &blocks[3..] {
+        let expected = node.taproot_spends(block).await.unwrap();
+        assert_eq!(esplora.taproot_spends(block).await.unwrap(), expected);
+        assert_eq!(mempool.taproot_spends(block).await.unwrap(), expected);
+    }
+    let spent: Vec<ScriptBuf> = (2..COINBASE_OUTPUTS).map(|i| script(4, i)).collect();
+    let spends = mempool.taproot_spends(&blocks[5]).await.unwrap();
+    assert_eq!(spends, [None, Some(spent)]);
+    // Told no more alone: refused, the transaction named, never passed over.
+    let stingy: Source = format!("esplora+http://{address}/stingy/api")
+        .parse()
+        .unwrap();
+    let error = stingy.taproot_spends(&blocks[5]).await.unwrap_err();
+    let error = format!("{error:#}");
+    let txid = blocks[5].txdata[1].compute_txid().to_string();
+    assert!(
+        error.contains("an input spends nothing") && error.contains(&txid),
+        "{error}"
+    );
 }
 
 #[tokio::test]

@@ -38,7 +38,13 @@ mod chain;
 struct Backend {
     chain: chain::Chain,
     spent: HashMap<OutPoint, ScriptBuf>,
+    /// Serving a block's transactions as mempool's backend: ten a page,
+    /// and of each the spends of its first [`TOLD`] inputs only.
+    mempool: bool,
 }
+
+/// Inputs mempool's backend tells the spends of, in a block's pages.
+const TOLD: usize = 13;
 
 type Shared = Arc<Mutex<Backend>>;
 
@@ -80,22 +86,41 @@ async fn txs(
     let Some(block) = find(&backend, &hash) else {
         return (StatusCode::NOT_FOUND, "Block not found").into_response();
     };
+    let (count, told) = match backend.mempool {
+        true => (10, TOLD),
+        false => (25, usize::MAX),
+    };
     let page: Vec<Value> = block.txdata[start..]
         .iter()
-        .take(25)
-        .map(|tx| {
-            let vin: Vec<Value> = tx
-                .input
-                .iter()
-                .map(|input| {
-                    let spent = backend.spent.get(&input.previous_output);
-                    json!({"prevout": spent.map(|s| json!({"scriptpubkey": s.to_hex_string()}))})
-                })
-                .collect();
-            json!({"txid": tx.compute_txid().to_string(), "vin": vin})
-        })
+        .take(count)
+        .map(|tx| esplora_json(&backend, tx, told))
         .collect();
     Json(page).into_response()
+}
+
+/// A transaction alone, what each of its inputs spends with it.
+async fn tx(State(backend): State<Shared>, Path(txid): Path<String>) -> Response {
+    let backend = backend.lock().unwrap();
+    let mut txs = backend.chain.blocks.iter().flat_map(|b| &b.txdata);
+    match txs.find(|tx| tx.compute_txid().to_string() == txid) {
+        Some(tx) => Json(esplora_json(&backend, tx, usize::MAX)).into_response(),
+        None => (StatusCode::NOT_FOUND, "Transaction not found").into_response(),
+    }
+}
+
+/// `tx` as Esplora tells it, with the spends of its first `told` inputs.
+fn esplora_json(backend: &Backend, tx: &Transaction, told: usize) -> Value {
+    let vin: Vec<Value> = (tx.input.iter().enumerate())
+        .map(
+            |(i, input)| match backend.spent.get(&input.previous_output) {
+                Some(_) if i >= told => json!({"prevout": null, "lazy": true}),
+                spent => {
+                    json!({"prevout": spent.map(|s| json!({"scriptpubkey": s.to_hex_string()}))})
+                }
+            },
+        )
+        .collect();
+    json!({"txid": tx.compute_txid().to_string(), "vin": vin})
 }
 
 async fn esplora(backend: Shared) -> Source {
@@ -104,6 +129,7 @@ async fn esplora(backend: Shared) -> Source {
         .route("/api/block-height/{height}", get(hash))
         .route("/api/block/{hash}/{part}", get(block))
         .route("/api/block/{hash}/txs/{start}", get(txs))
+        .route("/api/tx/{txid}", get(tx))
         .with_state(backend);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -114,30 +140,42 @@ async fn esplora(backend: Shared) -> Source {
 /// A transaction spending a P2WPKH output of `secret`, which `backend`
 /// knows the script of, paying `pays`.
 fn spending(backend: &Shared, secret: &SecretKey, vout: u32, pays: Vec<ScriptBuf>) -> Transaction {
+    spending_all(backend, secret, vout..vout + 1, pays)
+}
+
+/// [`spending`] the outputs `vouts`, each an input.
+fn spending_all(
+    backend: &Shared,
+    secret: &SecretKey,
+    vouts: std::ops::Range<u32>,
+    pays: Vec<ScriptBuf>,
+) -> Transaction {
     let secp = bitcoin::key::Secp256k1::new();
     let key = CompressedPublicKey(secret.public_key(&secp));
-    let previous_output = OutPoint {
-        txid: Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([9; 32])),
-        vout,
-    };
     let script = ScriptBuf::new_p2wpkh(&key.wpubkey_hash());
-    backend
-        .lock()
-        .unwrap()
-        .spent
-        .insert(previous_output, script);
     let mut witness = Witness::new();
     witness.push([0x30; 71]);
     witness.push(key.to_bytes());
+    let input = vouts
+        .map(|vout| {
+            let previous_output = OutPoint {
+                txid: Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([9; 32])),
+                vout,
+            };
+            let spent = &mut backend.lock().unwrap().spent;
+            spent.insert(previous_output, script.clone());
+            TxIn {
+                previous_output,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: witness.clone(),
+            }
+        })
+        .collect();
     Transaction {
         version: transaction::Version::TWO,
         lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output,
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness,
-        }],
+        input,
         output: pays
             .into_iter()
             .map(|script_pubkey| TxOut {
@@ -174,6 +212,7 @@ async fn the_hub_indexes_and_serves_the_tweaks_of_its_chain() {
     let backend: Shared = Arc::new(Mutex::new(Backend {
         chain: chain::Chain::new(),
         spent: HashMap::new(),
+        mempool: false,
     }));
     for _ in 0..3 {
         backend.lock().unwrap().chain.mine(None);
@@ -297,12 +336,86 @@ async fn the_hub_indexes_and_serves_the_tweaks_of_its_chain() {
     assert_eq!(cache.as_deref(), Some("no-cache"));
 }
 
+/// Block 3607161 of Mutinynet, which mempool's backend served the spends
+/// of 13 of its consolidation's 100 inputs of: indexed all the same.
+#[tokio::test]
+async fn the_index_reads_alone_a_transaction_whose_page_tells_part_of_its_spends() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend: Shared = Arc::new(Mutex::new(Backend {
+        chain: chain::Chain::new(),
+        spent: HashMap::new(),
+        mempool: true,
+    }));
+    backend.lock().unwrap().chain.mine(None);
+    let source = esplora(backend.clone()).await;
+    let index = Tweaks::open(&dir.path().join("tweaks.sqlite")).unwrap();
+    step(&index, &source, None).await.unwrap();
+
+    // A silent payment spending 100 coins, among more than a page holds.
+    let receiver = Keys::from_seed(&[1; 32], NetworkKind::Test).unwrap();
+    let sender = SecretKey::from_slice(&[2; 32]).unwrap();
+    let outpoints: Vec<OutPoint> = (0..100)
+        .map(|vout| OutPoint {
+            txid: Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([9; 32])),
+            vout,
+        })
+        .collect();
+    let keys = vec![(sender, false); outpoints.len()];
+    let paid = silent::outputs(&keys, &outpoints, &[receiver.address()]).unwrap();
+    let taproot = ScriptBuf::new_p2tr_tweaked(TweakedPublicKey::dangerous_assume_tweaked(paid[0]));
+    let payment = spending_all(&backend, &sender, 0..100, vec![taproot]);
+    let others = (100..111)
+        .map(|vout| spending(&backend, &sender, vout, vec![ScriptBuf::new_op_return([1])]));
+    // And one past the page.
+    let past = spending(
+        &backend,
+        &sender,
+        111,
+        vec![ScriptBuf::new_p2tr_tweaked(
+            TweakedPublicKey::dangerous_assume_tweaked(paid[0]),
+        )],
+    );
+    let txs = std::iter::once(payment.clone())
+        .chain(others)
+        .chain([past.clone()])
+        .collect();
+    backend.lock().unwrap().chain.mine_with(None, txs);
+    step(&index, &source, None).await.unwrap();
+
+    let blocks = index.blocks(2, 1).unwrap();
+    let spent = backend.lock().unwrap().spent.clone();
+    let tweak_of = |tx: &Transaction| {
+        let prevouts: Vec<&bitcoin::Script> = (tx.input.iter())
+            .map(|i| spent[&i.previous_output].as_script())
+            .collect();
+        silent::tweak(tx, &prevouts).unwrap()
+    };
+    let tweak = tweak_of(&payment);
+    assert_eq!(blocks[0].height, 2);
+    assert_eq!(
+        blocks[0]
+            .tweaks
+            .iter()
+            .map(|t| t.0.clone())
+            .collect::<Vec<_>>(),
+        [
+            tweak.serialize().to_vec(),
+            tweak_of(&past).serialize().to_vec()
+        ]
+    );
+    let found = receiver
+        .scanner([])
+        .scan(&tweak, &silent::taproot_outputs(&payment));
+    assert_eq!(found.len(), 1);
+}
+
 #[tokio::test]
 async fn an_index_starts_where_asked_and_only_in_its_own_file() {
     let dir = tempfile::tempdir().unwrap();
     let backend: Shared = Arc::new(Mutex::new(Backend {
         chain: chain::Chain::new(),
         spent: HashMap::new(),
+        mempool: false,
     }));
     for _ in 0..5 {
         backend.lock().unwrap().chain.mine(None);

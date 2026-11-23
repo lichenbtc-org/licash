@@ -308,7 +308,7 @@ impl Source {
                 .into_iter()
                 .map(|s| Ok(ScriptBuf::from_hex(&s.context("an input spends nothing")?)?))
                 .collect::<anyhow::Result<_>>()
-                .with_context(|| format!("block {hash}: transaction {i}"))?;
+                .with_context(|| format!("block {hash}: transaction {i} ({txid})"))?;
             spends[i] = Some(scripts);
             Ok(())
         };
@@ -368,6 +368,16 @@ impl Source {
                 struct EsploraPrevout {
                     scriptpubkey: String,
                 }
+                let scripts = |tx: EsploraTx| -> Vec<Option<String>> {
+                    let inputs = tx.vin.into_iter();
+                    inputs.map(|v| Some(v.prevout?.scriptpubkey)).collect()
+                };
+                // Asked for alone: those a page leaves out, or the spends
+                // of some inputs of. mempool's backend serves ten of a
+                // page's transactions, and the spends of only the first
+                // thirteen inputs of each (the others "lazy"), as Esplora
+                // serves all.
+                let mut alone = Vec::new();
                 // Only the pages, of 25 transactions, holding a wanted one.
                 for start in (0..wanted.len()).step_by(ESPLORA_PAGE) {
                     let end = (start + ESPLORA_PAGE).min(wanted.len());
@@ -377,19 +387,33 @@ impl Source {
                     let url = format!("{base}/block/{hash}/txs/{start}");
                     let page: Vec<EsploraTx> = self.get(&url).await?.json().await?;
                     ensure!(
-                        page.len() == end - start,
+                        page.len() <= end - start,
                         "block {hash}: not its transactions"
                     );
+                    let served = start + page.len();
                     for (i, tx) in (start..).zip(page) {
-                        if wanted[i] {
-                            let scripts = tx.vin.into_iter();
-                            take(
-                                i,
-                                &tx.txid,
-                                scripts.map(|v| Some(v.prevout?.scriptpubkey)).collect(),
-                            )?;
+                        if !wanted[i] {
+                            continue;
+                        }
+                        if tx.vin.iter().all(|v| v.prevout.is_some()) {
+                            let txid = tx.txid.clone();
+                            take(i, &txid, scripts(tx))?;
+                        } else {
+                            ensure!(
+                                tx.txid == block.txdata[i].compute_txid().to_string(),
+                                "block {hash}: the spends of transaction {i} are not its"
+                            );
+                            alone.push(i);
                         }
                     }
+                    alone.extend((served..end).filter(|&i| wanted[i]));
+                }
+                for i in alone {
+                    let txid = block.txdata[i].compute_txid();
+                    let url = format!("{base}/tx/{txid}");
+                    let tx: EsploraTx = self.get(&url).await?.json().await?;
+                    let answered = tx.txid.clone();
+                    take(i, &answered, scripts(tx))?;
                 }
             }
         }
