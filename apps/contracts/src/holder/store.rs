@@ -278,6 +278,41 @@ pub(super) struct New<'a> {
     pub state: &'a [u8],
 }
 
+/// The component of her openings paid for with notes ([`super::paid`]),
+/// and its version: made with the first. A file without it holds none.
+const PAID_COMPONENT: &str = "contract_paid";
+const PAID_VERSION: i64 = 1;
+const PAID_SCHEMA: &str = "
+-- Each opening she pays for with notes, by its payout's ticket, kept before
+-- the payout is made: the hub, what she asked of it, the coin's value, how
+-- many times an opening on the coin failed, and once over, why.
+CREATE TABLE contract_paid (
+    ticket TEXT PRIMARY KEY,
+    hub TEXT NOT NULL,
+    blocks INTEGER NOT NULL,
+    max_price INTEGER NOT NULL CHECK (max_price >= 0),
+    cap INTEGER,
+    value INTEGER NOT NULL CHECK (value > 0),
+    tries INTEGER NOT NULL DEFAULT 0,
+    ended TEXT,
+    created_at INTEGER NOT NULL
+) STRICT;
+";
+
+/// An opening paid for with notes, as kept ([`Store::paid`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaidRow {
+    pub ticket: String,
+    pub hub: String,
+    pub blocks: u32,
+    pub max_price: u64,
+    pub cap: Option<u32>,
+    pub value: u64,
+    pub tries: u32,
+    pub ended: Option<String>,
+    pub created_at: i64,
+}
+
 pub(super) struct Store {
     c: Connection,
     kept: PathBuf,
@@ -310,6 +345,80 @@ impl Store {
             .unwrap_or_else(|| Path::new(""))
             .join(KEPT_DIR);
         Ok(Self { c, kept })
+    }
+
+    /// Keep the opening at `hub` paid for by the payout `ticket`, of a coin
+    /// worth `value`, before the payout is made.
+    pub fn insert_paid(
+        &self,
+        ticket: &str,
+        hub: &str,
+        (blocks, max_price, cap): (u32, u64, Option<u32>),
+        value: u64,
+    ) -> Result<()> {
+        let t = rusqlite::Transaction::new_unchecked(&self.c, TransactionBehavior::Immediate)?;
+        licash_store::component_in(&t, PAID_COMPONENT, PAID_VERSION, PAID_SCHEMA)?;
+        t.execute(
+            "INSERT INTO contract_paid (ticket, hub, blocks, max_price, cap, value, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                ticket,
+                hub,
+                blocks,
+                i64::try_from(max_price)?,
+                cap,
+                i64::try_from(value)?,
+                crate::now()
+            ],
+        )?;
+        t.commit()?;
+        Ok(())
+    }
+
+    /// The openings paid for with notes, the oldest first: none in a file
+    /// that never kept one.
+    pub fn paid(&self) -> Result<Vec<PaidRow>> {
+        match licash_store::component_version(&self.c, PAID_COMPONENT)? {
+            None => return Ok(Vec::new()),
+            Some(PAID_VERSION) => {}
+            Some(v) => bail!("{PAID_COMPONENT} of version {v}, this build reads {PAID_VERSION}"),
+        }
+        let mut stmt = self.c.prepare(
+            "SELECT ticket, hub, blocks, max_price, cap, value, tries, ended, created_at
+             FROM contract_paid ORDER BY created_at, rowid",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(PaidRow {
+                ticket: r.get(0)?,
+                hub: r.get(1)?,
+                blocks: r.get(2)?,
+                max_price: r.get::<_, i64>(3)? as u64,
+                cap: r.get(4)?,
+                value: r.get::<_, i64>(5)? as u64,
+                tries: r.get(6)?,
+                ended: r.get(7)?,
+                created_at: r.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// One more opening on the coin of `ticket` failed: how many have.
+    pub fn paid_tried(&self, ticket: &str) -> Result<u32> {
+        Ok(self.c.query_row(
+            "UPDATE contract_paid SET tries = tries + 1 WHERE ticket = ?1 RETURNING tries",
+            [ticket],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The opening paid for by `ticket` over, and `why`.
+    pub fn end_paid(&self, ticket: &str, why: &str) -> Result<()> {
+        self.c.execute(
+            "UPDATE contract_paid SET ended = ?2 WHERE ticket = ?1 AND ended IS NULL",
+            params![ticket, why],
+        )?;
+        Ok(())
     }
 
     /// [`Store::insert_under`] of a hub that charges nothing, for tests.
@@ -1063,6 +1172,46 @@ mod tests {
         store.fold(&[1; 32], &again).unwrap();
         assert_eq!(store.list().unwrap()[0].folded, Some(again));
         assert!(!store.list().unwrap()[0].live(300));
+    }
+
+    /// Openings paid for with notes are kept in a component of their own,
+    /// made with the first: a file without it holds none.
+    #[test]
+    fn openings_paid_for_with_notes_are_kept_until_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = crate::testing::wallet_file(dir.path());
+        let store = Store::open(&file).unwrap();
+        assert_eq!(store.paid().unwrap(), Vec::new());
+        let c = licash_store::inspect(&file, Kind::Wallet).unwrap().unwrap();
+        assert_eq!(
+            licash_store::component_version(&c, PAID_COMPONENT).unwrap(),
+            None
+        );
+        store
+            .insert_paid("ab", "http://a.test", (1_000, 30_000, None), 21_001)
+            .unwrap();
+        assert!(store
+            .insert_paid("ab", "http://a.test", (1_000, 30_000, None), 21_001)
+            .is_err());
+        assert_eq!(store.paid_tried("ab").unwrap(), 1);
+        assert_eq!(store.paid_tried("ab").unwrap(), 2);
+        store.end_paid("ab", "opened").unwrap();
+        // Over once: why stays.
+        store.end_paid("ab", "again").unwrap();
+        let rows = store.paid().unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(
+            (
+                row.hub.as_str(),
+                row.blocks,
+                row.max_price,
+                row.cap,
+                row.value
+            ),
+            ("http://a.test", 1_000, 30_000, None, 21_001)
+        );
+        assert_eq!((row.tries, row.ended.as_deref()), (2, Some("opened")));
     }
 
     #[test]

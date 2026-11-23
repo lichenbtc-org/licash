@@ -19,6 +19,7 @@ mod fold;
 pub mod funded;
 #[cfg(feature = "node")]
 pub(crate) mod node;
+pub mod paid;
 pub mod recovery;
 pub mod safety;
 mod store;
@@ -419,6 +420,8 @@ pub async fn resume<T: Transport, C: Chain>(
         }
     }
     funded::collect(wallet, &store, tip).await;
+    // Openings paid for with notes: opened once their coin is hers.
+    paid::carry_on(wallet, chain, wallet_file, &store).await;
     let all = store.list()?;
     drop(store);
     // As they stand now: one newly buried, or past its time.
