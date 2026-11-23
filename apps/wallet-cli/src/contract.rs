@@ -16,6 +16,7 @@ use licash_transport::Http;
 use licash_wallet::{Blocks as _, Wallet};
 use serde_json::json;
 
+use crate::payout::Provider;
 use crate::show;
 
 fn node(chain: Option<&str>) -> anyhow::Result<Node> {
@@ -154,18 +155,18 @@ pub async fn open(
 }
 
 /// Pay for a contract at `hub` as `asked`, its deposit a coin paid to the
-/// wallet for notes at the hub `from` through the swap provider `provider`
-/// ([`holder::paid`]), the claim's, provider's and lock fees `max_fee` at
-/// most [default: 1% of the coin and 2000], the claim budgeted at
-/// `fee_rate`. Opened once the coin is the wallet's, as [`list`] with a
-/// chain carries it on: at once if it already is.
+/// wallet for notes at the hub `from` through `provider` (at its URL, or
+/// announced on relays) ([`holder::paid`]), the claim's, provider's and
+/// lock fees `max_fee` at most [default: 1% of the coin and 2000], the
+/// claim budgeted at `fee_rate`. Opened once the coin is the wallet's, as
+/// [`list`] with a chain carries it on: at once if it already is.
 pub async fn open_paid(
     wallet: &Wallet<Http>,
     path: &Path,
     chain: Option<&str>,
     hub: &str,
     asked: Asked,
-    (provider, from, max_fee, fee_rate): (String, String, Option<u64>, Option<u64>),
+    (provider, from, max_fee, fee_rate): (Provider, String, Option<u64>, Option<u64>),
     json: bool,
 ) -> anyhow::Result<()> {
     let node = node(chain)?;
@@ -184,18 +185,14 @@ pub async fn open_paid(
         cap: asked.cap,
         deposit: None,
     };
+    let coin = holder::paid::coin(wallet, hub, ask).await?;
     let source = crate::payout::source(chain.unwrap_or_default())?;
     let rate = crate::onchain::rate(&source, fee_rate).await?;
-    let payment = holder::paid::Payment {
-        provider,
-        from,
-        max_fee: max_fee.map_or(
-            holder::paid::MaxFee::Usual(crate::payout::USUAL_MAX_FEE),
-            holder::paid::MaxFee::At,
-        ),
-        rate,
-    };
-    let paid = holder::paid::pay(wallet, path, hub, ask, &payment).await?;
+    let max_fee = max_fee.unwrap_or(coin.value / 100 + crate::payout::USUAL_MAX_FEE);
+    let pair = (from.as_str(), coin.to.as_str());
+    let quote = crate::payout::quote(wallet, provider, pair, coin.value, (max_fee, rate), json);
+    let quote = quote.await?;
+    let paid = holder::paid::pay(wallet, path, &coin, &quote).await?;
     // Its coin perhaps confirmed already: opened if so.
     let contracts = holder::resume(wallet, &node, path).await?;
     let payouts = wallet.payouts()?;
@@ -208,8 +205,8 @@ pub async fn open_paid(
     let value = json!({
         "ticket": paid.ticket,
         "hub": hub,
-        "provider": payment.provider,
-        "from": payment.from,
+        "provider": quote.provider,
+        "from": quote.from,
         "value": paid.value,
         "price": paid.price,
         "cap": paid.fit.cap,

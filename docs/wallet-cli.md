@@ -329,12 +329,14 @@ their own coin. No contract opens at a hub charging more than is sane (over
 10 sat or 1% on a payment, lock or refund, over 1 sat for each note made, or
 over 20% of a chosen cap a year) unless `--any-fees` asks all the same.
 
-With no coin on Bitcoin, `open-contract <hub> --pay-with <provider-url>
---chain <url>` pays for one with notes instead, in two steps. First a payout:
-the swap provider pays the wallet's own fallback address a coin worth the
-contract's price and 1,000 sat of it yours (the hub funds the rest), for notes
-locked to it at `--from` (by default the hub holding the most; another hub's
-notes do, the provider swapping them), the claim's, provider's and lock's fees
+With no coin on Bitcoin, `open-contract <hub> --with-notes --chain <url>` pays
+for one with notes instead, in two steps. First a payout: a swap provider
+(`--provider <url>`, or by default one announced on the relays the wallet's
+hubs name or `--relay` names, as `payout` finds it) pays the wallet's own
+fallback address a coin worth the contract's price and 1,000 sat of it yours
+(the hub funds the rest), for notes locked to it at `--from` (by default the
+hub holding the most; another hub's notes do, the provider swapping them), the
+claim's, provider's and lock's fees
 at most `--max-fee` (by default 1% and 2,000), the claim budgeted at
 `--fee-rate`. Then, once the claim is buried and the wallet found the coin
 (looking for it in the blocks since it last looked), the contract opens on it

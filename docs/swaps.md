@@ -109,7 +109,7 @@ the claims of the coins it made unsized, or takes them back, by the script
 it recorded each paying.
 
 A wallet pays for a coin to open a recovery contract with as any payout, to
-its own address (see `open-contract --pay-with` in the wallet's reference),
+its own address (see `open-contract --with-notes` in the wallet's reference),
 then opens the contract on it. Lightning pays for such a coin in two steps:
 notes received at a hub over Lightning first, then locked to the provider as
 any.

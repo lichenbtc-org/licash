@@ -6,9 +6,10 @@
 use anyhow::Context;
 use bitcoin::FeeRate;
 use licash_api::swaps::State;
-use licash_contracts::holder::paid::{MaxFee, PART};
+use licash_contracts::holder::paid::PART;
 use licash_contracts::holder::{self, paid, Ask, Fate, Node};
 use licash_e2e::{until, Eco};
+use licash_nostr::{wallet::payout_providers, Route};
 use licash_wallet::{LockState, PayoutState};
 use serde_json::json;
 
@@ -56,13 +57,28 @@ async fn a_wallet_with_no_coin_pays_for_a_contract_with_notes() -> anyhow::Resul
         cap: None,
         deposit: None,
     };
-    let payment = paid::Payment {
-        provider: eco.swaps().to_owned(),
-        from: hub1.to_owned(),
-        max_fee: MaxFee::At(5_000),
-        rate: FeeRate::from_sat_per_vb_u32(1),
-    };
-    let paid = paid::pay(&alice, &path, hub1, ask, &payment).await?;
+    let coin = paid::coin(&alice, hub1, ask).await?;
+    assert_eq!(coin.to, alice.fallback_address()?.to_string());
+    // Its provider found on the relay it announces itself on, as the app
+    // finds it.
+    let relays = [eco.relay().to_owned()];
+    let rate = FeeRate::from_sat_per_vb_u32(1);
+    let pair = (hub1, coin.to.as_str());
+    let found = payout_providers(
+        &alice,
+        &relays,
+        &Route::Direct,
+        pair,
+        coin.value,
+        (5_000, rate),
+    );
+    let found = found
+        .await?
+        .into_iter()
+        .next()
+        .context("no provider found")?;
+    assert_eq!(found.url, eco.swaps());
+    let paid = paid::pay(&alice, &path, &coin, &found.quote).await?;
     assert_eq!(paid.value, paid.price + u64::from(paid.fit.funded));
     assert_eq!(u64::from(paid.fit.funded), PART);
     let payout = alice
@@ -89,6 +105,10 @@ async fn a_wallet_with_no_coin_pays_for_a_contract_with_notes() -> anyhow::Resul
             .iter()
             .find(|p| p.hash == paid.ticket)
             .context("the payout")?;
+        // Failed, it never opens: told why at once.
+        if let PayoutState::Failed(why) = &ours.state {
+            anyhow::bail!("the coin's payout failed: {why}");
+        }
         let Some(claim) = ours.claim else {
             return Ok(None);
         };

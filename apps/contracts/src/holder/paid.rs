@@ -6,18 +6,21 @@
 //! coin is buried, the contract opens on it as on any coin of hers. Each
 //! step is the usual one: should the opening fail, she keeps the coin.
 //!
-//! [`pay`] keeps the opening first, then makes the payout; [`super::resume`]
+//! [`coin`] says what coin to pay for, [`pay`] keeps the opening, then
+//! makes the payout (of a quote the caller asked, of a provider it chose
+//! or found announced); [`super::resume`]
 //! carries it on ([`carry_on`]): it follows the payout, finds its coin
 //! among her wallet's, and opens the contract on it.
 
 use std::path::Path;
 
 use anyhow::{anyhow, bail, ensure, Context as _, Result};
-use bitcoin::FeeRate;
-use licash_wallet::{Error as WalletError, PayoutState, Transport, Wallet, PAYOUT_WINDOW};
+use licash_wallet::{
+    Error as WalletError, PayoutQuote, PayoutState, Transport, Wallet, PAYOUT_WINDOW,
+};
 
 use super::chain::Chain;
-use super::store::{PaidRow, Store};
+use super::store::Store;
 use super::{fees, fit, fundable, funding_notes, offer, open_at, Ask, Fit, Pricing, RESUMES};
 
 /// Her part of a contract paid for with notes, in sat, at least: what the
@@ -26,33 +29,18 @@ use super::{fees, fit, fundable, funding_notes, offer, open_at, Ask, Fit, Pricin
 /// the hub funds the rest of its cap.
 pub const PART: u64 = 1_000;
 
-/// How a coin to open with is paid for: notes locked to the swap provider
-/// at `provider` at the hub `from`, the claim's, provider's and hub's
-/// fees `max_fee` at most, the claim budgeted at `rate`.
-#[derive(Clone, Debug)]
-pub struct Payment {
-    pub provider: String,
-    pub from: String,
-    pub max_fee: MaxFee,
-    pub rate: FeeRate,
-}
-
-/// The most a coin paid for costs on top of its value, in sat.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MaxFee {
-    /// As named.
-    At(u64),
-    /// 1% of the coin and this.
-    Usual(u64),
-}
-
-impl MaxFee {
-    fn of(self, value: u64) -> u64 {
-        match self {
-            Self::At(most) => most,
-            Self::Usual(base) => value / 100 + base,
-        }
-    }
+/// A coin to pay for, to open a contract on ([`coin`]): what it is worth,
+/// paid to her wallet's own address, and the contract it fits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Coin {
+    pub hub: String,
+    pub ask: Ask,
+    /// What the coin is worth: the price and her part.
+    pub value: u64,
+    pub price: u64,
+    pub fit: Fit,
+    /// Her wallet's own address, the coin's.
+    pub to: String,
 }
 
 /// An opening paid for: the payout's ticket, and the contract it pays.
@@ -65,6 +53,17 @@ pub struct Paid {
     pub fit: Fit,
 }
 
+pub use super::store::PaidRow;
+
+/// The openings paid for kept in `wallet_file`, the oldest first, those over
+/// with why ([`PaidRow::ended`]).
+pub fn list(wallet_file: &Path) -> Result<Vec<PaidRow>> {
+    match Store::existing(wallet_file)? {
+        Some(store) => store.paid(),
+        None => Ok(Vec::new()),
+    }
+}
+
 /// How many times an opening on a coin paid for fails before it is left
 /// to her: the coin is hers, to open with by hand.
 const TRIES: u32 = 3;
@@ -73,18 +72,12 @@ const TRIES: u32 = 3;
 /// paid for is carried on: its claim is in one of the last few.
 const SCAN: u32 = 144;
 
-/// Pay for a contract at `hub` as `ask`ed, but for its deposit (a coin
-/// paid for by `payment`): the smallest contract of `ask`'s cap at least,
-/// her part of it [`PART`]. Kept in `wallet_file` before the payout is
-/// made; [`super::resume`] opens it once the coin is hers. Refused at a hub
-/// charging more than is sane, or pricing it beyond `ask.max_price`.
-pub async fn pay<T: Transport>(
-    wallet: &Wallet<T>,
-    wallet_file: &Path,
-    hub: &str,
-    ask: Ask,
-    payment: &Payment,
-) -> Result<Paid> {
+/// The coin to pay for to open a contract at `hub` as `ask`ed, but for its
+/// deposit (that coin): the smallest contract of `ask`'s cap at least, her
+/// part of it [`PART`]. Refused at a hub charging more than is sane, or
+/// pricing it beyond `ask.max_price`. A payout of [`Coin::value`] to
+/// [`Coin::to`] pays for it ([`pay`]).
+pub async fn coin<T: Transport>(wallet: &Wallet<T>, hub: &str, ask: Ask) -> Result<Coin> {
     ensure!(
         ask.deposit.is_none(),
         "a coin paid for is the deposit: none other to name"
@@ -124,39 +117,55 @@ pub async fn pay<T: Transport>(
         "{hub} asks {price} sat to open, more than {}",
         ask.max_price
     );
-    let to = wallet.fallback_address()?.to_string();
-    let quote = wallet
-        .payout_quote(
-            &payment.provider,
-            &payment.from,
-            &to,
-            value,
-            payment.max_fee.of(value),
-            payment.rate,
-        )
-        .await
-        .map_err(|e| anyhow!("a coin of {value} sat from {}: {e}", payment.provider))?;
-    let store = Store::open(wallet_file)?;
-    store.insert_paid(
-        &quote.ticket,
-        &hub,
-        (ask.blocks, ask.max_price, ask.cap),
-        value,
-    )?;
-    tracing::info!(
-        ticket = %quote.ticket, %hub, provider = %payment.provider, from = %payment.from,
-        value, price, funded = fitted.funded, costs = quote.costs(),
-        "paying for a contract's coin with notes"
-    );
-    wallet
-        .payout(&quote)
-        .await
-        .map_err(|e| anyhow!("paying for the coin: {e}"))?;
-    Ok(Paid {
-        ticket: quote.ticket,
+    Ok(Coin {
+        hub,
+        ask,
         value,
         price,
         fit: fitted,
+        to: wallet.fallback_address()?.to_string(),
+    })
+}
+
+/// Pay for `coin` as `quote` says, a payout of its value to its address:
+/// the opening kept in `wallet_file` before the payout is made, opened by
+/// [`super::resume`] once the coin is her wallet's.
+pub async fn pay<T: Transport>(
+    wallet: &Wallet<T>,
+    wallet_file: &Path,
+    coin: &Coin,
+    quote: &PayoutQuote,
+) -> Result<Paid> {
+    ensure!(
+        quote.amount == coin.value && quote.address == coin.to,
+        "a payout of {} sat to {}, not the coin's {} to {}",
+        quote.amount,
+        quote.address,
+        coin.value,
+        coin.to
+    );
+    let store = Store::open(wallet_file)?;
+    let ask = &coin.ask;
+    store.insert_paid(
+        &quote.ticket,
+        &coin.hub,
+        (ask.blocks, ask.max_price, ask.cap),
+        coin.value,
+    )?;
+    tracing::info!(
+        ticket = %quote.ticket, hub = %coin.hub, provider = %quote.provider, from = %quote.from,
+        value = coin.value, price = coin.price, funded = coin.fit.funded, costs = quote.costs(),
+        "paying for a contract's coin with notes"
+    );
+    wallet
+        .payout(quote)
+        .await
+        .map_err(|e| anyhow!("paying for the coin: {e}"))?;
+    Ok(Paid {
+        ticket: quote.ticket.clone(),
+        value: coin.value,
+        price: coin.price,
+        fit: coin.fit,
     })
 }
 

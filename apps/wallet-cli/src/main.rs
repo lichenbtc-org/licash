@@ -548,27 +548,43 @@ enum Command {
         /// 20% of the cap chosen a year.
         #[arg(long)]
         any_fees: bool,
-        /// With no coin of the wallet's: pay for one with notes, through
-        /// the swap provider at this URL, to the wallet's own address. Its
-        /// coin is worth the price and 1000 sat of the contract yours, the
-        /// hub funding the rest. The contract opens on it once the coin is
-        /// the wallet's, as `contracts --chain` carries it on; should it
-        /// not, the coin stays yours. For notes on Lightning, receive them
-        /// at a hub first.
-        #[arg(long, value_name = "URL", conflicts_with_all = ["coin", "any_fees"])]
-        pay_with: Option<String>,
+        /// With no coin of the wallet's: pay for one with notes, a payout
+        /// through a swap provider to the wallet's own address. Its coin is
+        /// worth the price and 1000 sat of the contract yours, the hub
+        /// funding the rest. The contract opens on it once the coin is the
+        /// wallet's, as `contracts --chain` carries it on; should it not,
+        /// the coin stays yours. For notes on Lightning, receive them at a
+        /// hub first.
+        #[arg(long, conflicts_with_all = ["coin", "any_fees"])]
+        with_notes: bool,
+        /// The swap provider paying the coin, by its URL [default: of those
+        /// announced on the relays that pay it within --max-fee, one paid
+        /// out through before, else the cheapest].
+        #[arg(long, env = "LICASH_WALLET_PROVIDER", requires = "with_notes")]
+        provider: Option<String>,
+        /// A relay to find a provider on [default: those the wallet's hubs
+        /// name]. Repeat it, or separate relays with commas, for more.
+        #[arg(
+            long = "relay",
+            value_name = "URL",
+            env = "LICASH_WALLET_RELAYS",
+            value_delimiter = ',',
+            conflicts_with = "provider",
+            requires = "with_notes"
+        )]
+        relays: Vec<String>,
         /// The hub whose notes pay for the coin [default: the one holding
         /// the most].
-        #[arg(long, requires = "pay_with")]
+        #[arg(long, requires = "with_notes")]
         from: Option<String>,
         /// What the coin costs at most on top of its value, in sat: its
         /// claim's fee, the provider's and the hub's [default: 1% and
         /// 2000].
-        #[arg(long, requires = "pay_with")]
+        #[arg(long, requires = "with_notes")]
         max_fee: Option<u64>,
         /// The fee rate the coin's claim is budgeted at least, in sat/vB
         /// [default: the chain's estimate within 6 blocks, at least 1].
-        #[arg(long, requires = "pay_with")]
+        #[arg(long, requires = "with_notes")]
         fee_rate: Option<u64>,
         /// The chain to check the hub's quote on and broadcast to.
         #[arg(long, env = "LICASH_WALLET_CHAIN")]
@@ -1516,7 +1532,9 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
             cap,
             coin,
             any_fees,
-            pay_with,
+            with_notes,
+            provider,
+            relays,
             from,
             max_fee,
             fee_rate,
@@ -1529,7 +1547,11 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
                 coin,
                 any_fees,
             };
-            if let Some(provider) = pay_with {
+            if with_notes {
+                let provider = match provider {
+                    Some(url) => payout::Provider::At(url),
+                    None => payout::Provider::Announced(relays, route(tor, cli.proxy.as_deref())?),
+                };
                 let from = match from {
                     Some(from) => from,
                     None => richest_but(&wallet, "")?,

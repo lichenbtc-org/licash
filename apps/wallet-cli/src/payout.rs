@@ -3,10 +3,11 @@
 //! wallet's lock, and the wallet's claims of those coins.
 
 use anyhow::{bail, Context};
+use bitcoin::FeeRate;
 use licash_chain_client::Source;
 use licash_nostr::{wallet::payout_providers, Route};
 use licash_transport::Http;
-use licash_wallet::{Payout, PayoutState, Wallet};
+use licash_wallet::{Payout, PayoutQuote, PayoutState, Wallet};
 use serde_json::json;
 
 use crate::{onchain, show};
@@ -40,7 +41,45 @@ pub async fn pay(
     let source = source(chain)?;
     let rate = onchain::rate(&source, fee_rate).await?;
     let max_fee = max_fee.unwrap_or(amount / 100 + USUAL_MAX_FEE);
-    let quote = match provider {
+    let quote = quote(wallet, provider, (from, to), amount, (max_fee, rate), json).await?;
+    let payout = match wallet.payout(&quote).await {
+        // Asked again, its fee risen: quoted again within it, if accepted.
+        Err(e @ licash_wallet::Error::FeeRose { .. }) => {
+            let max_fee = crate::accept_raise(e, json)?;
+            let (provider, from) = (&quote.provider, &quote.from);
+            let again = wallet.payout_quote(provider, from, to, amount, max_fee, rate);
+            wallet.payout(&again.await?).await?
+        }
+        payout => payout?,
+    };
+    if let PayoutState::Failed(reason) = &payout.state {
+        show(json, payout_json(&payout), payout_line(&payout));
+        bail!("the payout failed ({reason}): its lock, if made, returns once expired");
+    }
+    let payout = follow(wallet, &source, &payout.hash).await?;
+    show(
+        json,
+        payout_json(&payout),
+        format!(
+            "{}\nfollow it with `licash-wallet payouts --chain` until done",
+            payout_line(&payout)
+        ),
+    );
+    Ok(())
+}
+
+/// The quote of paying `amount` to `to` from notes at `from` through
+/// `provider`, within `max_fee`, the claim budgeted at `rate`: a provider's
+/// at its URL asked again within a risen fee, if accepted.
+pub(crate) async fn quote(
+    wallet: &Wallet<Http>,
+    provider: Provider,
+    (from, to): (&str, &str),
+    amount: u64,
+    (max_fee, rate): (u64, FeeRate),
+    json: bool,
+) -> anyhow::Result<PayoutQuote> {
+    Ok(match provider {
         Provider::At(url) => {
             let quoting = |max_fee| wallet.payout_quote(&url, from, to, amount, max_fee, rate);
             match quoting(max_fee).await {
@@ -67,31 +106,7 @@ pub async fn pay(
             tracing::info!(provider = %found.url, costs, known, "provider found");
             found.quote
         }
-    };
-    let payout = match wallet.payout(&quote).await {
-        // Asked again, its fee risen: quoted again within it, if accepted.
-        Err(e @ licash_wallet::Error::FeeRose { .. }) => {
-            let max_fee = crate::accept_raise(e, json)?;
-            let (provider, from) = (&quote.provider, &quote.from);
-            let again = wallet.payout_quote(provider, from, to, amount, max_fee, rate);
-            wallet.payout(&again.await?).await?
-        }
-        payout => payout?,
-    };
-    if let PayoutState::Failed(reason) = &payout.state {
-        show(json, payout_json(&payout), payout_line(&payout));
-        bail!("the payout failed ({reason}): its lock, if made, returns once expired");
-    }
-    let payout = follow(wallet, &source, &payout.hash).await?;
-    show(
-        json,
-        payout_json(&payout),
-        format!(
-            "{}\nfollow it with `licash-wallet payouts --chain` until done",
-            payout_line(&payout)
-        ),
-    );
-    Ok(())
+    })
 }
 
 /// Take the payout `hash` on, then broadcast the wallet's claims.

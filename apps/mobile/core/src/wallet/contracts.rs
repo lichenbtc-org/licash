@@ -19,7 +19,7 @@ use licash_contracts::holder::{self, Ask, Fate, Phase};
 use super::Wallet;
 use crate::{
     chain::Chain, Activity, Balance, ChainSource, Contract, ContractQuote, ContractState,
-    DepositCoin, Details, Kind, LicashError, OpeningStep, State, Transfer,
+    DepositCoin, Details, Kind, LicashError, OpeningStep, PayoutQuote, State, Transfer,
 };
 
 /// How large an instance of a contract's opening is, about: her wallet
@@ -233,56 +233,104 @@ impl Wallet {
         self.opened(chain, &hub, ask)
     }
 
-    /// Pay for a contract at `hub` with notes, for a wallet with no coin on
-    /// Bitcoin to open it with: a coin worth its price and a small part of
-    /// it the wallet's (the hub funding the rest), paid to the wallet's own
-    /// address for notes at `from` (by default, the hub trusted holding the
-    /// most) through the swap provider at `provider`, closing `blocks` from
-    /// now (by default, as late as it allows), for at most `max_price` (by
-    /// default, what its info says). [`Wallet::resume_contracts`] opens the
-    /// contract on the coin once the wallet found it; should it not, the
-    /// coin stays the wallet's. Notes on Lightning are received at a hub
-    /// first.
-    pub fn open_paid_contract(
+    /// What a contract at `hub` costs paid for with notes, for a wallet with
+    /// no coin on Bitcoin to open it with: a coin worth its price and a
+    /// small part of it the wallet's (the hub funding the rest), paid out to
+    /// the wallet's own address from notes at `from` (by default, the hub
+    /// trusted holding the most) through the swap provider announced on the
+    /// relays the hubs name that asks least: the smallest contract of `cap`
+    /// at least (by default, the smallest), closing `blocks` from now (by
+    /// default, as late as it allows). Notes on Lightning are received at a
+    /// hub first. [`Wallet::open_paid_contract`] pays it, at no higher
+    /// price.
+    pub fn paid_contract_quote(
         &self,
         hub: String,
-        provider: String,
         from: Option<String>,
+        cap: Option<u64>,
         blocks: Option<u32>,
-        max_price: Option<u64>,
-    ) -> Result<PaidContract, LicashError> {
+    ) -> Result<PaidContractQuote, LicashError> {
+        let _timed = crate::log::timed("paid_contract_quote");
         let (hub, terms) = self.contracting_hub(&hub)?;
-        let from = match from {
-            Some(from) => from,
-            None => self.richest()?,
-        };
+        let cap = cap
+            .map(|c| u32::try_from(c).map_err(|_| LicashError::invalid(format!("a cap of {c}"))))
+            .transpose()?;
         let ask = Ask {
             blocks: blocks.unwrap_or(terms.blocks),
-            max_price: max_price.unwrap_or(terms.price),
-            cap: None,
+            max_price: u64::MAX,
+            cap,
             deposit: None,
         };
-        let payment = holder::paid::Payment {
-            provider,
-            from,
-            max_fee: holder::paid::MaxFee::At(super::payouts::max_fee(terms.price)),
-            rate: super::payouts::claim_rate(),
+        let coin = holder::paid::coin(&self.wallet, &hub, ask);
+        let coin = self.operation(coin).map_err(unavailable)?;
+        let payout = self.payout_quote(coin.to.clone(), Some(coin.value), from)?;
+        Ok(PaidContractQuote {
+            hub,
+            blocks: ask.blocks,
+            least: cap.map(u64::from),
+            value: coin.value,
+            price: coin.price,
+            cap: u64::from(coin.fit.cap),
+            funded: u64::from(coin.fit.funded),
+            payout,
+        })
+    }
+
+    /// Pay for a contract as `quote` says, costing at most its payout's
+    /// fee: the payout made, under way as any, and the contract opened on
+    /// its coin by [`Wallet::resume_contracts`] once the wallet found it;
+    /// should it not, the coin stays the wallet's. Refused if the hub's
+    /// terms changed since: to be quoted again.
+    pub fn open_paid_contract(
+        &self,
+        quote: PaidContractQuote,
+    ) -> Result<PaidContract, LicashError> {
+        let _timed = crate::log::timed("open_paid_contract");
+        let (hub, _) = self.contracting_hub(&quote.hub)?;
+        let cap = quote.least.and_then(|c| u32::try_from(c).ok());
+        let ask = Ask {
+            blocks: quote.blocks,
+            max_price: quote.price,
+            cap,
+            deposit: None,
         };
         let _contracting = self
             .contracting
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let paid = holder::paid::pay(&self.wallet, self.wallet.path(), &hub, ask, &payment);
+        let coin = holder::paid::coin(&self.wallet, &hub, ask);
+        let coin = self.operation(coin).map_err(unavailable)?;
+        if (coin.value, coin.to.as_str()) != (quote.value, quote.payout.address.as_str()) {
+            return Err(LicashError::invalid(format!(
+                "the contract now takes a coin of {} sat, not {}: ask again",
+                coin.value, quote.value
+            )));
+        }
+        let ticketed = self.ticketed(&quote.payout)?;
+        let paid = holder::paid::pay(&self.wallet, self.wallet.path(), &coin, &ticketed);
         let paid = self.operation(paid).map_err(unavailable)?;
         tracing::info!(ticket = %paid.ticket, %hub, value = paid.value, "paying for a contract's coin");
         Ok(PaidContract {
             ticket: paid.ticket,
             hub,
             value: paid.value,
-            price: paid.price,
-            cap: u64::from(paid.fit.cap),
-            funded: u64::from(paid.fit.funded),
         })
+    }
+
+    /// The contracts paid for with notes not opened yet, nor given up: each
+    /// waits for its payout's coin, then opens on it as
+    /// [`Wallet::resume_contracts`] carries it on. The oldest first.
+    pub fn paid_contracts(&self) -> Result<Vec<PaidContract>, LicashError> {
+        let all = holder::paid::list(self.wallet.path()).map_err(failed)?;
+        Ok(all
+            .into_iter()
+            .filter(|p| p.ended.is_none())
+            .map(|p| PaidContract {
+                ticket: p.ticket,
+                hub: p.hub,
+                value: p.value,
+            })
+            .collect())
     }
 
     /// The contracts, the newest first, as last seen.
@@ -716,19 +764,35 @@ fn state(c: &holder::Contract, tip: u32) -> ContractState {
     }
 }
 
+/// What a contract paid for with notes costs ([`Wallet::paid_contract_quote`]).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PaidContractQuote {
+    pub hub: String,
+    pub blocks: u32,
+    /// The least cap asked, if any.
+    pub least: Option<u64>,
+    /// What the coin is worth: the price and the wallet's part.
+    pub value: u64,
+    /// The hub's fee, interest and reserve.
+    pub price: u64,
+    pub cap: u64,
+    /// The wallet's part of the contract.
+    pub funded: u64,
+    /// The coin's payout to the wallet's own address: what it costs on top
+    /// of its value, and through whom.
+    pub payout: PayoutQuote,
+}
+
 /// A contract paid for with notes ([`Wallet::open_paid_contract`]): its
-/// coin's payout, by its ticket, and the contract it opens once the coin is
-/// confirmed.
+/// coin's payout, by its ticket, and the contract it opens once the wallet
+/// found the coin.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct PaidContract {
     /// The payout's ticket: its hash among the payouts.
     pub ticket: String,
     pub hub: String,
-    /// What the coin is worth: the price and the wallet's part.
+    /// What the coin is worth.
     pub value: u64,
-    pub price: u64,
-    pub cap: u64,
-    pub funded: u64,
 }
 
 fn unavailable(e: anyhow::Error) -> LicashError {

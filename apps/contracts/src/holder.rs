@@ -69,7 +69,7 @@ pub fn after_assert(quote: &Quote) -> u32 {
 pub const RESPONSE_WINDOW: u16 = 8;
 
 /// What she asks of a hub.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ask {
     /// Blocks from now to the close, when the hub's collateral returns
     /// to it: at most what the hub offers.
