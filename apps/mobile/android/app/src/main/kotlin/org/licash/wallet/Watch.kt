@@ -41,7 +41,7 @@ internal const val ASKED_SECS = 24 * 3600L
 
 /** How closely to watch what `ui` shows under way, at `now` in seconds since the epoch. */
 internal fun watchOf(ui: Ui, now: Long): Watch {
-    val contracting = ui.opening != null || ui.balance.moving > 0uL ||
+    val contracting = ui.opening != null || ui.balance.moving > 0uL || ui.paid.isNotEmpty() ||
         ui.contracts.any { it.state == ContractState.Opening || it.state == ContractState.Confirming }
     // Of unknown age: perhaps not stuck.
     val under = ui.history.filter { it.state == State.PENDING && (it.at ?: now) > now - STALE_SECS }

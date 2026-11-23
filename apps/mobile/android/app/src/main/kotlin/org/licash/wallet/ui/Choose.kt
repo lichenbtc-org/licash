@@ -184,6 +184,8 @@ internal fun ChooseSheet(
     title: String = "Protect at $hub",
     verb: String = "Protect",
     decline: (() -> Unit)? = null,
+    // With no coin paying it: one paid for with notes, of so large a cover over so many blocks.
+    payWithNotes: ((cap: ULong, blocks: UInt) -> Unit)? = null,
     // With no coin paying it: cashing out a coin of so many sat to herself first, to pay it.
     cashOut: ((ULong) -> Unit)? = null,
 ) {
@@ -287,8 +289,19 @@ internal fun ChooseSheet(
                 breakdown = contractCost(range, first.cap, firstFee, FIXED_PART),
             )
             Line("Reserve, refundable", sat(range.reserve), tag = "contract-reserve")
+            if (payWithNotes != null) {
+                Say(PAY_WITH_NOTES)
+                BigButton("Pay ${sat(first.coin)} from notes", Modifier.fillMaxWidth().testTag("pay-with-notes")) {
+                    payWithNotes(first.cap, blocks)
+                }
+                Spacer(Modifier.height(8.dp))
+            }
             Say(CASH_OUT_FIRST)
-            BigButton("Cash out ${sat(first.coin)} to yourself", Modifier.fillMaxWidth().testTag("cash-out-first")) {
+            BigButton(
+                "Cash out ${sat(first.coin)} to yourself",
+                Modifier.fillMaxWidth().testTag("cash-out-first"),
+                quiet = payWithNotes != null,
+            ) {
                 cashOut(first.coin)
             }
         } else if (coin == null && coins.isEmpty()) {
@@ -357,6 +370,10 @@ internal fun ChooseSheet(
 /** How protecting what she holds is paid for with no coin on Bitcoin: one cashed out to herself, then. */
 internal const val CASH_OUT_FIRST = "None of your bitcoin pays for this. Cash out this much to yourself, then " +
     "protect with it once it arrives. Beyond the cost and the reserve, it comes back to your balance."
+
+/** Paying for a coin with notes, then protecting with it, in one step. */
+internal const val PAY_WITH_NOTES = "Or pay for it with your notes here: a swap provider sends this much to " +
+    "this wallet on Bitcoin, and protection is set up on it once it confirms. Should it not be, the coin stays yours."
 
 /** Why no coin pays for a contract: each is spent whole, so short of the price or beyond what the largest takes. */
 internal const val NO_FIT = "No contract of this hub takes a coin of yours whole: each is short of the price, " +

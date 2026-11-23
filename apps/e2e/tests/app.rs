@@ -1054,7 +1054,7 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
         "{first} for {wanted} with {PART} of hers"
     );
     phone.tagged("contract-reserve", "20,000 sat", 10).await?;
-    let cash_out = phone.by_id("cash-out-first", 10).await?;
+    phone.by_id("cash-out-first", 10).await?;
     let asked = first + RESERVE + PART;
     let words = phone.scroll_to_text("Cash out ").await?;
     ensure!(
@@ -1071,6 +1071,35 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     ] {
         ensure!(!phone.has(gone).await?, "{gone:?} with no coin");
     }
+    // Or paid for with the notes there, the same coin: quoted through a
+    // provider found on Nostr, its fees on top. Not paid this way here: the
+    // coin cashed out by hand is what the rest opens on.
+    let words = phone.scroll_to_text("Pay ").await?;
+    ensure!(
+        words.text.ends_with(" from notes") && amount(&words.text) == asked,
+        "{:?} for {asked}",
+        words.text
+    );
+    phone.tap_id("pay-with-notes").await?;
+    let paid_coin = amount(&phone.by_id("paid-coin", 120).await?.text);
+    ensure!(paid_coin == asked, "a coin of {paid_coin} paid for {asked}");
+    let paid_cap = amount(&phone.by_id("paid-cap", 10).await?.text);
+    ensure!(
+        paid_cap == wanted,
+        "a cap of {paid_cap} paid for, {wanted} offered"
+    );
+    let fees = amount(&phone.by_id("paid-fees", 10).await?.text);
+    phone.by_id("paid-provider", 10).await?;
+    phone.by_id("pay-paid", 10).await?;
+    let total = amount(&phone.scroll_to_text("Pay ").await?.text);
+    ensure!(
+        total == asked + fees,
+        "{total} to pay for {asked} and {fees} in fees"
+    );
+    phone.back().await?;
+    phone.gone("pay-paid", 10).await?;
+    phone.tap_id("open-contract").await?;
+    let cash_out = phone.by_id("cash-out-first", 60).await?;
 
     // Cashed out to itself from there, that much.
     phone.tap_view(&cash_out).await?;

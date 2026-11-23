@@ -56,6 +56,15 @@ class WatchTest {
     }
 
     @Test
+    fun a_contract_paid_for_with_notes_is_watched_now_until_set_up() {
+        // Its payout done, the coin found: nothing in the history under way, the contract not yet opened.
+        val done = listOf(line(Kind.PAYOUT, State.DONE))
+        val paid = org.licash.core.PaidContract("t", "https://hub.example", 25_000uL)
+        assertEquals(Watch.NOW, watchOf(Ui(history = done, paid = listOf(paid)), now))
+        assertEquals(Watch.NONE, watchOf(Ui(history = done), now))
+    }
+
+    @Test
     fun a_deposit_never_sent_is_looked_at_later_but_once_sent_or_unknown_now() {
         val moved = line(Kind.MOVED, State.PENDING)
         assertEquals(Watch.LATER, watchOf(Ui(history = listOf(moved), under = mapOf(moved.key to deposit(false))), now))

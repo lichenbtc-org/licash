@@ -64,6 +64,8 @@ import org.licash.core.Notes
 import org.licash.core.NotesOf
 import org.licash.core.NoteOptimization
 import org.licash.core.Paid
+import org.licash.core.PaidContract
+import org.licash.core.PaidContractQuote
 import org.licash.core.Recovery
 import org.licash.core.PayQuote
 import org.licash.core.PayoutQuote
@@ -133,6 +135,8 @@ data class Ui(
     val relaysMs: Long? = null,
     /** The recovery contracts with hubs, the newest first. */
     val contracts: List<Contract> = emptyList(),
+    /** The contracts paid for with notes, set up once their coin is on Bitcoin, the oldest first. */
+    val paid: List<PaidContract> = emptyList(),
     /** The contracts forced closed, the oldest first. */
     val recoveries: List<Recovery> = emptyList(),
     /** Each live contract's exit, as the last round left it. */
@@ -1066,7 +1070,7 @@ class Engine(context: Context) {
      */
     private fun resumeContracts(chain: GoChain) {
         val ui = state.value
-        val waiting = ui.contracts.any { carriedOn(it) } || ui.recoveries.any { carriedOn(it) }
+        val waiting = ui.contracts.any { carriedOn(it) } || ui.recoveries.any { carriedOn(it) } || ui.paid.isNotEmpty()
         val protecting = ui.contracts.any { it.state == ContractState.Protecting }
         if (!(waiting || protecting) || !contracting.compareAndSet(false, true)) return
         scope.launch {
@@ -1117,6 +1121,9 @@ class Engine(context: Context) {
                 val recoveries = runCatching { it.recoveries() }
                     .onFailure { e -> AppLog.warn("reading the forced closes", e) }
                     .getOrDefault(state.value.recoveries)
+                val paid = runCatching { it.paidContracts() }
+                    .onFailure { e -> AppLog.warn("reading the contracts paid for with notes", e) }
+                    .getOrDefault(state.value.paid)
                 val history = it.history()
                 // From the wallet alone, no network: Home tells each step.
                 val under = detailsToRead(history)
@@ -1141,8 +1148,8 @@ class Engine(context: Context) {
                     .onFailure { e -> AppLog.warn("reading the contacts", e) }
                     .getOrDefault(state.value.contacts)
                 Shown(
-                    it.network(), it.balance(), history, it.hubs(), raised, it.tor(), contracts, recoveries, under,
-                    noteMaintenance, onTheirWay, cold, contacts,
+                    it.network(), it.balance(), history, it.hubs(), raised, it.tor(), contracts, paid, recoveries,
+                    under, noteMaintenance, onTheirWay, cold, contacts,
                 )
             }
         }.onFailure { AppLog.warn("reading the wallet", it) }.getOrNull()
@@ -1166,6 +1173,7 @@ class Engine(context: Context) {
                     raised = shown.raised,
                     tor = shown.tor,
                     contracts = shown.contracts,
+                    paid = shown.paid,
                     recoveries = shown.recoveries,
                     under = shown.under,
                     noteMaintenance = shown.noteMaintenance,
@@ -1240,6 +1248,7 @@ class Engine(context: Context) {
         val raised: List<FeesRaised>,
         val tor: Boolean,
         val contracts: List<Contract>,
+        val paid: List<PaidContract>,
         val recoveries: List<Recovery>,
         val under: Map<String, Details>,
         val noteMaintenance: Boolean,
@@ -1741,6 +1750,29 @@ class Engine(context: Context) {
         } else {
             local { it.contractQuote(hub) }.also { quotes[hub] = Triple(it, onchain, System.currentTimeMillis()) }
         }
+    }
+
+    /**
+     * What protecting at `hub` costs paid for with notes there, with no coin
+     * on Bitcoin: of `cap` at least over `blocks` if chosen, else the
+     * smallest, as late as it closes.
+     */
+    suspend fun paidContractQuote(hub: String, cap: ULong?, blocks: UInt?): Result<PaidContractQuote> = io {
+        local { it.paidContractQuote(hub, hub, cap, blocks) }
+    }
+
+    /**
+     * Pay for protection as `quote` says: a payout of its coin to this
+     * wallet, under way as any, and the contract set up on the coin once it
+     * is on Bitcoin, as [resumeContracts] carries it on. Told once paid.
+     */
+    suspend fun openPaidContract(quote: PaidContractQuote): Result<PaidContract> = io {
+        val paid = local { it.openPaidContract(quote) }
+        AppLog.info("paying ${paid.value} sat for a contract's coin at ${paid.hub}, payout ${paid.ticket}")
+        notices.tryEmit(Event("Paying for protection at ${host(paid.hub)}: set up once its coin is on Bitcoin"))
+        refresh()
+        poke()
+        paid
     }
 
     suspend fun contractInspection(id: String): Result<org.licash.core.ContractInspection> = io { local { it.contractInspection(id) } }

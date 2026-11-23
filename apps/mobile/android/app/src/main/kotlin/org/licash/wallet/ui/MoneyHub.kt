@@ -27,6 +27,7 @@ import org.licash.core.ContractQuote
 import org.licash.core.ContractState
 import org.licash.core.Holding
 import org.licash.core.Notes
+import org.licash.core.PaidContractQuote
 import org.licash.wallet.Engine
 import org.licash.wallet.behind
 import org.licash.wallet.Ui
@@ -62,6 +63,8 @@ internal fun HubPage(
             (ui.developer || shown(it, now) || ui.recoveries.any { r -> r.id == it.id && carriedOn(r) })
     }
     val opening = ui.opening?.let { sameHub(it, holding.hub) } == true
+    // Paid for with notes, waiting for its coin on Bitcoin to be set up on.
+    val paidHere = ui.paid.filter { sameHub(it.hub, holding.hub) }
     // One being set up shows the step it is at in its own row, once it has one.
     val stepping = covers.any { it.state == ContractState.Opening && it.step != null }
     val held = holding.available + holding.pending
@@ -69,6 +72,8 @@ internal fun HubPage(
     var quoting by remember { mutableStateOf(false) }
     val quoteWait = rememberWait(quoting)
     var quote by remember { mutableStateOf<ContractQuote?>(null) }
+    var paidQuote by remember { mutableStateOf<PaidContractQuote?>(null) }
+    var paying by remember { mutableStateOf(false) }
     var ending by remember { mutableStateOf<Contract?>(null) }
     var forcing by remember { mutableStateOf<Contract?>(null) }
     var shortfall by remember { mutableStateOf<ULong?>(null) }
@@ -96,6 +101,16 @@ internal fun HubPage(
         }
     }
 
+    // With no coin on Bitcoin: one paid for with the notes here, of `cap` over `blocks` if chosen.
+    fun payWithNotes(cap: ULong?, blocks: UInt?) {
+        quote = null
+        quoting = true
+        scope.launch {
+            engine.paidContractQuote(holding.hub, cap, blocks).fold({ paidQuote = it }, { fail(explain(it)) })
+            quoting = false
+        }
+    }
+
     Text(sat(holding.available), modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp), style = Heading)
     if (holding.pending > 0uL) Line("Settling", sat(holding.pending), Modifier.padding(horizontal = 4.dp))
     // How much of it its contracts cover, what they leave out, the room they have left.
@@ -116,7 +131,7 @@ internal fun HubPage(
             enabled = holding.available > 0uL,
             quiet = true,
         ) { cashOut(holding.hub, null) }
-        if (hub?.contracts != null && ui.opening == null) {
+        if (hub?.contracts != null && ui.opening == null && paidHere.isEmpty()) {
             BigButton(
                 if (quoting) "Asking…" else "Protect",
                 Modifier.weight(1f).testTag("open-contract"),
@@ -148,7 +163,7 @@ internal fun HubPage(
             }, Modifier.testTag("suggest-dismiss")) { Text("Not now") }
         }
     }
-    if (covers.isNotEmpty() || opening) {
+    if (covers.isNotEmpty() || opening || paidHere.isNotEmpty()) {
         Group("Protection") {
             // Of what is held here, how much those running protect.
             if (covers.any { it.state == ContractState.Protecting }) {
@@ -176,6 +191,10 @@ internal fun HubPage(
                 if (covers.isNotEmpty()) Divider()
                 Entry("Setting up", sub = SETUP_TAKES, tag = "opening")
                 LinearProgressIndicator(Modifier.fillMaxWidth().padding(bottom = 12.dp))
+            }
+            paidHere.forEachIndexed { i, p ->
+                if (i > 0 || covers.isNotEmpty() || (opening && !stepping)) Divider()
+                Entry("Setting up", sub = paidWaits(p.value), tag = "opening-paid")
             }
         }
     }
@@ -214,6 +233,7 @@ internal fun HubPage(
                 },
                 dismiss = { quote = null },
                 hub = engine.called(q.hub),
+                payWithNotes = { cap, blocks -> payWithNotes(cap, blocks) },
                 cashOut = { coin ->
                     quote = null
                     scope.launch {
@@ -232,6 +252,7 @@ internal fun HubPage(
                     quote = null
                     engine.openContract(q.hub, q.price)
                 },
+                payWithNotes = { payWithNotes(null, null) },
                 cashOutFirst = {
                     quote = null
                     scope.launch {
@@ -244,6 +265,23 @@ internal fun HubPage(
                 dismiss = { quote = null },
             )
         }
+    }
+    paidQuote?.let { q ->
+        PaidSheet(
+            q,
+            engine.called(q.hub),
+            busy = paying,
+            pay = {
+                paying = true
+                scope.launch {
+                    val paid = engine.openPaidContract(q)
+                    paidQuote = null
+                    paying = false
+                    paid.onFailure { fail(explain(it)) }
+                }
+            },
+            dismiss = { if (!paying) paidQuote = null },
+        )
     }
     ending?.let { c ->
         EndSheet(

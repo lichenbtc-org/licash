@@ -38,6 +38,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import org.licash.core.Contract
 import org.licash.core.ContractQuote
+import org.licash.core.PaidContractQuote
 import org.licash.core.ContractSafety
 import org.licash.core.ContractInspection
 import org.licash.core.ContractState
@@ -438,7 +439,14 @@ internal const val SETUP_TAKES = "A few minutes, then a confirmation on Bitcoin"
  * whole: it pays the price, and the rest of it is her part of the contract.
  */
 @Composable
-internal fun ProtectSheet(q: ContractQuote, hub: String, open: () -> Unit, cashOutFirst: () -> Unit, dismiss: () -> Unit) {
+internal fun ProtectSheet(
+    q: ContractQuote,
+    hub: String,
+    open: () -> Unit,
+    payWithNotes: () -> Unit,
+    cashOutFirst: () -> Unit,
+    dismiss: () -> Unit,
+) {
     val download = android.text.format.Formatter.formatShortFileSize(LocalContext.current, q.download.toLong())
     Sheet("Protect at $hub", dismiss) {
         Line("Covers up to", sat(q.cap), tag = "quote-cap")
@@ -458,11 +466,48 @@ internal fun ProtectSheet(q: ContractQuote, hub: String, open: () -> Unit, cashO
                 Modifier.fillMaxWidth().testTag("protect"),
             ) { open() }
         } else {
-            Say("Paid from one coin on Bitcoin you hold, spent whole, and none you hold pays for it. Cash out to yourself first, then protect.")
-            BigButton("Cash out ${sat(q.price + FIXED_PART)}", Modifier.fillMaxWidth().testTag("cash-out-first")) {
+            Say("Paid from one coin on Bitcoin you hold, spent whole, and none you hold pays for it.")
+            Say(PAY_WITH_NOTES)
+            BigButton("Pay ${sat(q.price + FIXED_PART)} from notes", Modifier.fillMaxWidth().testTag("pay-with-notes")) {
+                payWithNotes()
+            }
+            Spacer(Modifier.height(8.dp))
+            Say("Or cash out to yourself first, then protect.")
+            BigButton("Cash out ${sat(q.price + FIXED_PART)}", Modifier.fillMaxWidth().testTag("cash-out-first"), quiet = true) {
                 cashOutFirst()
             }
         }
+    }
+}
+
+/** What a protection paid for with notes waits for: its coin of `value` sat on Bitcoin. */
+internal fun paidWaits(value: ULong): String = "Paid with notes: set up once its coin of ${sat(value)} is on Bitcoin"
+
+/**
+ * A protection paid for with notes, before it is paid: a swap provider sends
+ * this wallet a coin of its price and her small part for notes at the hub,
+ * and protection is set up on that coin once it confirms, as on any. Should
+ * it not be, the coin stays hers. What the coin costs on top, and through
+ * whom.
+ */
+@Composable
+internal fun PaidSheet(q: PaidContractQuote, hub: String, busy: Boolean, pay: () -> Unit, dismiss: () -> Unit) {
+    val total = q.value + q.payout.fee
+    Sheet("Protect at $hub", dismiss) {
+        Line("Covers up to", sat(q.cap), tag = "paid-cap")
+        Line("Coin to this wallet", sat(q.value), tag = "paid-coin")
+        Line("Of it into your balance", sat(q.funded), tag = "paid-funded")
+        Line("Its fees", sat(q.payout.fee), tag = "paid-fees")
+        Line("Through", q.payout.providerName ?: q.payout.provider, tag = "paid-provider")
+        Say(
+            "Paid from your notes here. Protection is set up on the coin once it confirms, " +
+                "${SETUP_TAKES.replaceFirstChar { it.lowercase() }}. Should it not be, the coin stays yours.",
+        )
+        BigButton(
+            if (busy) "Paying…" else "Pay ${sat(total)}",
+            Modifier.fillMaxWidth().testTag("pay-paid"),
+            busy = busy,
+        ) { pay() }
     }
 }
 
