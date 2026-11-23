@@ -31,11 +31,12 @@ const ANCHOR: Amount = Amount::from_sat(330);
 /// vB a byte (measured: 7 granted notes took 4,859 vB in the legacy format,
 /// 3,113 in the compact, of note format v3; a granted note of v4 is 64
 /// bytes more, its seal 96 bytes and its mask 32 where its DLEQ proof was
-/// 64).
+/// 64; and of v5, whose message has no nonce, 32 bytes less in the compact
+/// filing and 96 in the legacy, which repeats it).
 pub fn publication_vsize(format: Format, notes: u32) -> u64 {
     let (fixed, each) = match format {
-        Format::Legacy => (526, 683),
-        Format::Compact | Format::Lean => (520, 435),
+        Format::Legacy => (526, 587),
+        Format::Compact | Format::Lean => (520, 403),
     };
     fixed + each * u64::from(notes)
 }
@@ -107,15 +108,15 @@ mod tests {
 
     #[test]
     fn a_forced_close_weighs_its_request_its_publication_and_its_fee_coin() {
-        assert_eq!(publication_vsize(Format::Legacy, 7), 4_859 + 7 * 64);
-        assert_eq!(publication_vsize(Format::Compact, 7), 3_117 + 7 * 64);
+        assert_eq!(publication_vsize(Format::Legacy, 7), 4_859 - 7 * 32);
+        assert_eq!(publication_vsize(Format::Compact, 7), 3_117 + 7 * (64 - 32));
         let compact = forced_close_vsize(Format::Compact, 7);
-        assert_eq!(compact, R_VSIZE + 3_565 + TERMINAL_VSIZE);
+        assert_eq!(compact, R_VSIZE + 3_341 + TERMINAL_VSIZE);
         // The compact filing weighs less by what it saves a note.
         let legacy = forced_close_vsize(Format::Legacy, 32);
         assert_eq!(
             legacy - forced_close_vsize(Format::Compact, 32),
-            6 + 32 * 248
+            6 + 32 * 184
         );
     }
 
@@ -126,7 +127,7 @@ mod tests {
         let g = terms(9, 20_000, 100_000);
         assert_eq!(
             affordable_rate(&g, 7),
-            (19_670 + 330 + 330) * 1_000 / (2_160 + 3_565 + 1_680)
+            (19_670 + 330 + 330) * 1_000 / (2_160 + 3_341 + 1_680)
         );
         // More notes, a lower rate; the widest filing, the least.
         assert!(affordable_rate(&g, 32) < affordable_rate(&g, 7));
@@ -156,9 +157,9 @@ mod tests {
                 assert!(affordable_rate_at_most(&terms(id, alice - 1, 2 * alice)) <= afforded);
             }
         }
-        // 10 sat/vB at the widest compact filing: about 180 k sat of hers
-        // (160 k before note format v4, 64 vB less a note).
-        assert_eq!(reserve_for(9, 330, 10_000), 161_990 + 10 * 32 * 64);
+        // 10 sat/vB at the widest compact filing: about 170 k sat of hers
+        // (160 k at note format v3, a note 32 vB less; 180 k at v4, 32 more).
+        assert_eq!(reserve_for(9, 330, 10_000), 161_990 + 10 * 32 * 32);
     }
 
     /// A quote must afford the floor on mainnet; the test networks ask none.
@@ -179,7 +180,7 @@ mod tests {
         assert!(quote.check(ChainProfile::Core30Signet).is_ok());
         let error = quote.check(ChainProfile::Core30Mainnet).unwrap_err();
         assert!(
-            error.to_string().contains("forced close 1.1 sat/vB"),
+            error.to_string().contains("forced close 1.2 sat/vB"),
             "{error}"
         );
         quote.graph.reserve_alice = reserve_for(9, 330, 10_000);
