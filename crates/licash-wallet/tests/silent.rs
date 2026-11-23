@@ -310,6 +310,8 @@ struct View {
     delay: Option<std::time::Duration>,
     /// How often it was asked for tweaks.
     asked: u32,
+    /// How often the wallet gave up on its answer.
+    given_up: u32,
 }
 
 impl Indexer {
@@ -401,6 +403,15 @@ impl Transport for Via {
                 std::future::pending::<()>().await;
             }
             answer
+        }
+    }
+
+    fn gave_up(&self, url: &str) {
+        let mut views = self.0.views.lock().unwrap();
+        for (hub, view) in views.iter_mut() {
+            if url.starts_with(hub) {
+                view.given_up += 1;
+            }
         }
     }
 }
@@ -1974,6 +1985,9 @@ async fn a_hub_that_does_not_answer_is_passed_over_for_one_that_does() {
             .any(|w| w.contains("no answer") && w.contains(HUB)),
         "{logged:?}"
     );
+    // Told the transport, which passes it over a while as one not answering.
+    assert_eq!(s.hub.view(HUB).given_up, 1);
+    assert_eq!(s.hub.view(OTHER).given_up, 0);
 }
 
 #[tokio::test]

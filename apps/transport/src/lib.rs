@@ -324,6 +324,11 @@ impl Transport for Http {
         // downloads run beside each other.
         self.exchange(url, None, max, Some(DOWNLOAD_TIMEOUT), true)
     }
+
+    /// As if it did not answer: passed over in the background a while.
+    fn gave_up(&self, url: &str) {
+        self.hosts.answered(origin(url), None, Instant::now());
+    }
 }
 
 impl Http {
@@ -641,6 +646,23 @@ mod tests {
         assert!(licash_wallet::in_background(http.request(&host, None))
             .await
             .is_ok());
+    }
+
+    /// One the wallet stopped waiting on rests as one that did not answer.
+    #[tokio::test]
+    async fn a_host_given_up_on_rests_as_one_not_answering() {
+        let http = Http::new(None).unwrap();
+        let host = answering(1);
+        let url = format!("{host}/v1/chain/tweaks?from=1&count=144");
+        http.gave_up(&url);
+        let resting = http.resting(&format!("{host}/v1/info")).unwrap();
+        assert!(resting > RESTS[0] - Duration::from_secs(5), "{resting:?}");
+        let passed = licash_wallet::in_background(http.request(&url, None))
+            .await
+            .unwrap_err();
+        assert!(passed.contains("did not answer lately"), "{passed}");
+        assert_eq!(http.request(&url, None).await.unwrap().status, 200);
+        assert_eq!(http.resting(&url), None);
     }
 
     #[test]

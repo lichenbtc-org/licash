@@ -158,6 +158,14 @@ pub trait Transport: Send + Sync {
         let _ = max;
         self.request(url, None)
     }
+
+    /// That the wallet stopped waiting on the answer from the host of
+    /// `url`, another host having answered long before: a transport that
+    /// passes over hosts that did not answer lately may count it as one
+    /// that did not. Nothing by default.
+    fn gave_up(&self, url: &str) {
+        let _ = url;
+    }
 }
 
 /// Why a wallet call failed.

@@ -737,12 +737,15 @@ impl<T: Transport> Wallet<T> {
             match answer {
                 Some(Ok(blocks)) => served.push((i, *url, blocks)),
                 Some(Err(e)) => pass_over(i, e),
-                None => tracing::warn!(
-                    hub = %url,
-                    from,
-                    "tweaks passed over: no answer within {} s of another hub's",
-                    GRACE.as_secs()
-                ),
+                None => {
+                    tracing::warn!(
+                        hub = %url,
+                        from,
+                        "tweaks passed over: no answer within {} s of another hub's",
+                        GRACE.as_secs()
+                    );
+                    self.transport.gave_up(url);
+                }
             }
         }
         // Each block's hash read once, for every hub that served it.
