@@ -15,12 +15,16 @@ with a payment you signed, that you are owed less.
 It is not meant for your savings. Keep those in cold storage, and use Licash
 for day-to-day spending, as a checking account.
 
-|                                      | Lightning (own node) | Custodial ecash | Ark                     | Licash              |
-| ------------------------------------ | -------------------- | --------------- | ----------------------- | ------------------- |
-| Back on Bitcoin without the operator | Yes                  | No              | Yes, if renewed in time | Yes, up to your cap |
-| Channels or inbound liquidity        | Needed               | Not needed      | Not needed              | Not needed          |
-| Receive while offline                | No                   | Yes             | Yes                     | Yes, within a hub   |
-| The operator can follow your money   | Partly               | No              | Yes                     | No                  |
+|                                          | Lightning (phone wallet + LSP)      | Ark                             | Ecash mint         | Licash                                                     |
+| ---------------------------------------- | ----------------------------------- | ------------------------------- | ------------------ | ---------------------------------------------------------- |
+| Back on Bitcoin without the operator     | Yes                                 | Yes, if refreshed before expiry | No                 | Yes, up to the cap you chose                               |
+| What staying safe needs                  | Watch the chain or use a watchtower | Refresh every few weeks         | Trust in the mint  | Come back before the contract ends (you pick the duration) |
+| The operator can force you onchain       | Yes, by force-closing               | Yes, at expiry                  | No                 | No, only you can start a recovery                          |
+| Inbound liquidity                        | Bought from the LSP                 | Not needed                      | Not needed         | Not needed                                                 |
+| Receive while offline                    | No                                  | Yes                             | Yes                | Yes, within a hub or onchain                               |
+| A payment is safe from operator collusion | Yes                                | After the next round            | No                 | Yes, immediately                                           |
+| The operator sees                        | Your balance and every payment      | Inputs, outputs and amounts     | Only anonymous notes | Only anonymous notes, not your balance or who pays whom  |
+| Cost of an exit without the operator     | One small transaction               | Your branch of the tree         | No exit            | About 15 kvB and a few days, more if disputed              |
 
 ## Why
 
@@ -32,8 +36,8 @@ for day-to-day spending, as a checking account.
   swap provider, which can't take the money.
 - **Private payments.** The hub cannot link a note's spending to its
   issuance, and payments leave nothing on Bitcoin.
-- **Receive while offline.** Within a hub, a payer can pay you while your
-  phone is off.
+- **Receive while offline.** Within a hub or onchain, a payer can pay you
+  while your phone is off.
 - **Fast and cheap.** Payments within a hub are instant and use no
   blockspace.
 - **You keep custody, up to your limit.** Value within your contracts can
