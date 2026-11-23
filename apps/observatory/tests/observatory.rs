@@ -708,3 +708,76 @@ fn announced_services_never_answering_are_forgotten_with_the_history() {
     kept.sort();
     assert_eq!(kept, ["answered", "https://configured.example", "recent"]);
 }
+
+/// While as many services of a role as are kept never answered, an
+/// announcement of a new key is passed over, and a known key's still
+/// updates it. Those gone a week without ever answering are forgotten
+/// with their probes, making room again.
+#[tokio::test]
+async fn announcements_of_new_keys_wait_while_as_many_never_answering_are_kept() {
+    use licash_nostr::{Announcement, Announcer};
+    let relay = nostr_sdk::prelude::MockRelay::run().await.unwrap();
+    let relays = vec![relay.url().await.to_string()];
+    let hub = licash_nostr::Role::Hub;
+    let known = Announcer::new(&[21; 32], hub, &relays, &Route::Direct);
+    let new = Announcer::new(&[22; 32], hub, &relays, &Route::Direct);
+    let (known, new) = (known.await.unwrap(), new.await.unwrap());
+    let announcement = |url: &str| Announcement {
+        urls: vec![url.into()],
+        network: "regtest".into(),
+        name: None,
+    };
+    known
+        .announce(&announcement("https://known.example"))
+        .await
+        .unwrap();
+    new.announce(&announcement("https://new.example"))
+        .await
+        .unwrap();
+    let watching = Watching {
+        relays,
+        ..watching()
+    };
+    let gone = observer::millis(observer::KEPT) + 60_000;
+    for (age, admitted) in [(0, false), (gone, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("o.sqlite")).unwrap();
+        let at = store::now() - age;
+        for i in 0..observer::MAX_UNPROVEN {
+            let id = format!("{i:064x}");
+            let urls = vec![format!("https://sybil{i}.example")];
+            let sybil = Service {
+                last_seen: at,
+                first_seen: at,
+                ..announced(&id, Role::Hub, urls)
+            };
+            store.seen(&sybil).unwrap();
+            let failed = store::Probe {
+                at,
+                service: id,
+                url: format!("https://sybil{i}.example"),
+                ok: false,
+                open_ms: None,
+                rtt_ms: None,
+                info_ms: None,
+                error: Some("refused".into()),
+            };
+            store.probed(&failed).unwrap();
+        }
+        let before = announced(&known.key(), Role::Hub, vec!["https://old.example".into()]);
+        store.seen(&before).unwrap();
+        observer::discover(&store, &watching).await.unwrap();
+        let services = store.services().unwrap();
+        let of = |key: String| services.iter().find(|s| s.id == key).cloned();
+        let kept = of(known.key()).expect("known");
+        assert_eq!(kept.urls, ["https://known.example"], "{age}");
+        assert_eq!(of(new.key()).is_some(), admitted, "{age}");
+        let sybils = match admitted {
+            false => observer::MAX_UNPROVEN,
+            true => 0,
+        };
+        assert_eq!(services.len(), sybils + 1 + usize::from(admitted), "{age}");
+        let probes = store.probes_since(0).unwrap();
+        assert_eq!(probes.len(), sybils, "forgotten with their probes: {age}");
+    }
+}

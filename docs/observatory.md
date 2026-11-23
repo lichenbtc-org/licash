@@ -35,8 +35,12 @@ seven days are asked of the relays by their keys too, so newer
 announcements filling what a relay answers cannot hide them. They are
 also probed apart: at most 8 of them at once, and 4 of all the others,
 so a flood of services that never answer delays only its own probes.
-An announced service that never answered is forgotten 90 days after it
-was last seen.
+At most 2,000 services of a role seen in the last seven days may not have
+answered in them: past that, announcements of new keys are passed over,
+with a warning in the log, while known ones and those configured with
+`--hub` or `--provider` are kept up to date. An announced service that
+never answered is forgotten, with its probes, seven days after it was
+last seen, making room for others.
 
 ## Probes, and Tor
 

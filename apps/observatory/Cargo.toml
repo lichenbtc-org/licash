@@ -35,5 +35,6 @@ tracing-subscriber.workspace = true
 webpki-roots = "1"
 
 [dev-dependencies]
+nostr-sdk = { version = "0.45.6", features = ["local-relay"] }
 tempfile = "3.27"
 tower = { version = "0.5", features = ["util"] }

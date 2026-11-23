@@ -288,6 +288,12 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Forget the services announced, last seen before `before`, that
+    /// never answered as themselves: how many.
+    pub fn forget_unanswered(&self, before: i64) -> anyhow::Result<usize> {
+        forget_unanswered(&self.db(), before)
+    }
+
     /// The probes since `since`, oldest first.
     pub fn probes_since(&self, since: i64) -> anyhow::Result<Vec<Probe>> {
         let db = self.db();
@@ -432,11 +438,7 @@ impl Store {
     pub fn prune(&self, before: i64) -> anyhow::Result<()> {
         let db = self.db();
         db.execute("DELETE FROM probes WHERE at < ?1", [before])?;
-        db.execute(
-            "DELETE FROM services WHERE key IS NOT NULL AND last_seen < ?1
-             AND id NOT IN (SELECT service FROM terms)",
-            [before],
-        )?;
+        forget_unanswered(&db, before)?;
         db.execute(
             "DELETE FROM terms WHERE at < ?1 AND at < (
                  SELECT max(at) FROM terms t WHERE t.service = terms.service)",
@@ -444,6 +446,19 @@ impl Store {
         )?;
         Ok(())
     }
+}
+
+/// [`Store::forget_unanswered`], on `db`: their failed probes with them.
+fn forget_unanswered(db: &Connection, before: i64) -> anyhow::Result<usize> {
+    const FORGOTTEN: &str = "SELECT id FROM services WHERE key IS NOT NULL
+        AND last_seen < ?1 AND id NOT IN (SELECT service FROM terms)";
+    let tx = db.unchecked_transaction()?;
+    let probes = format!("DELETE FROM probes WHERE service IN ({FORGOTTEN})");
+    tx.execute(&probes, [before])?;
+    let services = format!("DELETE FROM services WHERE id IN ({FORGOTTEN})");
+    let forgotten = tx.execute(&services, [before])?;
+    tx.commit()?;
+    Ok(forgotten)
 }
 
 /// Columns added since the first version, each nullable and at the end of

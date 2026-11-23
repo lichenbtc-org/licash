@@ -3690,6 +3690,7 @@ dependencies = [
  "licash-tor",
  "licash-transport",
  "licash-wallet",
+ "nostr-sdk",
  "rand_core 0.6.4",
  "rusqlite",
  "serde",
