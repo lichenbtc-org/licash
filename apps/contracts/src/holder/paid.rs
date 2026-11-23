@@ -9,7 +9,7 @@
 //! [`coin`] says what coin to pay for, [`pay`] keeps the opening, then
 //! makes the payout (of a quote the caller asked, of a provider it chose
 //! or found announced); [`super::resume`]
-//! carries it on ([`carry_on`]): it follows the payout, finds its coin
+//! carries it on (`carry_on`): it follows the payout, finds its coin
 //! among her wallet's, and opens the contract on it.
 
 use std::path::Path;

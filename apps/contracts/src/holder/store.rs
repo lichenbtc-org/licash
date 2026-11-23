@@ -299,7 +299,7 @@ CREATE TABLE contract_paid (
 ) STRICT;
 ";
 
-/// An opening paid for with notes, as kept ([`Store::paid`]).
+/// An opening paid for with notes, as kept (`Store::paid`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaidRow {
     pub ticket: String,
