@@ -218,8 +218,11 @@ of its hubs: by default those whose contracts have the most room to protect
 more than is held there, then those holding the least. `code --onchain`
 prints instead `bitcoin:<address>?sp=<address>`, the wallet's silent payment
 address and a fallback address any wallet pays. `onchain --chain <url> scan` finds what
-they pay with the tweaks of a hub serving them (fetching only the blocks
-whose filters match from a node with `-blockfilterindex`). In blocks no
+they pay with the tweaks of every hub trusted serving them, asked at once,
+those of a block any of them serves (fetching only the blocks whose
+filters match from a node with `-blockfilterindex`): one lagging or not
+answering within 10 s of another that served every block asked for is
+passed over. In blocks no
 hub trusted serves tweaks of, it finds what the fallback addresses are
 paid only, looking in them again for silent payments once a hub serves
 their tweaks; with no such hub, the first scan needs `--from <height>`.

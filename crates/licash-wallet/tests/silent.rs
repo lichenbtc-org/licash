@@ -275,7 +275,8 @@ impl Blocks for Light {
     }
 }
 
-/// A hub of the [`Net`] that indexes the tweaks of a [`Chain`].
+/// A hub of the [`Net`] that indexes the tweaks of a [`Chain`], and
+/// another, at [`OTHER`], once [`Setup::other`] starts it.
 struct Indexer {
     net: Arc<Net>,
     chain: Shared,
@@ -285,40 +286,97 @@ struct Indexer {
     forged: Mutex<Option<u32>>,
     /// How often it was asked for tweaks.
     asked: Mutex<u32>,
+    /// How each hub serves tweaks besides, by URL.
+    views: Mutex<HashMap<&'static str, View>>,
+}
+
+/// The second hub serving tweaks.
+const OTHER: &str = "http://other.test";
+
+/// How a hub serves tweaks.
+#[derive(Clone, Default)]
+struct View {
+    /// The first block whose tweaks it serves, for [`OTHER`].
+    first: Option<u32>,
+    /// The newest block it indexed, if not the chain's.
+    top: Option<u32>,
+    /// Serving no tweaks of any block.
+    omits: bool,
+    /// Never answering for tweaks.
+    stalls: bool,
+    /// Unreachable when asked for tweaks.
+    lost: bool,
+    /// How long it takes to answer for tweaks.
+    delay: Option<std::time::Duration>,
+    /// How often it was asked for tweaks.
+    asked: u32,
 }
 
 impl Indexer {
     fn serve(&self, url: &str, body: Option<Vec<u8>>) -> Result<Response, String> {
-        let tweaks = format!("{HUB}{}?", licash_api::TWEAKS);
-        if let Some(query) = url.strip_prefix(&tweaks) {
-            let number = |name: &str| -> u32 {
-                let pair = query.split('&').find_map(|p| p.strip_prefix(name)).unwrap();
-                pair.trim_start_matches('=').parse().unwrap()
-            };
-            let (from, count) = (number("from"), number("count"));
-            *self.asked.lock().unwrap() += 1;
-            assert!(count <= licash_api::MAX_TWEAK_BLOCKS);
-            let chain = self.chain.lock().unwrap();
-            let mut blocks: Vec<BlockTweaks> = (from..from + count)
-                .take_while(|h| *h <= chain.height())
-                .map(|h| chain.tweaks(h))
-                .collect();
-            let forged = *self.forged.lock().unwrap();
-            for block in blocks.iter_mut().filter(|b| Some(b.height) == forged) {
-                block.hash = BlockHash::all_zeros().to_string();
+        for hub in [HUB, OTHER] {
+            let tweaks = format!("{hub}{}?", licash_api::TWEAKS);
+            if let Some(query) = url.strip_prefix(&tweaks) {
+                return Ok(self.tweaks(hub, query));
             }
-            return Ok(Response {
-                status: 200,
-                body: serde_json::to_vec(&blocks).unwrap(),
-            });
         }
         let mut response = self.net.serve(url, body)?;
         if url.ends_with(licash_api::INFO) && response.status == 200 {
             let mut info: Info = serde_json::from_slice(&response.body).unwrap();
-            info.tweaks = *self.first.lock().unwrap();
+            info.tweaks = match url.starts_with(OTHER) {
+                true => self.view(OTHER).first,
+                false => *self.first.lock().unwrap(),
+            };
             response.body = serde_json::to_vec(&info).unwrap();
         }
         Ok(response)
+    }
+
+    fn view(&self, hub: &'static str) -> View {
+        let views = self.views.lock().unwrap();
+        views.get(hub).cloned().unwrap_or_default()
+    }
+
+    fn tweaks(&self, hub: &'static str, query: &str) -> Response {
+        let number = |name: &str| -> u32 {
+            let pair = query.split('&').find_map(|p| p.strip_prefix(name)).unwrap();
+            pair.trim_start_matches('=').parse().unwrap()
+        };
+        let (from, count) = (number("from"), number("count"));
+        if hub == HUB {
+            *self.asked.lock().unwrap() += 1;
+        }
+        self.views.lock().unwrap().entry(hub).or_default().asked += 1;
+        let view = self.view(hub);
+        assert!(count <= licash_api::MAX_TWEAK_BLOCKS);
+        let chain = self.chain.lock().unwrap();
+        let top = view.top.unwrap_or(chain.height()).min(chain.height());
+        let mut blocks: Vec<BlockTweaks> = (from..from + count)
+            .take_while(|h| *h <= top)
+            .map(|h| chain.tweaks(h))
+            .collect();
+        if hub == HUB {
+            let forged = *self.forged.lock().unwrap();
+            for block in blocks.iter_mut().filter(|b| Some(b.height) == forged) {
+                block.hash = BlockHash::all_zeros().to_string();
+            }
+        }
+        if view.omits {
+            blocks.iter_mut().for_each(|b| b.tweaks.clear());
+        }
+        Response {
+            status: 200,
+            body: serde_json::to_vec(&blocks).unwrap(),
+        }
+    }
+
+    /// How the hub asked for tweaks at `url` serves them, if one.
+    fn asked_of(&self, url: &str) -> View {
+        let views = self.views.lock().unwrap();
+        let mut asked = views
+            .iter()
+            .filter(|(hub, _)| url.starts_with(&format!("{hub}{}?", licash_api::TWEAKS)));
+        asked.next().map(|(_, v)| v.clone()).unwrap_or_default()
     }
 }
 
@@ -330,7 +388,20 @@ impl Transport for Via {
         url: &str,
         body: Option<Vec<u8>>,
     ) -> impl Future<Output = Result<Response, String>> + Send {
-        std::future::ready(self.0.serve(url, body))
+        let view = self.0.asked_of(url);
+        let answer = match view.lost {
+            true => Err("connection refused".into()),
+            false => self.0.serve(url, body),
+        };
+        async move {
+            if let Some(delay) = view.delay {
+                tokio::time::sleep(delay).await;
+            }
+            if view.stalls {
+                std::future::pending::<()>().await;
+            }
+            answer
+        }
     }
 }
 
@@ -355,6 +426,7 @@ async fn setup() -> Setup {
         first: Mutex::new(Some(1)),
         forged: Mutex::new(None),
         asked: Mutex::new(0),
+        views: Mutex::default(),
     });
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("wallet.sqlite");
@@ -377,6 +449,29 @@ impl Setup {
         self.wallet
             .scan_silent(HUB, &Light(self.chain.clone()), u32::MAX)
             .await
+    }
+
+    /// A second hub trusted, at [`OTHER`], serving the tweaks of blocks from
+    /// `first` on as `view` tells.
+    async fn other(&self, first: u32, view: View) {
+        self.hub.net.start(OTHER, Fee { base: 0, ppm: 0 });
+        let view = View {
+            first: Some(first),
+            ..view
+        };
+        self.hub.views.lock().unwrap().insert(OTHER, view);
+        self.wallet.add_hub(OTHER).await.unwrap();
+    }
+
+    /// How `hub` serves tweaks from now on.
+    fn view(&self, hub: &'static str, change: impl FnOnce(&mut View)) {
+        change(self.hub.views.lock().unwrap().entry(hub).or_default());
+    }
+
+    /// Up to `max` blocks scanned with the tweaks of every hub trusted.
+    async fn scan_trusted(&self, max: u32) -> Result<(licash_wallet::Scanned, bool), Error> {
+        let light = Light(self.chain.clone());
+        self.wallet.scan_silent_trusted(&light, max, None).await
     }
 
     fn mine(&self, txs: Vec<Transaction>) -> BlockHash {
@@ -1755,4 +1850,236 @@ async fn a_hub_serving_tweaks_from_the_next_block_looks_in_none_again() {
     assert!(scanned.found.is_empty());
     assert!(s.fetched().is_empty());
     assert_eq!(s.wallet.silent_coins().unwrap().len(), 1);
+}
+
+/// The warnings logged on this thread while one is kept.
+#[derive(Clone, Default)]
+struct Warnings(Arc<Mutex<Vec<String>>>);
+
+impl Warnings {
+    fn logged(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl tracing::Subscriber for Warnings {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= tracing::Level::WARN
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Text(String);
+        impl tracing::field::Visit for Text {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0 += &format!("{}={value:?} ", field.name());
+            }
+        }
+        let mut text = Text(String::new());
+        event.record(&mut text);
+        self.0.lock().unwrap().push(text.0);
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[tokio::test]
+async fn a_payment_a_hub_omits_the_tweak_of_is_found_with_anothers_and_warned_of() {
+    let s = setup().await;
+    s.wallet.watch_silent(HUB, 1).unwrap();
+    s.other(1, View::default()).await;
+    // The hub asked first serves none.
+    s.view(HUB, |v| v.omits = true);
+    let paying = s.pay(&[s.address()], &[40_000]);
+    s.mine(vec![paying]);
+    let warnings = Warnings::default();
+    let (scanned, tweaked) = {
+        let _logging = tracing::subscriber::set_default(warnings.clone());
+        s.scan_trusted(u32::MAX).await.unwrap()
+    };
+    assert!(tweaked);
+    assert_eq!((scanned.next, scanned.height), (4, 3));
+    assert_eq!(scanned.found.len(), 1);
+    assert_eq!(scanned.found[0].value, 40_000);
+    let logged = warnings.logged();
+    let omits = logged.iter().find(|w| w.contains("fewer tweaks"));
+    let omits = omits.unwrap_or_else(|| panic!("{logged:?}"));
+    assert!(omits.contains(&format!("hub={HUB}")), "{omits}");
+    assert!(omits.contains(&format!("others={OTHER}")), "{omits}");
+    assert!(omits.contains("block=3"), "{omits}");
+    // Both asked once, at once.
+    assert_eq!(*s.hub.asked.lock().unwrap(), 1);
+    assert_eq!(s.hub.view(OTHER).asked, 1);
+}
+
+#[tokio::test]
+async fn a_hub_behind_another_does_not_hold_the_scan_back() {
+    let s = setup().await;
+    s.wallet.watch_silent(HUB, 1).unwrap();
+    s.other(1, View::default()).await;
+    // The hub asked first indexed up to block 2 only, as one stuck.
+    s.view(HUB, |v| v.top = Some(2));
+    let paying = s.pay(&[s.address()], &[40_000]);
+    s.mine(vec![paying]);
+    s.mine(Vec::new());
+    let (scanned, tweaked) = s.scan_trusted(u32::MAX).await.unwrap();
+    assert!(tweaked);
+    assert_eq!((scanned.next, scanned.height), (5, 4));
+    assert_eq!(scanned.found.len(), 1);
+    // Scanned with the first alone, it waits at its newest block.
+    let s = setup().await;
+    s.wallet.watch_silent(HUB, 1).unwrap();
+    s.view(HUB, |v| v.top = Some(2));
+    let paying = s.pay(&[s.address()], &[40_000]);
+    s.mine(vec![paying]);
+    let (scanned, _) = s.scan_trusted(u32::MAX).await.unwrap();
+    assert_eq!((scanned.next, scanned.height), (3, 3));
+    assert!(scanned.found.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hub_that_does_not_answer_is_passed_over_for_one_that_does() {
+    let s = setup().await;
+    s.wallet.watch_silent(HUB, 1).unwrap();
+    s.other(1, View::default()).await;
+    s.view(HUB, |v| v.stalls = true);
+    let paying = s.pay(&[s.address()], &[40_000]);
+    s.mine(vec![paying]);
+    let warnings = Warnings::default();
+    let started = tokio::time::Instant::now();
+    let (scanned, tweaked) = {
+        let _logging = tracing::subscriber::set_default(warnings.clone());
+        s.scan_trusted(u32::MAX).await.unwrap()
+    };
+    assert!(tweaked);
+    assert_eq!((scanned.next, scanned.height), (4, 3));
+    assert_eq!(scanned.found.len(), 1);
+    // Waited on for a while, not for good.
+    let waited = started.elapsed();
+    assert!(waited >= std::time::Duration::from_secs(5), "{waited:?}");
+    assert!(waited < std::time::Duration::from_secs(60), "{waited:?}");
+    let logged = warnings.logged();
+    assert!(
+        logged
+            .iter()
+            .any(|w| w.contains("no answer") && w.contains(HUB)),
+        "{logged:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_hub_naming_another_block_is_passed_over_for_one_that_does_not() {
+    let s = setup().await;
+    s.wallet.watch_silent(HUB, 1).unwrap();
+    s.other(1, View::default()).await;
+    let paying = s.pay(&[s.address()], &[40_000]);
+    s.mine(vec![paying]);
+    *s.hub.forged.lock().unwrap() = Some(2);
+    let (scanned, _) = s.scan_trusted(u32::MAX).await.unwrap();
+    assert_eq!((scanned.next, scanned.found.len()), (4, 1));
+}
+
+#[tokio::test]
+async fn none_of_the_hubs_serving_the_tweaks_answering_the_scan_waits() {
+    let s = setup().await;
+    s.wallet.watch_silent(HUB, 1).unwrap();
+    s.other(1, View::default()).await;
+    *s.hub.forged.lock().unwrap() = Some(2);
+    s.view(OTHER, |v| v.lost = true);
+    match s.scan_trusted(u32::MAX).await {
+        Err(Error::Unavailable { hub, reason }) => {
+            assert_eq!(hub, HUB);
+            assert!(reason.contains("block 2"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(s.wallet.silent_next().unwrap(), Some(1));
+}
+
+#[tokio::test]
+async fn without_a_hub_serving_the_next_blocks_tweaks_up_to_the_first_that_does() {
+    let s = setup().await;
+    *s.hub.first.lock().unwrap() = Some(3);
+    s.wallet.add_hub(HUB).await.unwrap();
+    s.wallet.watch_silent(None, 1).unwrap();
+    s.mine(Vec::new());
+    s.mine(Vec::new());
+    let (scanned, tweaked) = s.scan_trusted(u32::MAX).await.unwrap();
+    assert!(!tweaked);
+    assert_eq!(scanned.next, 3);
+    assert_eq!(*s.hub.asked.lock().unwrap(), 0);
+    let (scanned, tweaked) = s.scan_trusted(u32::MAX).await.unwrap();
+    assert!(tweaked);
+    assert_eq!((scanned.next, scanned.height), (5, 4));
+}
+
+#[tokio::test]
+async fn tweaks_fetched_ahead_are_not_fetched_again_while_still_the_chains() {
+    let s = setup().await;
+    let light = Light(s.chain.clone());
+    s.wallet.watch_silent(HUB, 1).unwrap();
+    // Nothing to fetch ahead: no block past the next, or no hub serving it.
+    assert!(s.wallet.silent_tweaks(&light, 0).await.unwrap().is_none());
+    let paying = s.pay(&[s.address()], &[40_000]);
+    s.mine(vec![paying]);
+    let ahead = s.wallet.silent_tweaks(&light, u32::MAX).await.unwrap();
+    assert_eq!(*s.hub.asked.lock().unwrap(), 1);
+    let scan = s.wallet.scan_silent_trusted(&light, u32::MAX, ahead);
+    let (scanned, tweaked) = scan.await.unwrap();
+    assert!(tweaked);
+    assert_eq!((scanned.next, scanned.found.len()), (4, 1));
+    assert_eq!(*s.hub.asked.lock().unwrap(), 1);
+    assert!(s
+        .wallet
+        .silent_tweaks(&light, u32::MAX)
+        .await
+        .unwrap()
+        .is_none());
+
+    // Of blocks a reorganization replaced, or another than the next:
+    // fetched again.
+    let paying = s.pay(&[s.address()], &[30_000]);
+    s.mine(vec![paying.clone()]);
+    let stale = s.wallet.silent_tweaks(&light, u32::MAX).await.unwrap();
+    assert_eq!(*s.hub.asked.lock().unwrap(), 2);
+    s.chain.lock().unwrap().fork(4);
+    s.mine(vec![paying]);
+    let scan = s
+        .wallet
+        .scan_silent_trusted(&light, u32::MAX, stale.clone());
+    assert_eq!(scan.await.unwrap().0.found.len(), 1);
+    assert_eq!(*s.hub.asked.lock().unwrap(), 3);
+    s.mine(Vec::new());
+    let scan = s.wallet.scan_silent_trusted(&light, u32::MAX, stale);
+    assert_eq!(scan.await.unwrap().0.next, 6);
+    assert_eq!(*s.hub.asked.lock().unwrap(), 4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hub_behind_answering_at_once_does_not_cut_short_the_wait_for_one_slower() {
+    let s = setup().await;
+    s.wallet.watch_silent(HUB, 1).unwrap();
+    // Over Tor, the hub that indexed the blocks answers in 15 s; the one
+    // behind, with none of them, at once.
+    let slow = View {
+        delay: Some(std::time::Duration::from_secs(15)),
+        ..View::default()
+    };
+    s.other(1, slow).await;
+    s.view(HUB, |v| v.top = Some(0));
+    let paying = s.pay(&[s.address()], &[40_000]);
+    s.mine(vec![paying]);
+    let (scanned, tweaked) = s.scan_trusted(u32::MAX).await.unwrap();
+    assert!(tweaked);
+    assert_eq!((scanned.next, scanned.height), (4, 3));
+    assert_eq!(scanned.found.len(), 1);
 }

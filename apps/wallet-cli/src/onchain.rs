@@ -7,7 +7,7 @@ use bitcoin::{BlockHash, FeeRate};
 use clap::Subcommand;
 use licash_chain_client::Source;
 use licash_transport::Http;
-use licash_wallet::{Error, Payee, PaymentCode, SilentCoin, Wallet};
+use licash_wallet::{Payee, PaymentCode, SilentCoin, Wallet};
 use serde_json::json;
 
 use crate::{deposit_json, show};
@@ -263,8 +263,8 @@ pub struct CaughtUp {
 }
 
 /// Scan from the next block (`from` if named) to the chain's height, with
-/// the tweaks of the hubs trusted serving them, the next after one that is
-/// unavailable, and without in blocks none serves tweaks of; then
+/// the tweaks of every hub trusted serving them, those of a block any of
+/// them serves, and without in blocks none serves tweaks of; then
 /// broadcast again the spends in no block yet. Refused for a wallet
 /// watching nothing yet, no hub serving tweaks, `from` not named.
 pub async fn catch_up(
@@ -272,12 +272,14 @@ pub async fn catch_up(
     source: &Source,
     from: Option<u32>,
 ) -> anyhow::Result<CaughtUp> {
-    let trusted = wallet.hubs()?.into_iter();
-    let mut hubs: Vec<(String, u32)> = trusted.filter_map(|(u, i)| Some((u, i.tweaks?))).collect();
-    hubs.sort_by_key(|(_, first)| *first);
-    match (from, wallet.silent_next()?, hubs.first()) {
+    let earliest = wallet
+        .hubs()?
+        .into_iter()
+        .filter_map(|(_, i)| i.tweaks)
+        .min();
+    match (from, wallet.silent_next()?, earliest) {
         (Some(from), ..) => wallet.watch_silent(None, from)?,
-        (None, None, Some((_, first))) => wallet.watch_silent(None, *first)?,
+        (None, None, Some(first)) => wallet.watch_silent(None, first)?,
         (None, None, None) => bail!(
             "no hub trusted serves silent payment tweaks: name the block to look from, --from HEIGHT"
         ),
@@ -288,7 +290,7 @@ pub async fn catch_up(
     let mut without = false;
     let scanned = loop {
         let next = wallet.silent_next()?.expect("watching");
-        let (scanned, tweaks) = batch(wallet, &hubs, &chain, next).await?;
+        let (scanned, tweaks) = wallet.scan_silent_trusted(&chain, BATCH, None).await?;
         without |= !tweaks;
         tracing::info!(
             next = scanned.next,
@@ -316,33 +318,6 @@ pub async fn catch_up(
         scanned,
         without,
     })
-}
-
-/// A batch of blocks from `next`, with the tweaks of the first of `hubs`
-/// serving them that is available; if none serves `next`'s, without, up to
-/// the first block one does: for the fallback addresses and the coins held
-/// only, looked in again once scanned with tweaks. Whether with tweaks.
-async fn batch(
-    wallet: &Wallet<Http>,
-    hubs: &[(String, u32)],
-    chain: &Blocks,
-    next: u32,
-) -> anyhow::Result<(licash_wallet::Scanned, bool)> {
-    let mut failed = None;
-    for (url, _) in hubs.iter().filter(|(_, first)| *first <= next) {
-        match wallet.scan_silent(url.as_str(), chain, BATCH).await {
-            Ok(scanned) => return Ok((scanned, true)),
-            Err(e @ Error::Unavailable { .. }) => failed = Some(e),
-            Err(e) => return Err(e.into()),
-        }
-    }
-    // Those serving them are unreachable: wait for one.
-    if let Some(e) = failed {
-        return Err(e.into());
-    }
-    let later = hubs.iter().map(|(_, first)| *first).find(|f| *f > next);
-    let max = later.map_or(BATCH, |first| BATCH.min(first - next));
-    Ok((wallet.scan_silent(None, chain, max).await?, false))
 }
 
 /// Whom `code` names to pay on Bitcoin: its silent payment address, else

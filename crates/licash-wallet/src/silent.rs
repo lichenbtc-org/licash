@@ -7,7 +7,12 @@
 //! wallet derives from each tweak the outputs a payment to it would pay
 //! first, and fetches a block only if its filter matches one of them or a
 //! coin it holds. A hub that withholds or forges tweaks hides payments; it
-//! can never take them. Tweaks of another block than the chain's at their
+//! can never take them. Scanned with every hub trusted serving tweaks
+//! ([`Wallet::scan_silent_trusted`]), a block is looked in with the tweaks
+//! any of them that served it serves: a payment stays hidden only if every
+//! hub that served its block hides it (one alone, if the others had not
+//! indexed it yet or did not answer). Each of them is asked for each
+//! batch of blocks. Tweaks of another block than the chain's at their
 //! height are refused. Each batch of blocks is recorded whole, and a
 //! reorganization drops what the blocks it replaced held.
 //!
@@ -30,6 +35,9 @@
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
+    pin::Pin,
+    task::Poll,
+    time::Duration,
 };
 
 use bitcoin::{
@@ -120,6 +128,55 @@ pub struct Scanned {
     pub fetched: u32,
 }
 
+/// How long, once a hub answered with the tweaks of a batch of blocks, the
+/// others asked are waited on: one slow or gone is passed over for the
+/// batch rather than holding it up.
+const GRACE: Duration = Duration::from_secs(10);
+
+/// The tweaks of the blocks from one on, as every hub asked served them,
+/// each block's of the chain's: of a block, those any served. Fetched ahead
+/// of a scan ([`Wallet::silent_tweaks`]), so it holds no one waiting on
+/// hubs.
+#[derive(Clone, Debug)]
+pub struct SilentTweaks {
+    from: u32,
+    /// Of each block from `from` on, its hash and its tweaks.
+    blocks: Vec<(BlockHash, Vec<PublicKey>)>,
+}
+
+/// The answers of `asks`, asked at once: once one is `good`, the rest
+/// waited on for `grace` at most, those that did not answer by then none.
+async fn gather<F: Future>(
+    asks: Vec<F>,
+    good: impl Fn(&F::Output) -> bool,
+    grace: Duration,
+) -> Vec<Option<F::Output>> {
+    let mut asks: Vec<_> = asks.into_iter().map(Box::pin).collect();
+    let mut answers: Vec<Option<F::Output>> = asks.iter().map(|_| None).collect();
+    let mut deadline: Option<Pin<Box<tokio::time::Sleep>>> = None;
+    std::future::poll_fn(|cx| {
+        for (ask, answer) in asks.iter_mut().zip(answers.iter_mut()) {
+            if answer.is_none() {
+                if let Poll::Ready(output) = ask.as_mut().poll(cx) {
+                    *answer = Some(output);
+                }
+            }
+        }
+        if answers.iter().all(Option::is_some) {
+            return Poll::Ready(());
+        }
+        if deadline.is_none() && answers.iter().flatten().any(&good) {
+            deadline = Some(Box::pin(tokio::time::sleep(grace)));
+        }
+        match &mut deadline {
+            Some(deadline) => deadline.as_mut().poll(cx),
+            None => Poll::Pending,
+        }
+    })
+    .await;
+    answers
+}
+
 /// What a batch of blocks held: recorded whole.
 #[derive(Default)]
 struct Batch {
@@ -191,6 +248,20 @@ struct Held {
 
 pub(crate) fn chain_error(reason: impl std::fmt::Display) -> Error {
     Error::Chain(reason.to_string())
+}
+
+fn not_watching() -> Error {
+    Error::Invalid("not watching for silent payments: watch_silent first".into())
+}
+
+/// Whether the blocks `tweaks` are of are still the chain's.
+async fn still_of(chain: &impl Blocks, tweaks: &SilentTweaks) -> Result<bool, Error> {
+    for (at, (hash, _)) in (tweaks.from..).zip(&tweaks.blocks) {
+        if chain.hash(at).await.map_err(chain_error)? != *hash {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn raced() -> Error {
@@ -441,20 +512,97 @@ impl<T: Transport> Wallet<T> {
         chain: &impl Blocks,
         max: u32,
     ) -> Result<Scanned, Error> {
-        let url = hub.into().map(hub_url).transpose()?;
-        let first = match &url {
-            Some(url) => Some(self.tweaks_from(url)?),
-            None => None,
+        let hubs = match hub.into().map(hub_url).transpose()? {
+            Some(url) => {
+                let first = self.tweaks_from(&url)?;
+                vec![(url, first)]
+            }
+            None => Vec::new(),
         };
+        self.scan_with(&hubs, None, chain, max).await
+    }
+
+    /// As [`Wallet::scan_silent`], with the tweaks of every hub trusted
+    /// serving the next block's, those of each block any of them serves
+    /// (see [`Wallet::silent_tweaks`]): up to the newest block one indexed.
+    /// Those `ahead`, fetched by [`Wallet::silent_tweaks`] meanwhile, are
+    /// not fetched again, while still of the chain's blocks. If no hub
+    /// trusted serves the next block's, without, up to the first block one
+    /// does. Whether with tweaks.
+    pub async fn scan_silent_trusted(
+        &self,
+        chain: &impl Blocks,
+        max: u32,
+        ahead: Option<SilentTweaks>,
+    ) -> Result<(Scanned, bool), Error> {
+        let hubs = self.tweak_hubs()?;
+        let next = self.silent_next()?.ok_or_else(not_watching)?;
+        if hubs.iter().any(|(_, first)| *first <= next) {
+            return Ok((self.scan_with(&hubs, ahead, chain, max).await?, true));
+        }
+        let later = hubs.iter().map(|(_, first)| *first).find(|f| *f > next);
+        let max = later.map_or(max, |first| max.min(first - next));
+        Ok((self.scan_with(&[], None, chain, max).await?, false))
+    }
+
+    /// The tweaks of up to `max` blocks (and [`MAX_TWEAK_BLOCKS`]) from the
+    /// next to look in, for [`Wallet::scan_silent_trusted`]: asked of every
+    /// hub trusted serving the next block's at once, those of each block
+    /// any of them serves, up to the newest block one indexed. One that
+    /// names another block than the chain's, or does not answer within
+    /// `GRACE` of another, is passed over; one that serves fewer of a
+    /// block's tweaks than another is warned of. None if no hub trusted
+    /// serves the next block's, or the chain has no next block; refused if
+    /// none of those that do answers, with why the first did not.
+    ///
+    /// Changes nothing the wallet holds: fetched alongside anything else.
+    pub async fn silent_tweaks(
+        &self,
+        chain: &impl Blocks,
+        max: u32,
+    ) -> Result<Option<SilentTweaks>, Error> {
+        let Some(next) = self.silent_next()? else {
+            return Ok(None);
+        };
+        let hubs = self.tweak_hubs()?;
+        if max == 0 || !hubs.iter().any(|(_, first)| *first <= next) {
+            return Ok(None);
+        }
+        let height = chain.height().await.map_err(chain_error)?;
+        if next > height {
+            return Ok(None);
+        }
+        let count = (height - next + 1).min(max).min(MAX_TWEAK_BLOCKS);
+        Ok(Some(self.union(&hubs, chain, next, count).await?))
+    }
+
+    /// The hubs trusted serving tweaks, and the first block each serves
+    /// the tweaks of, the earliest first.
+    fn tweak_hubs(&self) -> Result<Vec<(String, u32)>, Error> {
+        let hubs = self.hubs()?.into_iter();
+        let mut hubs: Vec<(String, u32)> = hubs.filter_map(|(u, i)| Some((u, i.tweaks?))).collect();
+        hubs.sort_by_key(|(_, first)| *first);
+        Ok(hubs)
+    }
+
+    /// Look in up to `max` blocks from the next with the tweaks of `hubs`,
+    /// each with the first block it serves the tweaks of, those `ahead`
+    /// first; without any if none.
+    async fn scan_with(
+        &self,
+        hubs: &[(String, u32)],
+        mut ahead: Option<SilentTweaks>,
+        chain: &impl Blocks,
+        max: u32,
+    ) -> Result<Scanned, Error> {
+        let first = hubs.iter().min_by_key(|(_, first)| *first);
         if self.silent_next()?.is_none() {
-            return Err(Error::Invalid(
-                "not watching for silent payments: watch_silent first".into(),
-            ));
+            return Err(not_watching());
         }
         let height = chain.height().await.map_err(chain_error)?;
         let mut next = self.unwind(chain, height).await?;
-        if let Some(first) = first {
-            next = self.look_again(next, first)?;
+        if let Some((_, first)) = first {
+            next = self.look_again(next, *first)?;
         }
         let mut scanned = Scanned {
             next,
@@ -466,8 +614,8 @@ impl<T: Transport> Wallet<T> {
         if next > height || max == 0 {
             return Ok(scanned);
         }
-        if let (Some(url), Some(first)) = (&url, first) {
-            if next < first {
+        if let Some((url, first)) = first {
+            if next < *first {
                 return Err(Error::Invalid(format!(
                     "hub {url} serves tweaks from block {first} on, not {next}"
                 )));
@@ -483,24 +631,34 @@ impl<T: Transport> Wallet<T> {
             fallbacks: watched,
         };
         let mut coins = self.held_outputs()?;
-        while scanned.next <= end {
+        // The hubs served fewer blocks than asked for: none has more.
+        let mut indexed = false;
+        while scanned.next <= end && !indexed {
             let count = (end - scanned.next + 1).min(MAX_TWEAK_BLOCKS);
             let mut batch = Batch::default();
-            if let Some(url) = &url {
-                let path = format!("{TWEAKS}?from={}&count={count}", scanned.next);
-                let blocks: Vec<BlockTweaks> = self.get(url, &path).await?;
-                for tweaks in blocks.into_iter().take(count as usize) {
-                    let at = scanned.next + batch.blocks.len() as u32;
-                    let tweaks = Some((url.as_str(), &tweaks));
+            if hubs.is_empty() {
+                for at in scanned.next..scanned.next + count {
+                    let hash = chain.hash(at).await.map_err(chain_error)?;
                     let fetched = self
-                        .look(chain, &finder, at, tweaks, &mut coins, &mut batch)
+                        .look(chain, &finder, at, hash, &[], &mut coins, &mut batch)
                         .await?;
                     scanned.fetched += u32::from(fetched);
                 }
             } else {
-                for at in scanned.next..scanned.next + count {
+                let tweaks = match ahead.take() {
+                    Some(mut ahead) if ahead.from == scanned.next => {
+                        ahead.blocks.truncate(count as usize);
+                        match still_of(chain, &ahead).await? {
+                            true => ahead,
+                            false => self.union(hubs, chain, scanned.next, count).await?,
+                        }
+                    }
+                    _ => self.union(hubs, chain, scanned.next, count).await?,
+                };
+                indexed = tweaks.blocks.len() < count as usize;
+                for (at, (hash, points)) in (scanned.next..).zip(&tweaks.blocks) {
                     let fetched = self
-                        .look(chain, &finder, at, None, &mut coins, &mut batch)
+                        .look(chain, &finder, at, *hash, points, &mut coins, &mut batch)
                         .await?;
                     scanned.fetched += u32::from(fetched);
                 }
@@ -508,7 +666,7 @@ impl<T: Transport> Wallet<T> {
             let Some(&(last, _)) = batch.blocks.last() else {
                 break;
             };
-            self.record_silent(scanned.next, &batch, url.is_none())?;
+            self.record_silent(scanned.next, &batch, hubs.is_empty())?;
             scanned.next = last + 1;
             // A fallback paid: those past it are watched from the next block.
             if !batch.found.is_empty() {
@@ -541,6 +699,141 @@ impl<T: Transport> Wallet<T> {
             );
         }
         Ok(scanned)
+    }
+
+    /// The tweaks of up to `count` blocks from `from`, asked at once of
+    /// those of `hubs` serving `from`'s ([`Wallet::silent_tweaks`]).
+    async fn union(
+        &self,
+        hubs: &[(String, u32)],
+        chain: &impl Blocks,
+        from: u32,
+        count: u32,
+    ) -> Result<SilentTweaks, Error> {
+        let asked: Vec<&str> = (hubs.iter())
+            .filter(|(_, first)| *first <= from)
+            .map(|(url, _)| url.as_str())
+            .collect();
+        let asks = asked
+            .iter()
+            .map(|url| self.tweaks_of(url, from, count))
+            .collect();
+        // Only once one served every block asked for: a hub behind answers
+        // at once with fewer, and one ahead of it may be slower.
+        let whole = |answer: &Result<Vec<_>, Error>| {
+            answer.as_ref().is_ok_and(|b| b.len() == count as usize)
+        };
+        let answers = gather(asks, whole, GRACE).await;
+        let mut served = Vec::new();
+        // Why each hub, in the order asked, was passed over.
+        let mut failed: Vec<Option<Error>> = asked.iter().map(|_| None).collect();
+        let mut pass_over = |i: usize, e: Error| {
+            if asked.len() > 1 {
+                tracing::warn!(hub = %asked[i], from, "tweaks passed over: {e}");
+            }
+            failed[i] = Some(e);
+        };
+        for (i, (url, answer)) in asked.iter().zip(answers).enumerate() {
+            match answer {
+                Some(Ok(blocks)) => served.push((i, *url, blocks)),
+                Some(Err(e)) => pass_over(i, e),
+                None => tracing::warn!(
+                    hub = %url,
+                    from,
+                    "tweaks passed over: no answer within {} s of another hub's",
+                    GRACE.as_secs()
+                ),
+            }
+        }
+        // Each block's hash read once, for every hub that served it.
+        let longest = served.iter().map(|(.., b)| b.len()).max().unwrap_or(0);
+        let mut hashes = Vec::with_capacity(longest);
+        for at in (from..).take(longest) {
+            hashes.push(chain.hash(at).await.map_err(chain_error)?);
+        }
+        let mut checked: Vec<(&str, Vec<Vec<PublicKey>>)> = Vec::new();
+        'hubs: for (i, url, blocks) in served {
+            let mut points = Vec::with_capacity(blocks.len());
+            for ((at, (hash, theirs)), chains) in (from..).zip(blocks).zip(&hashes) {
+                if hash != chains.to_string() {
+                    let e = format!("its block {at} is {hash}, the chain's {chains}");
+                    pass_over(i, unavailable(url, e));
+                    continue 'hubs;
+                }
+                points.push(theirs);
+            }
+            checked.push((url, points));
+        }
+        if checked.is_empty() {
+            let first = failed.into_iter().flatten().next();
+            return Err(first.unwrap_or_else(|| Error::Invalid("no hub serves the tweaks".into())));
+        }
+        let longest = checked.iter().map(|(_, b)| b.len()).max().unwrap_or(0);
+        let mut blocks = Vec::with_capacity(longest);
+        // Of each hub, the blocks it served fewer tweaks of than another,
+        // and the first.
+        let mut omitted: HashMap<&str, (u32, u32)> = HashMap::new();
+        for (i, hash) in hashes.into_iter().take(longest).enumerate() {
+            let serving: Vec<(&str, &Vec<PublicKey>)> = (checked.iter())
+                .filter_map(|(url, b)| Some((*url, b.get(i)?)))
+                .collect();
+            let mut seen = HashSet::new();
+            let points: Vec<PublicKey> = (serving.iter())
+                .flat_map(|(_, points)| *points)
+                .filter(|p| seen.insert(**p))
+                .copied()
+                .collect();
+            for (url, theirs) in &serving {
+                if theirs.iter().collect::<HashSet<_>>().len() < points.len() {
+                    let at = from + i as u32;
+                    omitted.entry(url).or_insert((0, at)).0 += 1;
+                }
+            }
+            blocks.push((hash, points));
+        }
+        for (url, (count, first)) in omitted {
+            let others: Vec<&str> = (checked.iter())
+                .map(|(other, _)| *other)
+                .filter(|other| *other != url)
+                .collect();
+            tracing::warn!(
+                hub = %url,
+                others = %others.join(", "),
+                blocks = count,
+                block = first,
+                "a hub serves fewer tweaks of blocks than other hubs: one hides payments, \
+                 or another adds tweaks of none"
+            );
+        }
+        Ok(SilentTweaks { from, blocks })
+    }
+
+    /// The tweaks of up to `count` blocks from `from` the hub at `url`
+    /// serves, and the hash it names each block by: up to the newest block
+    /// it indexed.
+    async fn tweaks_of(
+        &self,
+        url: &str,
+        from: u32,
+        count: u32,
+    ) -> Result<Vec<(String, Vec<PublicKey>)>, Error> {
+        let path = format!("{TWEAKS}?from={from}&count={count}");
+        let served: Vec<BlockTweaks> = self.get(url, &path).await?;
+        let mut blocks = Vec::with_capacity(served.len().min(count as usize));
+        for (at, tweaks) in (from..).zip(served.into_iter().take(count as usize)) {
+            if tweaks.height != at {
+                return Err(unavailable(
+                    url,
+                    format!("tweaks of block {} asked for {at}", tweaks.height),
+                ));
+            }
+            let points = tweaks.tweaks.iter().map(|t| PublicKey::from_slice(&t.0));
+            let points = points
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| unavailable(url, format!("a tweak of block {at}: {e}")))?;
+            blocks.push((tweaks.hash, points));
+        }
+        Ok(blocks)
     }
 
     /// Before looking on from `next` with a hub serving tweaks from block
@@ -593,40 +886,20 @@ impl<T: Transport> Wallet<T> {
         Ok(from)
     }
 
-    /// Look in block `at` with its `tweaks` from the hub at their URL, if
-    /// any, adding to `batch` what it holds for the wallet, and to `coins`
-    /// the coins found: whether the block was fetched.
+    /// Look in block `at`, of `hash`, with its tweaks `points`, adding to
+    /// `batch` what it holds for the wallet, and to `coins` the coins found:
+    /// whether the block was fetched.
+    #[allow(clippy::too_many_arguments)]
     async fn look(
         &self,
         chain: &impl Blocks,
         finder: &Finder,
         at: u32,
-        tweaks: Option<(&str, &BlockTweaks)>,
+        hash: BlockHash,
+        points: &[PublicKey],
         coins: &mut HashMap<OutPoint, XOnlyPublicKey>,
         batch: &mut Batch,
     ) -> Result<bool, Error> {
-        let hash = chain.hash(at).await.map_err(chain_error)?;
-        let points = match tweaks {
-            None => Vec::new(),
-            Some((url, tweaks)) => {
-                if tweaks.height != at {
-                    return Err(unavailable(
-                        url,
-                        format!("tweaks of block {} asked for {at}", tweaks.height),
-                    ));
-                }
-                if tweaks.hash != hash.to_string() {
-                    return Err(unavailable(
-                        url,
-                        format!("its block {at} is {}, the chain's {hash}", tweaks.hash),
-                    ));
-                }
-                let points = tweaks.tweaks.iter().map(|t| PublicKey::from_slice(&t.0));
-                points
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| unavailable(url, format!("a tweak of block {at}: {e}")))?
-            }
-        };
         batch.blocks.push((at, hash));
         let candidates: Vec<Vec<XOnlyPublicKey>> = points
             .iter()

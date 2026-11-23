@@ -21,10 +21,10 @@ thiserror.workspace = true
 tracing = "0.1"
 rand_core.workspace = true
 chacha20poly1305 = "0.10"
-tokio = { version = "1.54", features = ["sync"] }
+tokio = { version = "1.54", features = ["sync", "time"] }
 
 [dev-dependencies]
 bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
 licash-hub = { path = "../licash-hub" }
 tempfile = "3.27"
-tokio = { version = "1.54", features = ["macros", "rt"] }
+tokio = { version = "1.54", features = ["macros", "rt", "test-util"] }
