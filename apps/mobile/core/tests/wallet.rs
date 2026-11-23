@@ -517,6 +517,27 @@ fn notes(wallet: &Wallet) -> u64 {
 }
 
 #[test]
+fn a_phone_fetches_the_tweaks_ahead_and_looks_with_them() {
+    let net = Net::new(true);
+    let light = Light::new(&net);
+    let alice = net.wallet("alice", net.height());
+    let code = alice.bitcoin_code(None).unwrap();
+    // Not watching yet: nothing to fetch ahead, the scan starts it.
+    assert!(alice.tweaks(light.clone()).unwrap().is_none());
+    let first = alice.scan_with(light.clone(), None).unwrap();
+    assert!(first.next > first.height);
+    assert!(alice.tweaks(light.clone()).unwrap().is_none());
+    let payment = net.pay_silent(&code.qr, 3_000, 1);
+    net.mine(1, vec![payment]);
+    let ahead = alice.tweaks(light.clone()).unwrap();
+    assert!(ahead.is_some());
+    let scan = alice.scan_with(light.clone(), ahead).unwrap();
+    assert!(scan.tweaks);
+    assert_eq!((scan.found, scan.found_value), (1, 3_000));
+    assert_eq!((scan.next, scan.height), (net.height() + 1, net.height()));
+}
+
+#[test]
 fn coins_found_on_bitcoin_take_their_blocks_time_in_the_history() {
     let net = Net::new(true);
     let light = Light::new(&net);

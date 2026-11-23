@@ -56,6 +56,11 @@ pub use contacts::Contact;
 pub use samples::BalanceSample;
 pub use stats::{BalancePoint, Flow, HubAmount, StatEvent, Stats, Unlink, Way};
 
+/// The tweaks of the next blocks to look in for payments on Bitcoin,
+/// fetched ahead of a scan ([`Wallet::tweaks`]).
+#[derive(uniffi::Object)]
+pub struct Tweaks(licash_wallet::SilentTweaks);
+
 /// A wallet, kept in a directory of its own.
 #[derive(uniffi::Object)]
 pub struct Wallet {
@@ -1603,65 +1608,53 @@ impl Wallet {
     /// Look for payments on Bitcoin in the next blocks of `chain`, and
     /// broadcast again the wallet's spends not in a block yet once caught
     /// up. Called until `next` passes `height`, once a hub is trusted. With
-    /// the tweaks of a hub trusted serving them; without, of blocks no hub
-    /// trusted serves tweaks of, for the fallback addresses and the coins
-    /// held only.
+    /// the tweaks of every hub trusted serving them, of each block those
+    /// any of them serves; without, of blocks no hub trusted serves tweaks
+    /// of, for the fallback addresses and the coins held only.
     pub fn scan(&self, chain: Arc<dyn ChainSource>) -> Result<Scan, LicashError> {
+        self.scan_with(chain, None)
+    }
+
+    /// The tweaks [`Wallet::scan_with`] looks in the next blocks with,
+    /// asked of the hubs trusted serving them: none if no hub trusted
+    /// serves them, or there is no block to look in. Changes nothing the
+    /// wallet holds, so called alongside anything else: what makes a scan
+    /// wait on the hubs, not holding up the rest while it does.
+    pub fn tweaks(&self, chain: Arc<dyn ChainSource>) -> Result<Option<Arc<Tweaks>>, LicashError> {
+        let _timed = crate::log::timed("tweaks");
+        let _background = licash_wallet::Background::enter();
+        let source = Chain(chain, self.wallet.network());
+        let fetch = self.wallet.silent_tweaks(&source, SCAN_BATCH);
+        let tweaks = self.runtime.block_on(fetch)?;
+        Ok(tweaks.map(|t| Arc::new(Tweaks(t))))
+    }
+
+    /// [`Wallet::scan`], with the tweaks fetched `ahead` by
+    /// [`Wallet::tweaks`]: not fetched again while still of the chain's
+    /// blocks.
+    pub fn scan_with(
+        &self,
+        chain: Arc<dyn ChainSource>,
+        ahead: Option<Arc<Tweaks>>,
+    ) -> Result<Scan, LicashError> {
         let _timed = crate::log::timed("scan");
         let _background = licash_wallet::Background::enter();
-        let hubs = self.wallet.hubs()?;
-        if hubs.is_empty() {
+        if self.wallet.hubs()?.is_empty() {
             return Err(LicashError::invalid(
                 "no hub trusted serves what finds payments on Bitcoin",
             ));
         }
-        let hubs = hubs.into_iter();
-        let mut tweaks: Vec<(String, u32)> =
-            hubs.filter_map(|(u, i)| Some((u, i.tweaks?))).collect();
-        tweaks.sort_by_key(|(_, first)| *first);
-        let earliest = tweaks.first().map(|(_, first)| *first);
-        let next = match self.wallet.silent_next()? {
-            Some(next) => next,
-            None => {
-                // Recorded before any block is looked in.
-                let from = self.first_block(chain.as_ref())?;
-                self.learn_birthday(from)?;
-                self.wallet.watch_silent(None, from)?;
-                tracing::info!(from, "looking for payments on Bitcoin");
-                from
-            }
-        };
-        let source = Chain(chain.clone(), self.wallet.network());
-        let mut failed = None;
-        let mut scanned = None;
-        let mut tweaked = true;
-        // Any hub serving the blocks: their tweaks are the chain's.
-        for (url, _) in tweaks.iter().filter(|(_, first)| *first <= next) {
-            let scan = self.wallet.scan_silent(url.as_str(), &source, SCAN_BATCH);
-            match self.runtime.block_on(scan) {
-                Ok(done) => {
-                    scanned = Some(done);
-                    break;
-                }
-                Err(e @ licash_wallet::Error::Unavailable { .. }) => {
-                    tracing::warn!(hub = %url, "no tweaks: {e}");
-                    failed = Some(e);
-                }
-                Err(e) => return Err(e.into()),
-            }
+        if self.wallet.silent_next()?.is_none() {
+            // Recorded before any block is looked in.
+            let from = self.first_block(chain.as_ref())?;
+            self.learn_birthday(from)?;
+            self.wallet.watch_silent(None, from)?;
+            tracing::info!(from, "looking for payments on Bitcoin");
         }
-        let scanned = match (scanned, failed) {
-            (Some(scanned), _) => scanned,
-            // Those serving them are unreachable: wait for one.
-            (None, Some(e)) => return Err(e.into()),
-            // None serves them: without tweaks, up to the first one does.
-            (None, None) => {
-                tweaked = false;
-                let max = earliest.map_or(SCAN_BATCH, |first| SCAN_BATCH.min(first - next));
-                let scan = self.wallet.scan_silent(None, &source, max);
-                self.runtime.block_on(scan)?
-            }
-        };
+        let source = Chain(chain.clone(), self.wallet.network());
+        let ahead = ahead.map(|t| t.0.clone());
+        let scan = self.wallet.scan_silent_trusted(&source, SCAN_BATCH, ahead);
+        let (scanned, tweaked) = self.runtime.block_on(scan)?;
         self.saw(scanned.height);
         self.learn_times(chain.as_ref())?;
         if scanned.next > scanned.height {

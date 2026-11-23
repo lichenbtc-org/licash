@@ -40,7 +40,13 @@ over by what the app does by itself (looking for payments, finishing what
 is under way, the inbox, learning what each hub serves) for 30 s, then 1,
 2 and 5 minutes while it keeps not answering, rather than waited on again
 for up to two minutes with the wallet held; what the user asks for asks
-it still, and any answer ends the rest.
+it still, and any answer ends the rest. Looking for payments on Bitcoin
+asks every hub it trusts serving silent payment tweaks at once, without
+holding the wallet while they answer, and looks in each block with the
+tweaks any of them serves: one that lags, is stuck or does not answer
+within 10 s of another that served every block asked for holds nothing
+back while another serves them, and each of them learns how far the
+wallet has looked, as the one asked alone did before.
 
 Home says when bitcoin paid to the wallet waits outside the balance and no
 protection is offered for it ("Pay with your N sat on Bitcoin", as the

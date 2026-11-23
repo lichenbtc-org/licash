@@ -775,7 +775,14 @@ class Engine(context: Context) {
             var before: UInt? = null
             while (true) {
                 val scan = try {
-                    locked { it.scan(chain) }
+                    // The hubs waited on without holding the wallet: paying,
+                    // receiving and the rest go on meanwhile.
+                    val ahead = local { it.tweaks(chain) }
+                    try {
+                        locked { it.scanWith(chain, ahead) }
+                    } finally {
+                        ahead?.destroy()
+                    }
                 } catch (e: LicashException) {
                     failed("looking for payments on Bitcoin", e)
                     // A hub may serve other blocks now: learn it next round.
