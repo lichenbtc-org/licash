@@ -489,11 +489,20 @@ async fn used(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     let fallback = fallback.assume_checked().to_string();
     ensure!(code.silent.is_none(), "a silent payment address in {code}");
     let silent = phone.silent_address().await?;
+    // A wallet with nothing yet: Home guides its first funding, to that
+    // same address, bare.
+    phone.tagged("funding-title", "Fill your vault", 30).await?;
+    let guided = phone.qr(30).await?;
+    ensure!(
+        guided == format!("BITCOIN:{}", fallback.to_uppercase()),
+        "{guided} guided to, {fallback} on Receive"
+    );
     // Paid at the fallback address: Home says it is on its way, then it
     // is found in a block and moved into the balance once asked, the next
     // address shown from then on.
     eco.send_to(&fallback, 30_000).await?;
     phone.tagged("status", "Receiving 30,000 sat", 60).await?;
+    phone.tagged("funding-title", "Seen", 30).await?;
     eco.mine(1).await?;
     move_in(eco, phone).await?;
     settle(eco, phone, 1).await?;

@@ -1275,6 +1275,8 @@ class Engine(context: Context) {
             val pinned = Mobile.pinHeight(chainName(prefs.network)).toUInt()
             val birthday = if (light != null && light.synced()) light.height().toUInt() else pinned
             wallet = configured(Wallet.create(walletDir, prefs.network, birthday, tor()))
+            // Made here: its words never seen yet, Home suggests saving them.
+            prefs.wordsDue = true
             AppLog.info("wallet made at block $birthday")
         }
         // Running since the app started, of this network: shown at once,
@@ -1434,6 +1436,8 @@ class Engine(context: Context) {
             }
             wallet = configured(w)
             hubsLearned = false
+            // Restored from its words or a backup of them: saved already.
+            prefs.wordsDue = false
             AppLog.info("wallet restored, of ${chainName(prefs.network)}")
         }
         lightLock.withLock { startLight() }
@@ -2090,6 +2094,7 @@ class Engine(context: Context) {
             prefs.warned = emptySet()
             prefs.askedAt = null
             prefs.caughtUp = false
+            prefs.wordsDue = false
             seen = null
             looking = false
             WatchJob.cancel(app)

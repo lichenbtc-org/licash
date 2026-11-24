@@ -121,9 +121,8 @@ fun Home(
                 } else {
                     Total(ui) { money(null) }
                     Going(ui, money, history, open)
-                    Offer(engine, ui)
-                    Waiting(ui, money)
-                    Unprotected(engine, ui, money)
+                    // One thing to do next, if any: a first vault guided.
+                    Suggested(engine, ui, money)
                     // A new wallet's first catching up: each step, as it goes.
                     if (firstCatchingUp(ui)) {
                         Spacer(Modifier.height(16.dp))
@@ -198,18 +197,7 @@ private fun Total(ui: Ui, open: () -> Unit) {
             color = colors.onSurfaceVariant,
         )
     }
-    val held = homeProtection(ui.balance, ui.opening != null) ?: return
-    held.label?.let { label ->
-        Spacer(Modifier.height(12.dp))
-        Pill(
-            icon = if (held.shield == Shield.NONE) Glyphs.shieldOff else Glyphs.shield,
-            text = label,
-            // Calm, whichever: what is not protected is said, not shouted.
-            tint = if (held.shield == Shield.ALL) colors.primary else colors.onSurfaceVariant,
-            tag = "protection",
-            onClick = open,
-        )
-    }
+    homeProtection(ui.balance, ui.opening != null)?.let { VaultGauge(it, open) }
 }
 
 /** What is going on, in a line: see [glance]. */
@@ -234,79 +222,57 @@ private fun Going(ui: Ui, money: (String?) -> Unit, history: () -> Unit, open: (
 }
 
 /**
- * The protection offered for what was paid on Bitcoin, to pay with it
- * once protected: until accepted, declined or being opened.
+ * The one step Home suggests ([nextStep]), as a card opening it: the guide
+ * to a first vault; its offer for bitcoin arrived; that bitcoin to move in
+ * when too little for one; the recovery words of a wallet made here; a
+ * vault to renew; what a hub holds beyond its vaults.
  */
 @Composable
-private fun Offer(engine: Engine, ui: Ui) {
-    val q = ui.offer?.takeIf { !ui.offerDeclined && ui.opening == null } ?: return
-    val coin = q.coins.firstOrNull() ?: return
-    var choosing by remember(q) { mutableStateOf(false) }
-    Spacer(Modifier.height(8.dp))
-    Pill(
-        icon = Glyphs.shield,
-        // Already safe on Bitcoin: what it lacks is being spendable here.
-        text = "Pay with your ${sat(coin.value)} on Bitcoin",
-        tint = MaterialTheme.colorScheme.primary,
-        tag = "offer",
-        onClick = { choosing = true },
-    )
-    if (choosing) OfferSheet(engine, q, !behind(ui)) { choosing = false }
-}
-
-/**
- * Bitcoin paid to the wallet that no protection is offered for, nor any is
- * being set up: said, so it is not left to be found, and opening where it
- * is held and what to do with it.
- */
-@Composable
-private fun Waiting(ui: Ui, money: (String?) -> Unit) {
-    val coin = waiting(ui.balance, offered = ui.offer != null, opening = ui.opening != null) ?: return
-    Spacer(Modifier.height(8.dp))
-    Pill(
-        icon = Glyphs.bitcoin,
-        // Counted in the total already: what it lacks is being spendable, as the offer says.
-        text = "Pay with your ${sat(coin)} on Bitcoin",
-        tag = "waiting",
-        onClick = { money(ON_BITCOIN) },
-    )
-}
-
-/**
- * A hub holding more than its contracts protect, by at least its smallest
- * contract: said until dismissed on its page, which offers protecting it
- * or cashing part out.
- */
-@Composable
-private fun Unprotected(engine: Engine, ui: Ui, money: (String?) -> Unit) {
+private fun Suggested(engine: Engine, ui: Ui, money: (String?) -> Unit) {
     var holdings by remember { mutableStateOf<List<Holding>>(emptyList()) }
     LaunchedEffect(ui.balance, ui.contracts, ui.hubs) { engine.holdings().onSuccess { holdings = it } }
-    val (hub, missing) = holdings.firstNotNullOfOrNull { h ->
+    var sheet by remember { mutableStateOf<Next?>(null) }
+    val unprotected = holdings.firstNotNullOfOrNull { h ->
         val cover = hubCover(h.hub, h, ui.contracts, emptyList())
         val terms = ui.hubs.find { sameHub(it.url, h.hub) }
-        (h.hub to cover.missing).takeIf { suggestProtecting(cover, terms, engine.prefs.unprotectedDismissed(h.hub)) }
-    } ?: return
-    Spacer(Modifier.height(8.dp))
-    Pill(
-        icon = Glyphs.shieldOff,
-        text = "${sat(missing)} at ${name(hub)} not protected",
-        tag = "unprotected",
-        onClick = { money(hub) },
-    )
-}
-
-/**
- * No hub yet: those announced to pick from, looked for at once, or one by
- * the address its operator gave. What a hub is, once asked.
- */
-@Composable
-private fun ChooseHub(engine: Engine, ui: Ui) {
-    Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.align(Alignment.CenterHorizontally), verticalAlignment = Alignment.CenterVertically) {
-            Text("Choose a hub", modifier = Modifier.testTag("choose-hub"), style = MaterialTheme.typography.headlineSmall)
-            Info("Hubs", HUB_MEANS)
+        Next.Protect(h.hub, cover.missing).takeIf { suggestProtecting(cover, terms, engine.prefs.unprotectedDismissed(h.hub)) }
+    }
+    val next = nextStep(
+        ui,
+        guided = guiding(ui),
+        onBitcoin = waiting(ui.balance, offered = ui.offer != null, opening = ui.opening != null),
+        backupDue = engine.prefs.wordsDue,
+        unprotected = unprotected,
+    ) ?: return
+    if (next == Next.Fund) {
+        FirstFunding(engine, ui)
+        return
+    }
+    val hub = when (next) {
+        is Next.Renew -> name(next.hub)
+        is Next.Protect -> name(next.hub)
+        else -> ""
+    }
+    val words = stepWords(next, hub, LocalBlockSeconds.current) ?: return
+    val (icon, tag) = when (next) {
+        Next.Confirm -> Glyphs.vault to "offer"
+        is Next.OnBitcoin -> Glyphs.bitcoin to "waiting"
+        Next.Backup -> Glyphs.key to "backup-due"
+        is Next.Renew -> Glyphs.shield to "renew"
+        is Next.Protect -> Glyphs.shieldOff to "unprotected"
+        Next.Fund -> return
+    }
+    StepCard(words, icon, tag) {
+        when (next) {
+            is Next.OnBitcoin -> money(ON_BITCOIN)
+            is Next.Renew -> money(next.hub)
+            is Next.Protect -> money(next.hub)
+            else -> sheet = next
         }
-        Group("") { FoundHubs(engine, ui, auto = true) }
-        Group("Or its address") { AddHub(engine, "Connect") }
+    }
+    when (sheet) {
+        Next.Confirm -> ui.offer?.let { q -> OfferSheet(engine, q, !behind(ui)) { sheet = null } }
+        Next.Backup -> Phrase(engine) { sheet = null }
+        else -> {}
     }
 }

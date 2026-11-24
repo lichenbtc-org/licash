@@ -533,6 +533,8 @@ impl Phone {
     /// The payment code Receive shows, for any amount, back on Home after.
     pub async fn code(&self) -> anyhow::Result<String> {
         self.tap_id("receive").await?;
+        // Home's guide to a first funding has a QR code too: gone first.
+        self.gone("funding", 10).await?;
         self.wait("QR code", 30).await?;
         let code = self.qr(30).await?;
         self.tap("Back").await?;
@@ -544,7 +546,7 @@ impl Phone {
     /// tab shows it, back on Home after.
     pub async fn bitcoin_code(&self) -> anyhow::Result<String> {
         self.tap_id("receive").await?;
-
+        self.gone("funding", 10).await?;
         self.tap_id("segment Bitcoin").await?;
         self.tagged("way", "Bitcoin address", 30).await?;
         // The code shown before it gives way once the address is made.
@@ -562,7 +564,7 @@ impl Phone {
     /// after.
     pub async fn silent_address(&self) -> anyhow::Result<String> {
         self.tap_id("receive").await?;
-
+        self.gone("funding", 10).await?;
         self.tap_id("other-ways").await?;
         self.tap_id("way-silent").await?;
         let silent = self.by_id("silent", 30).await?.text;

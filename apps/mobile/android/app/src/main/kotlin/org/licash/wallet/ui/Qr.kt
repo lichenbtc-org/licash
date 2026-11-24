@@ -37,16 +37,16 @@ fun qrBitmap(text: String): ImageBitmap {
     return Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888).asImageBitmap()
 }
 
-/** A QR code on white, as scanners read best. */
+/** A QR code on white, as scanners read best: `description` says what it is. */
 @Composable
-fun QrCode(text: String, size: Dp = 280.dp) {
+fun QrCode(text: String, size: Dp = 280.dp, description: String = "QR code") {
     val bitmap = remember(text) { qrBitmap(text) }
     Box(
         Modifier.clip(RoundedCornerShape(24.dp)).background(Color.White).padding(18.dp),
     ) {
         Image(
             bitmap,
-            contentDescription = "QR code",
+            contentDescription = description,
             modifier = Modifier.widthIn(max = size).aspectRatio(1f),
             filterQuality = FilterQuality.None,
         )

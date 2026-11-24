@@ -50,6 +50,15 @@ class Prefs(context: Context) {
         get() = prefs.getString("intent", null)
         set(name) = prefs.edit().putString("intent", name).apply()
 
+    /**
+     * Whether the wallet was made here and its recovery words never shown
+     * since: Home suggests saving them. Unset, as for a wallet of an
+     * earlier version or one restored, suggests nothing.
+     */
+    var wordsDue: Boolean
+        get() = prefs.getBoolean("words_due", false)
+        set(due) = prefs.edit().putBoolean("words_due", due).apply()
+
     /** The coin on Bitcoin (`txid:vout`) whose offer of protection was last declined, if any. */
     var offerDeclined: String?
         get() = prefs.getString("offer_declined", null)

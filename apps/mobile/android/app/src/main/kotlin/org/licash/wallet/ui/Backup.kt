@@ -122,7 +122,7 @@ private fun AutoBackupSheet(engine: Engine, ui: Ui, dismiss: () -> Unit) {
 
 /** The 24 words, behind a warning and a tap; out of screenshots while shown. */
 @Composable
-private fun Phrase(engine: Engine, dismiss: () -> Unit) {
+internal fun Phrase(engine: Engine, dismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
     var words by remember { mutableStateOf<List<String>?>(null) }
     var birthday by remember { mutableStateOf<UInt?>(null) }
@@ -138,7 +138,10 @@ private fun Phrase(engine: Engine, dismiss: () -> Unit) {
             BigButton("Show words", Modifier.fillMaxWidth().testTag("show-words")) {
                 error = null
                 scope.launch {
-                    engine.backupPhrase().onSuccess { words = it }.onFailure { error = explain(it) }
+                    engine.backupPhrase().onSuccess {
+                        words = it
+                        engine.prefs.wordsDue = false
+                    }.onFailure { error = explain(it) }
                     birthday = engine.birthday().getOrNull()
                 }
             }
