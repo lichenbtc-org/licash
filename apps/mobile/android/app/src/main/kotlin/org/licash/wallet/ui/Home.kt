@@ -237,15 +237,35 @@ private fun Suggested(engine: Engine, ui: Ui, money: (String?) -> Unit) {
         val terms = ui.hubs.find { sameHub(it.url, h.hub) }
         Next.Protect(h.hub, cover.missing).takeIf { suggestProtecting(cover, terms, engine.prefs.unprotectedDismissed(h.hub)) }
     }
+    // The guide asked for again in Settings, until done or hidden: then forgotten.
+    var since by remember { mutableStateOf(engine.prefs.guideSince) }
+    val asked = guideAsked(ui, since)
+    LaunchedEffect(since, asked) {
+        if (since != null && !asked && ui.hubs.isNotEmpty()) {
+            engine.prefs.guideSince = null
+            since = null
+        }
+    }
     val next = nextStep(
         ui,
-        guided = guiding(ui),
+        guided = guiding(ui) || asked,
         onBitcoin = waiting(ui.balance, offered = ui.offer != null, opening = ui.opening != null),
         backupDue = engine.prefs.wordsDue,
         unprotected = unprotected,
     ) ?: return
     if (next == Next.Fund) {
-        FirstFunding(engine, ui)
+        FirstFunding(
+            engine,
+            ui,
+            hide = if (asked && !guiding(ui)) {
+                {
+                    engine.prefs.guideSince = null
+                    since = null
+                }
+            } else {
+                null
+            },
+        )
         return
     }
     val hub = when (next) {

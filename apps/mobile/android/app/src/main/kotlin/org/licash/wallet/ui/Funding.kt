@@ -12,6 +12,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -30,6 +31,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import org.licash.core.ContractQuote
+import org.licash.core.ContractState
 import org.licash.core.Kind
 import org.licash.core.contractFit
 import org.licash.core.contractPrice
@@ -57,6 +59,17 @@ internal fun guiding(ui: Ui): Boolean =
     ui.hubs.isNotEmpty() && ui.contracts.isEmpty() && ui.paid.isEmpty() &&
         ui.balance.notes == 0uL && ui.balance.notesPending == 0uL && ui.balance.moving == 0uL &&
         ui.history.all { it.kind == Kind.ONCHAIN || it.kind == Kind.CONTRACT }
+
+/**
+ * Whether the guide asked for again at `since` (seconds since 1970) still
+ * shows: with a hub, until a vault asked for since then protects (or did,
+ * and ended). Never asked: no.
+ */
+internal fun guideAsked(ui: Ui, since: Long?): Boolean =
+    since != null && ui.hubs.isNotEmpty() && ui.contracts.none {
+        it.createdAt >= since &&
+            (it.state == ContractState.Protecting || it.state == ContractState.Ending || it.state == ContractState.Closed)
+    }
 
 /** Where the first funding of `ui` stands. Ready is past it: no longer guided. */
 internal fun stage(ui: Ui): FundingStage = when {
@@ -106,7 +119,7 @@ internal fun howMuch(intent: Intent, least: ULong?, receiving: Pair<ULong, ULong
  * it is in a block the vault to open, on a tap: nothing opens unasked.
  */
 @Composable
-internal fun FirstFunding(engine: Engine, ui: Ui) {
+internal fun FirstFunding(engine: Engine, ui: Ui, hide: (() -> Unit)? = null) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     val at = stage(ui)
@@ -198,6 +211,10 @@ internal fun FirstFunding(engine: Engine, ui: Ui) {
                     tag = "funding-step",
                 )
             }
+        }
+        // Asked for again: hidden as it was asked for.
+        hide?.let {
+            TextButton(onClick = it, modifier = Modifier.testTag("funding-hide")) { Text("Hide guide") }
         }
     }
 }

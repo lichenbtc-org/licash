@@ -51,6 +51,16 @@ class Prefs(context: Context) {
         set(name) = prefs.edit().putString("intent", name).apply()
 
     /**
+     * When the guide to a vault was asked for again, in Settings, in
+     * seconds since 1970: Home shows it until a vault asked for since then
+     * protects, or it is hidden. Unset, as in every wallet until then: only
+     * a wallet that never held notes is guided.
+     */
+    var guideSince: Long?
+        get() = prefs.getLong("guide_since", -1L).takeIf { it >= 0 }
+        set(at) = prefs.edit().putLong("guide_since", at ?: -1L).apply()
+
+    /**
      * Whether the wallet was made here and its recovery words never shown
      * since: Home suggests saving them. Unset, as for a wallet of an
      * earlier version or one restored, suggests nothing.

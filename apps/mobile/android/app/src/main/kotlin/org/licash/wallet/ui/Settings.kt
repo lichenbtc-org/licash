@@ -93,7 +93,18 @@ fun Settings(engine: Engine, ui: Ui, balance: () -> Unit, back: () -> Unit) {
     BackHandler(enabled = page != null || touring) { if (touring) touring = false else page = null }
     if (touring) {
         Tour {
-            BigButton("Done", Modifier.fillMaxWidth().testTag("tour-done")) { touring = false }
+            // The rest of the onboarding again: Home guides to a vault, for a wallet holding already too.
+            if (ui.wallet && ui.hubs.isNotEmpty()) {
+                BigButton("Guide me to a vault", Modifier.fillMaxWidth().testTag("guide-start")) {
+                    engine.prefs.guideSince = System.currentTimeMillis() / 1000
+                    touring = false
+                    back()
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+            BigButton("Done", Modifier.fillMaxWidth().testTag("tour-done"), quiet = ui.wallet && ui.hubs.isNotEmpty()) {
+                touring = false
+            }
             Spacer(Modifier.height(24.dp))
         }
         return
@@ -152,7 +163,7 @@ private fun Overview(engine: Engine, ui: Ui, tour: () -> Unit, open: (Page) -> U
         }
     }
     Group("") {
-        Entry("How Licash works", icon = Glyphs.vault, tag = "how-it-works", onClick = tour)
+        Entry("How Licash works", sub = "The tour, and a guide to a vault", icon = Glyphs.vault, tag = "how-it-works", onClick = tour)
         Divider()
         Entry("About", icon = Icons.Outlined.Info, tag = "about") { open(Page.About) }
     }

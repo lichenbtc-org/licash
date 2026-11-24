@@ -655,7 +655,27 @@ async fn used(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
         .wait_balance(held.saturating_sub(NOTES_UPKEEP)..=held, 30)
         .await?;
     logs(phone).await?;
+    guided_again(phone).await?;
     restored(phone, hub, &silent.to_string()).await
+}
+
+/// The onboarding again, from Settings, for a wallet holding and protected
+/// already: the tour, then Home guiding to a vault, until hidden.
+async fn guided_again(phone: &Phone) -> anyhow::Result<()> {
+    phone.launch().await?;
+    ensure!(
+        !phone.has("funding").await?,
+        "a wallet in use guided unasked"
+    );
+    phone.tap("Settings").await?;
+    phone.tap_id("how-it-works").await?;
+    phone.tap_id("tour-skip").await?;
+    phone.tap_id("guide-start").await?;
+    phone.tagged("funding-title", "Fill your vault", 30).await?;
+    phone.by_id("funding-address", 30).await?;
+    phone.tap_id("funding-hide").await?;
+    phone.gone("funding", 10).await?;
+    Ok(())
 }
 
 /// The notes at its hub made few now, by hand, as the hub's page offers in

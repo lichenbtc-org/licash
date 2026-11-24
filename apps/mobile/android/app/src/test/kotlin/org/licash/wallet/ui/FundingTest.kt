@@ -7,6 +7,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.licash.core.Activity
 import org.licash.core.Balance
+import org.licash.core.Contract
+import org.licash.core.ContractState
 import org.licash.core.Hub
 import org.licash.core.Kind
 import org.licash.core.Rate
@@ -75,5 +77,27 @@ class FundingTest {
             howMuch(Intent.RECEIVE, 44_131uL, 50_000uL to 524_287uL),
         )
         assertNull(howMuch(Intent.PAY, null, null))
+    }
+
+    private fun contract(createdAt: Long, state: ContractState) = Contract(
+        id = "c$createdAt", hub = "https://hub.example", state = state, mock = false, cap = 131_071uL, price = 1_000uL,
+        funded = 0uL, fundedReceived = false, paidFrom = 50_000uL, protectsUntil = 2_000u, closesAt = 2_100u,
+        funding = null, createdAt = createdAt, covers = 0uL, step = null, transfer = null,
+    )
+
+    @Test
+    fun the_guide_asked_for_again_lasts_until_a_new_vault_protects() {
+        val held = fresh.copy(balance = balance(notes = 10_000uL), contracts = listOf(contract(100L, ContractState.Protecting)))
+        // Never asked: a wallet holding notes is not guided.
+        assertFalse(guiding(held))
+        assertFalse(guideAsked(held, null))
+        // Asked after its vault: guided, a vault being set up or failed since too.
+        assertTrue(guideAsked(held, 200L))
+        assertTrue(guideAsked(held.copy(contracts = held.contracts + contract(300L, ContractState.Opening)), 200L))
+        assertTrue(guideAsked(held.copy(contracts = held.contracts + contract(300L, ContractState.Failed("no"))), 200L))
+        // A vault asked for since then protects: done.
+        assertFalse(guideAsked(held.copy(contracts = held.contracts + contract(300L, ContractState.Protecting)), 200L))
+        // No hub: choosing one comes first.
+        assertFalse(guideAsked(held.copy(hubs = emptyList()), 200L))
     }
 }

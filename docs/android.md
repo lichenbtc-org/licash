@@ -12,8 +12,10 @@ With no wallet, the app opens on a five-slide tour, skippable, that tells
 Licash through a vault: the hub keeps the gold, the vault on Bitcoin keeps
 the hub honest, the hub can add room to be paid, and a vault is opened with
 bitcoin sent to an address. Its last slide creates or restores the wallet
-(and picks a test network). It never shows for a wallet already there, and
-Settings replays it as "How Licash works". The pictures are drawn in
+(and picks a test network). It never shows for a wallet already there.
+Settings replays it as "How Licash works", ending on "Guide me to a vault":
+Home then shows the funding guide below even for a wallet in use, until a
+vault asked for since protects or "Hide guide" is tapped. The pictures are drawn in
 Compose, the same shapes in the dark and light themes.
 
 The first hub: on a network with a recommended hub (Mutinynet only, for
