@@ -163,11 +163,29 @@ pub async fn for_fees(
     rate: bitcoin::FeeRate,
     record: impl FnOnce(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<Payout> {
-    let from = crate::richest_but(wallet, "")?;
+    let from = fees_from(wallet.balance()?, amount)?;
     let to = wallet.silent_keys().address().to_string();
     let max_fee = amount / 100 + USUAL_MAX_FEE;
     let limits = (max_fee, rate);
     recorded(wallet, route, (&from, &to), amount, limits, record).await
+}
+
+/// The hub to pay `amount` out of for a forced close's fees: the one
+/// holding most, refused before a provider is asked or a payout recorded
+/// if it holds less than `amount`, as a wallet whose notes are all spent
+/// would on every run, a failed payout made each time.
+fn fees_from(balance: Vec<licash_wallet::Balance>, amount: u64) -> anyhow::Result<String> {
+    let richest = balance.into_iter().max_by_key(|b| b.available);
+    let richest = richest.context("no hub to pay at: `licash-wallet add-hub URL` trusts one")?;
+    if richest.available < amount {
+        bail!(
+            "{} needed, {} available at {}, the most at any hub",
+            crate::say::sat(amount),
+            crate::say::sat(richest.available),
+            richest.hub
+        );
+    }
+    Ok(richest.hub)
 }
 
 /// Pay `amount` out of notes at `from` to `to` through the provider
@@ -258,4 +276,35 @@ fn payout_line(payout: &Payout) -> String {
         payout.address,
         payout.hash
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use licash_wallet::Balance;
+
+    fn at(hub: &str, available: u64) -> Balance {
+        Balance {
+            hub: hub.into(),
+            available,
+            pending: 0,
+        }
+    }
+
+    /// A forced close's fees are paid out of the hub holding most, and
+    /// asked of no provider when it holds less than they need: a wallet
+    /// whose notes are spent once made a failed payout on every run.
+    #[test]
+    fn fees_are_paid_out_of_the_richest_hub_or_not_asked_for() {
+        let two = vec![at("http://a.test", 30_000), at("http://b.test", 50_000)];
+        assert_eq!(fees_from(two.clone(), 42_000).unwrap(), "http://b.test");
+        assert_eq!(fees_from(two.clone(), 50_000).unwrap(), "http://b.test");
+        let short = fees_from(two, 50_001).unwrap_err().to_string();
+        assert!(
+            short.contains("50,000 sat available at http://b.test"),
+            "{short}"
+        );
+        assert!(fees_from(vec![at("http://a.test", 0)], 42_000).is_err());
+        assert!(fees_from(Vec::new(), 42_000).is_err());
+    }
 }
