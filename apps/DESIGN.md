@@ -72,6 +72,7 @@ a person sees. The apps differ in medium, not in manners.
 | On Bitcoin, over Lightning, in Licash | On-chain, L1, LN |
 | Couldn't pay, Can't send on Bitcoin | Error, failed (alone) |
 | Vault, only as the picture: the tour, the first funding, a step card | Vault for a protection's rows and states |
+| Tokens, ecash tokens, in the tour | Claims |
 
 Core error reasons pass through `explain()` and `plain()` (Android,
 `Format.kt`): a sentence, amounts grouped, swap providers unnamed.

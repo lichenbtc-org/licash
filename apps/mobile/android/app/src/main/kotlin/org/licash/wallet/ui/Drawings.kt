@@ -20,15 +20,15 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.withTransform
 
 /**
  * The pictures of the tour, drawn rather than shipped as images: gold bars
- * are the user's bitcoin, dashed teal bars the room a hub adds, lichen
- * green what the user holds (the key, claims), a calendar tag the date the
- * vault opens to the user alone. Flat on dark, outlined on light; the same
- * shapes in both. Drawn in a square of 720 units.
+ * are bitcoin, the user's plain, the hub's edged in teal; round tokens are
+ * ecash, lichen green the user's, teal those paid to her, dashed those
+ * beyond her vault (credit); a columned building is a hub, a vault company.
+ * Flat on dark, outlined on light; the same shapes in both. Drawn in a
+ * square of 720 units.
  */
 @Composable
 internal fun TourDrawing(slide: Int, modifier: Modifier = Modifier, play: Boolean = true) {
@@ -67,7 +67,6 @@ private data class Palette(
     val dim: Color,
     val strong: Color,
     val shadow: Color,
-    val tag: Color,
     val ticket: Color,
     val feet: Color,
     val line: Float,
@@ -88,7 +87,6 @@ private val DarkInk = Palette(
     dim = Color(0xFF8A9590),
     strong = Color(0xFFE7ECE9),
     shadow = Color(0xFF14181B),
-    tag = Color(0xFF2C3A22),
     ticket = Color(0xFF181D20),
     feet = Color(0xFF20262A),
     line = 1f,
@@ -109,7 +107,6 @@ private val LightInk = Palette(
     dim = Color(0xFF5E665F),
     strong = Color(0xFF1E3D0E),
     shadow = Color(0xFFEAE7DF),
-    tag = Color(0xFFD9EDC4),
     ticket = Color(0xFFFFFFFF),
     feet = Color(0xFF1E3D0E),
     line = 1.25f,
@@ -118,20 +115,21 @@ private val LightInk = Palette(
 private val Loaf = Color(0xFFC98A4B)
 private val Crust = Color(0xFF8A5A2B)
 
-/** What is in a vault's place: nothing, a gold bar or a hub's. */
+/** What is in a vault's place: the user's gold, or the hub's. */
 private enum class Bar { GOLD, HUB }
 
 /**
- * The five pictures, `t` from 0 to 1 as one comes in: what is drawn last
+ * The six pictures, `t` from 0 to 1 as one comes in: what is drawn last
  * shows last.
  */
 private class Pictures(val d: DrawScope, val p: Palette, val t: Float) {
     fun draw(slide: Int) = when (slide) {
         0 -> vault(List(6) { Bar.GOLD })
         1 -> paying()
-        2 -> claims()
+        2 -> issued()
         3 -> own()
-        else -> sized()
+        4 -> room()
+        else -> net()
     }
 
     /** How far part `i` of `n` has come in: one after the other. */
@@ -181,9 +179,11 @@ private class Pictures(val d: DrawScope, val p: Palette, val t: Float) {
                 d.drawPath(shape, p.goldEdge, alpha = alpha, style = stroke(4f))
                 line(Offset(x + 22 * s, y + 10 * s + dy), Offset(x + 66 * s, y + 10 * s + dy), p.goldShine, 4f, alpha)
             }
+            // Real gold too, the hub's: edged in its color.
             Bar.HUB -> {
-                d.drawPath(shape, p.hub, alpha = 0.16f * alpha)
-                d.drawPath(shape, p.hub, alpha = alpha, style = stroke(4f, floatArrayOf(10f, 8f)))
+                d.drawPath(shape, p.gold, alpha = alpha)
+                d.drawPath(shape, p.hub, alpha = alpha, style = stroke(7f))
+                line(Offset(x + 22 * s, y + 10 * s + dy), Offset(x + 66 * s, y + 10 * s + dy), p.hub, 4f, alpha)
             }
         }
     }
@@ -209,23 +209,15 @@ private class Pictures(val d: DrawScope, val p: Palette, val t: Float) {
         rect(562f, 440f, 14f, 40f, 5f, p.bodyEdge)
     }
 
-    /** A claim: a ticket, a dot on it unless only outlined. */
-    private fun ticket(cx: Float, cy: Float, rot: Float, color: Color, dashed: Boolean = false, alpha: Float = 1f) {
+    /** An ecash token: a coin with a ring and a dot; only outlined and dashed, beyond the vault. */
+    private fun token(cx: Float, cy: Float, color: Color, dashed: Boolean = false, alpha: Float = 1f, r: Float = 30f) {
         if (alpha <= 0f) return
-        d.rotate(rot, Offset(cx, cy)) {
-            if (!dashed) {
-                drawRoundRect(p.ticket, Offset(cx - 44, cy - 25), Size(88f, 50f), CornerRadius(10f), alpha = alpha)
-            }
-            drawRoundRect(
-                color,
-                Offset(cx - 44, cy - 25),
-                Size(88f, 50f),
-                CornerRadius(10f),
-                alpha = alpha,
-                style = stroke(4f, if (dashed) floatArrayOf(8f, 7f) else null),
-            )
-            if (!dashed) drawCircle(color, 10f, Offset(cx, cy), alpha = alpha)
-        }
+        // Coming in, it drops a little into its place.
+        val c = Offset(cx, cy + (1f - alpha) * -16f)
+        if (!dashed) d.drawCircle(p.ticket, r, c, alpha = alpha)
+        d.drawCircle(color, r, c, alpha = alpha, style = stroke(5f, if (dashed) floatArrayOf(8f, 7f) else null))
+        d.drawCircle(color, r * 0.6f, c, alpha = alpha * if (dashed) 0.5f else 1f, style = stroke(3f))
+        if (!dashed) d.drawCircle(color, r * 0.2f, c, alpha = alpha)
     }
 
     /** The user's key, under the vault. */
@@ -237,112 +229,120 @@ private class Pictures(val d: DrawScope, val p: Palette, val t: Float) {
         line(Offset(cx + 168, cy), Offset(cx + 168, cy + 30), p.mine, 12f, alpha)
     }
 
-    /** The calendar tag hung on the vault: the date it opens to its user alone. */
-    private fun tag(alpha: Float) {
-        if (alpha <= 0f) return
-        val string = Path().apply {
-            moveTo(206f, 142f)
-            cubicTo(190f, 110f, 170f, 104f, 150f, 96f)
+    /**
+     * A gold bar to pay for a loaf: an hourglass between them, its sand
+     * running (slow), a sliver of the bar falling away (the fee), an eye
+     * over it all (public).
+     */
+    private fun paying() {
+        bar(24f, 334f, Bar.GOLD, 2.4f)
+        hourglass(340f, 290f, part(0, 3))
+        loaf(436f, 300f)
+        val fee = part(1, 3)
+        line(Offset(140f, 432f), Offset(140f, 432f + 64f * fee), p.dim, 4f, fee, floatArrayOf(4f, 8f))
+        bar(116f, 500f + 30f * fee, Bar.GOLD, 0.5f, fee)
+        val seen = part(2, 3)
+        val eye = Path().apply {
+            moveTo(270f, 160f)
+            quadraticTo(340f, 96f, 410f, 160f)
+            quadraticTo(340f, 224f, 270f, 160f)
+            close()
         }
-        d.drawPath(string, p.dim, alpha = alpha, style = stroke(4f))
-        d.rotate(-14f, Offset(104f, 84f)) {
-            drawRoundRect(p.tag, Offset(52f, 48f), Size(104f, 76f), CornerRadius(14f), alpha = alpha)
-            drawRoundRect(p.mine, Offset(52f, 48f), Size(104f, 76f), CornerRadius(14f), alpha = alpha, style = stroke(4f))
-            line(Offset(52f, 72f), Offset(156f, 72f), p.mine, 4f, alpha)
-            line(Offset(80f, 40f), Offset(80f, 58f), p.mine, 6f, alpha)
-            line(Offset(128f, 40f), Offset(128f, 58f), p.mine, 6f, alpha)
-            for ((x, y) in listOf(78f to 90f, 104f to 90f, 130f to 90f, 78f to 108f, 104f to 108f)) {
-                drawCircle(p.mine, 5f, Offset(x, y), alpha = alpha)
-            }
-            drawCircle(p.mine, 9f, Offset(130f, 108f), alpha = alpha, style = stroke(4f))
-        }
+        d.drawPath(eye, p.strong, alpha = seen, style = stroke(6f))
+        d.drawCircle(p.strong, 17f, Offset(340f, 160f), alpha = seen)
     }
 
-    /** Gold carried to a shop, change carried back, someone watching. */
-    private fun paying() {
-        bar(70f, 290f, Bar.GOLD, 2.4f)
-        val there = part(0, 3)
-        line(Offset(318f, 340f), Offset(318f + 110 * there, 340f), p.strong, 8f, there)
-        d.drawPath(
-            Path().apply { moveTo(406f, 320f); lineTo(428f, 340f); lineTo(406f, 360f) },
-            p.strong,
-            alpha = there,
-            style = stroke(8f),
-        )
+    /** An hourglass `sand` of the way run, its neck at (`cx`, `top` + 70). */
+    private fun hourglass(cx: Float, top: Float, sand: Float) {
+        val w = 46f
+        val h = 70f
+        val upper = 0.85f * (1f - 0.8f * sand)
+        d.drawPath(poly(cx - w * upper to top + h - h * upper, cx + w * upper to top + h - h * upper, cx to top + h - 4f), p.gold)
+        val lower = 0.85f * (0.15f + 0.85f * sand)
+        d.drawPath(poly(cx - w * lower to top + 2 * h - 4f, cx + w * lower to top + 2 * h - 4f, cx to top + 2 * h - 4f - h * lower), p.gold)
+        if (sand < 1f) line(Offset(cx, top + h), Offset(cx, top + 2 * h - 6f), p.gold, 3f)
+        val glass = Path().apply {
+            moveTo(cx - w, top)
+            lineTo(cx + w, top)
+            lineTo(cx + 4f, top + h)
+            lineTo(cx + w, top + 2 * h)
+            lineTo(cx - w, top + 2 * h)
+            lineTo(cx - 4f, top + h)
+            close()
+        }
+        d.drawPath(glass, p.strong, style = stroke(6f))
+        line(Offset(cx - w - 14f, top), Offset(cx + w + 14f, top), p.strong, 10f)
+        line(Offset(cx - w - 14f, top + 2 * h), Offset(cx + w + 14f, top + 2 * h), p.strong, 10f)
+    }
+
+    /** A loaf of bread, its left at `x` and its top at `y`, on a board. */
+    private fun loaf(x: Float, y: Float) {
+        rect(x - 16f, y + 124f, 212f, 18f, 8f, Crust)
         val loaf = Path().apply {
-            moveTo(470f, 410f)
-            lineTo(470f, 358f)
-            arcTo(Rect(470f, 296f, 650f, 420f), 180f, 180f, false)
-            lineTo(650f, 410f)
-            quadraticTo(650f, 420f, 640f, 420f)
-            lineTo(480f, 420f)
-            quadraticTo(470f, 420f, 470f, 410f)
+            moveTo(x, y + 114f)
+            lineTo(x, y + 62f)
+            arcTo(Rect(x, y, x + 180f, y + 124f), 180f, 180f, false)
+            lineTo(x + 180f, y + 114f)
+            quadraticTo(x + 180f, y + 124f, x + 170f, y + 124f)
+            lineTo(x + 10f, y + 124f)
+            quadraticTo(x, y + 124f, x, y + 114f)
             close()
         }
         d.drawPath(loaf, Loaf)
         d.drawPath(loaf, Crust, style = stroke(6f))
-        for (x in listOf(520f, 556f, 592f)) {
-            val y = if (x == 556f) 318f else 330f
-            line(Offset(x, y), Offset(x + 16, y + if (x == 556f) 38f else 34f), Crust, 6f)
+        for (cut in listOf(50f, 86f, 122f)) {
+            val dy = if (cut == 86f) 22f else 34f
+            line(Offset(x + cut, y + dy), Offset(x + cut + 16f, y + dy + 36f), Crust, 6f)
         }
-        val back = part(1, 3)
-        line(Offset(428f, 500f), Offset(428f - 110 * back, 500f), p.dim, 8f, back)
-        d.drawPath(
-            Path().apply { moveTo(340f, 480f); lineTo(318f, 500f); lineTo(340f, 520f) },
-            p.dim,
-            alpha = back,
-            style = stroke(8f),
-        )
-        bar(120f, 470f, Bar.GOLD, 1.5f, back)
-        bar(500f, 474f, Bar.GOLD, 0.45f, back)
-        // Someone sees it all.
-        val seen = part(2, 3)
-        val eye = Path().apply {
-            moveTo(500f, 196f)
-            quadraticTo(560f, 140f, 620f, 196f)
-            quadraticTo(560f, 252f, 500f, 196f)
-            close()
-        }
-        d.drawPath(eye, p.strong, alpha = seen, style = stroke(6f))
-        d.drawCircle(p.strong, 16f, Offset(560f, 196f), alpha = seen)
-        line(Offset(560f, 250f), Offset(560f, 284f), p.strong, 4f, seen, floatArrayOf(4f, 8f))
     }
 
-    /** Many claims fanned out over one bar of gold. */
-    private fun claims() {
-        bar(250f, 470f, Bar.GOLD, 2.4f)
+    /** A hub: a vault company's columned building, tokens fanning out of it. */
+    private fun issued() {
+        d.drawOval(p.shadow, Offset(160f, 606f), Size(400f, 28f))
+        rect(186f, 584f, 348f, 24f, 6f, p.body, p.bodyEdge, 4f)
+        rect(206f, 560f, 308f, 26f, 6f, p.body, p.bodyEdge, 4f)
+        for (i in 0 until 4) rect(232f + i * 76f, 430f, 32f, 130f, 6f, p.body, p.bodyEdge, 4f)
+        rect(206f, 404f, 308f, 28f, 6f, p.body, p.bodyEdge, 4f)
+        val roof = poly(190f to 404f, 360f to 318f, 530f to 404f)
+        d.drawPath(roof, p.body)
+        d.drawPath(roof, p.bodyEdge, style = stroke(6f))
+        d.drawCircle(p.gold, 18f, Offset(360f, 372f))
+        // Fanned out from its roof.
         val fan = listOf(
-            Triple(150f, 300f, -24f), Triple(232f, 250f, -14f), Triple(320f, 222f, -5f), Triple(410f, 222f, 5f),
-            Triple(498f, 250f, 14f), Triple(580f, 300f, 24f), Triple(196f, 372f, -16f), Triple(290f, 340f, -6f),
-            Triple(384f, 330f, 2f), Triple(478f, 344f, 8f), Triple(560f, 380f, 18f),
+            150f to 260f, 236f to 196f, 322f to 156f, 410f to 156f, 496f to 196f, 580f to 260f,
+            270f to 268f, 360f to 236f, 450f to 268f,
         )
-        // Fanned out from the middle, over the bar.
         val open = part(0, 1)
-        for ((x, y, r) in fan) {
-            val cx = 365f + (x - 365f) * open
-            val cy = 420f + (y - 420f) * open
-            ticket(cx, cy, r * open, p.strong, alpha = (open * 3).coerceAtMost(1f))
+        for ((x, y) in fan) {
+            val cx = 360f + (x - 360f) * open
+            val cy = 330f + (y - 330f) * open
+            token(cx, cy, p.strong, alpha = (open * 3).coerceAtMost(1f))
         }
     }
 
-    /** The user's own vault: gold and room in it, its date, the claims and the key held. */
+    /** The user's own vault: her gold in it, a token for each bar, and her key. */
     private fun own() {
-        vault(List(3) { Bar.GOLD } + List(3) { Bar.HUB })
-        val held = part(5, 7)
-        tag(part(6, 7))
-        ticket(78f, 268f, -10f, p.mine, alpha = held)
-        ticket(84f, 350f, 8f, p.mine, alpha = held)
-        ticket(74f, 432f, -6f, p.mine, alpha = held)
+        vault(List(3) { Bar.GOLD })
+        val held = part(3, 5)
+        for ((i, y) in listOf(570f, 498f, 426f).withIndex()) token(74f, y, p.mine, alpha = part(3 + i, 6))
         key(alpha = held)
     }
 
-    /** The vault's size: claims up to it are covered, beyond it only promised. */
-    private fun sized() {
+    /** The hub's gold added to her vault: room for tokens paid to her, which come in. */
+    private fun room() {
+        vault(List(3) { Bar.GOLD } + List(3) { Bar.HUB })
+        for (y in listOf(570f, 498f, 426f)) token(74f, y, p.mine)
+        val paid = part(5, 7)
+        for ((i, y) in listOf(354f, 282f, 210f).withIndex()) token(74f, y, p.hub, alpha = (paid * 3 - i).coerceIn(0f, 1f))
+    }
+
+    /** What the vault recovers: tokens up to its balance; beyond, credit. */
+    private fun net() {
         vault(List(3) { Bar.GOLD } + List(3) { Bar.HUB })
         val covered = part(5, 7)
-        for (i in 0 until 4) ticket(98f + i * 104, 640f, 0f, p.mine, alpha = covered)
+        for (i in 0 until 6) token(76f + i * 82f, 640f, p.mine, alpha = (covered * 6 - i).coerceIn(0f, 1f))
         val beyond = part(6, 7)
-        line(Offset(462f, 596f), Offset(462f, 684f), p.dim, 4f, beyond, floatArrayOf(4f, 8f))
-        for (i in 4 until 6) ticket(98f + i * 104, 640f, 0f, p.dim, dashed = true, alpha = beyond)
+        line(Offset(560f, 592f), Offset(560f, 688f), p.dim, 4f, beyond, floatArrayOf(4f, 8f))
+        for (i in 6 until 8) token(76f + i * 82f + 12f, 640f, p.dim, dashed = true, alpha = beyond)
     }
 }

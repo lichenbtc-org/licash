@@ -487,7 +487,7 @@ impl Phone {
         self.tagged("tour-title", "Bitcoin is gold in a vault", 60)
             .await?;
         self.tap_id("tour-next").await?;
-        self.tagged("tour-title", "Paying from the vault", 30)
+        self.tagged("tour-title", "A gold bar for a loaf of bread?", 30)
             .await?;
         self.past_tour().await?;
         // Advanced mode, kept from a wallet deleted before, shows them already.

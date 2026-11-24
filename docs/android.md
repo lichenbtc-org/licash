@@ -8,10 +8,14 @@ under a Jetpack Compose UI.
 
 ### First run
 
-With no wallet, the app opens on a five-slide tour, skippable, that tells
-Licash through a vault: the hub keeps the gold, the vault on Bitcoin keeps
-the hub honest, the hub can add room to be paid, and a vault is opened with
-bitcoin sent to an address. Its last slide creates or restores the wallet
+With no wallet, the app opens on a six-slide tour, skippable, that tells
+Licash with gold: bitcoin is gold in a vault, too slow, costly and public
+to pay a baker with, so people pay with ecash tokens a hub (a vault
+company) issues, alone only its promise; Licash tokens come with the
+user's own vault (a contract) of real bitcoin, redeemed for sure; the hub
+adds its own bitcoin to it, room for tokens she is paid; and with enough
+tokens she recovers up to its balance, fewer being fine and more being
+credit. Its last slide creates or restores the wallet
 (and picks a test network). It never shows for a wallet already there.
 Settings replays it as "How Licash works", ending on "Guide me to a vault":
 Home then shows the funding guide below even for a wallet in use, until a

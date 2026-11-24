@@ -38,17 +38,32 @@ internal data class Slide(val title: String, val line: String)
 
 /**
  * How Licash works, told with gold: Bitcoin is gold in a vault; paying
- * from it is slow, costly and public; so people pay with claims, which are
- * only promises; Licash's come with the payer's own vault; its size is
- * chosen, and beyond it the hub is trusted. No figures and no dates: the
+ * with it is slow, costly and public; so people pay with ecash tokens a hub
+ * issues, like a vault company, only its promise; Licash's come with the
+ * payer's own vault of real bitcoin, redeemed for sure; the hub adds its
+ * own to it, room for tokens she is paid; and up to the vault's balance
+ * her tokens are recovered, beyond it credit. No figures and no dates: the
  * pictures carry it.
  */
 internal val SLIDES = listOf(
-    Slide("Bitcoin is gold in a vault", "Safe, but heavy."),
-    Slide("Paying from the vault is slow, costly and public", "The shop sees your change."),
-    Slide("So people pay with claims", "Instant and private. But a claim is only a promise."),
-    Slide("Licash claims come with your own vault", "Only you can open it, even if the hub disappears."),
-    Slide("You choose its size", "Your bitcoin, plus room the hub adds. Beyond it, you trust the hub."),
+    Slide("Bitcoin is gold in a vault", "Real and safe, but heavy to move."),
+    Slide("A gold bar for a loaf of bread?", "Paying on Bitcoin is slow, costs a fee, and shows the baker your change."),
+    Slide(
+        "So people pay with ecash tokens",
+        "Instant and private. A hub, like a vault company, issues them. Alone, a token is only its promise.",
+    ),
+    Slide(
+        "Licash tokens come with your own vault",
+        "Real bitcoin is locked in it for you, so your tokens can be redeemed for sure, even if the hub disappears.",
+    ),
+    Slide(
+        "Room to be paid",
+        "Spend your tokens and your gold goes with them. So the hub adds its own bitcoin: tokens you receive are backed too.",
+    ),
+    Slide(
+        "Your vault is your safety net",
+        "With enough tokens, you recover up to its balance. Fewer is fine: you redeem what you hold. More is credit from the hub.",
+    ),
 )
 
 /**
