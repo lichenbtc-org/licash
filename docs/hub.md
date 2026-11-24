@@ -99,12 +99,67 @@ an encrypted disk, and keep on this host only what the hub needs there:
   whose keys are offline (`--contracts-payout-wallet`, below).
 - A macaroon and a Core login that do only what the hub does (below).
 
-Back up `<data>` as of one moment: `hub.sqlite` holds the ledger, the
-deposits, the Lightning receipts, the inbox, the openings of contracts and
-the responses pinned, in one SQLite database, so that one snapshot of it
-(`sqlite3 hub.sqlite ".backup FILE"`, or a copy of its files with the hub
-stopped) is the whole of them, beside `seed` and the swap provider's
-`swaps/wallet.sqlite`. Each paragraph below says what an older copy loses.
+Back up `<data>` continuously, to another host. `hub.sqlite` holds the
+ledger, the deposits, the Lightning receipts, the inbox, the openings of
+contracts and the responses pinned, in one SQLite database, so that one
+consistent copy of it (`sqlite3 hub.sqlite ".backup FILE"` or
+`VACUUM INTO 'FILE'` while the hub runs, or its files copied with the hub
+stopped) holds all of them as of one moment. It is not all of `<data>`:
+
+- `seed`, once.
+- `hub.sqlite` and `swaps/wallet.sqlite`, each copied as above, never as
+  bare files while the hub runs (they are in WAL mode).
+- `opening-instances/`: the garbled instances each contract kept, the
+  largest part of `<data>`. Without them the hub still responds and
+  asserts, but answers no challenge of its assertion, and a challenge
+  costs the holder only its fees, so every holder who claims more than
+  she is owed is paid all she claims, with the hub's reserve. The hub
+  alerts at start for each contract whose instances are missing.
+- `header-chain/` and `hp-proofs/`: the header chain's receipts and the
+  proofs of disputes under way. Without them the chain is proven again
+  from its start ([The header chain](#the-header-chain)).
+- `payouts.json`, `notify.json` and `tor/state`.
+
+Copy the database first, then the files: an instance or a receipt is
+written before the database names it, and none is removed, so files
+copied after the database cover all it names. Outside `<data>`, back up
+the Bitcoin Core wallet that funds contracts (`backupwallet`; its keys are
+not made from `seed`, and it holds the fee coins the hub's answers need)
+and LND's channel backup.
+
+What a copy loses grows with its age, so take it as often as the hub
+changes, not daily: a replicator that ships SQLite's WAL as it is written
+(as Litestream does; not yet tested with the hub), the files synced after
+it, keeps the copy seconds old. Each paragraph below says what an older copy loses;
+for contracts, the worst is an opening signed after the copy. The hub's
+keys for each opening come from a secret drawn for it alone and kept only
+in `hub.sqlite`, not from `seed`: a hub restored without it neither answers
+its holder's request (her timeout pays her all she claims, with the hub's
+reserve) nor posts its default at the close. Spends made after the copy
+are lost too: the notes they spent are taken again, and claims of them are
+paid in full.
+
+Restoring on another host, while contracts may be in dispute:
+
+1. Fence the old host first: stop it for good, and revoke its Core and
+   LND logins. Two hubs answering one claim may sign two different
+   responses with one one-time key, which gives the holder the hub's
+   outputs.
+2. Restore the newest copy into `<data>`, with the same Core wallet.
+3. On other hardware, delete `hp-proofs/bench.json`: it is the old
+   device's speed, matched by kind (`cuda` or `cpu`) alone, and the hub
+   admits and proves by it (below).
+4. Start the hub without its public route (its proxy or onion off; it
+   listens on `127.0.0.1` unless told). It plays the disputes that began
+   while it was down, however long ago, as far as their windows allow.
+   Read its alerts: missing instances, its header chain, its prover.
+5. Open its public route only once the copy is known to be the newest:
+   an older ledger takes spent notes again.
+
+A contract's response window (12 blocks at least on signet) is how long
+the hub may be down while a holder exits, from her request to its response
+confirming: a restore must fit within it.
+
 Never replace `<data>/hub.sqlite` while the hub runs: the hub halts, and
 `/health` answers 503, until it is restarted. There is no migration: a
 database or file of an earlier layout (`deposits.sqlite`, `lightning.sqlite`,
@@ -662,7 +717,7 @@ after it, the receipts of the chain program) and the receipts' files in
   dispute waits for the batches that catch up, which no admission has reserved
   for: keep the hub running, and its chain proven.
 
-Back up `hub.sqlite` as ever. A hub without its header chain (its component
+Back up `hub.sqlite` and `header-chain/` as above. A hub without its header chain (its component
 lost, a restore older than the chain) cannot prove a chained dispute and is
 told so; its holders' claims are then paid by their timeouts. Upgrading from a
 release before graph id 11 starts no chain until the first chained quote and
