@@ -117,7 +117,7 @@ fun Home(
             ) {
                 // Nothing works without a hub: choosing one comes first.
                 if (ui.hubs.isEmpty()) {
-                    ChooseHub(engine, ui)
+                    FirstHub(engine, ui)
                 } else {
                     Total(ui) { money(null) }
                     Going(ui, money, history, open)

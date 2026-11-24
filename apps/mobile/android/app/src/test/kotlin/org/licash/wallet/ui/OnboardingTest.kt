@@ -32,11 +32,19 @@ class OnboardingTest {
     }
 
     @Test
-    fun no_hub_on_bitcoin_says_how_to_try_it_and_nothing_elsewhere() {
-        assertEquals(NONE_ON_BITCOIN, noneFound(Network.BITCOIN, none = true))
-        // A wallet with a hub already, or on a test network: only "None found".
-        assertNull(noneFound(Network.BITCOIN, none = false))
-        assertNull(noneFound(Network.MUTINYNET, none = true))
-        assertNull(noneFound(Network.SIGNET, none = true))
+    fun no_hub_found_for_a_first_one_says_where_to_get_one_on_any_network() {
+        assertEquals(NONE_AVAILABLE, noneFound(none = true))
+        // A wallet with a hub already: only "None found".
+        assertNull(noneFound(none = false))
+        // Nothing says a network has no hubs: that is for discovery to find.
+        assertFalse(NONE_AVAILABLE.contains("test network"))
+    }
+
+    @Test
+    fun a_hub_is_recommended_on_mutinynet_only() {
+        assertEquals(listOf("https://hub.licash-mutinynet.sgn.space"), recommendedHubs(Network.MUTINYNET).map { it.url })
+        for (network in listOf(Network.BITCOIN, Network.SIGNET, Network.REGTEST)) {
+            assertTrue(recommendedHubs(network).isEmpty())
+        }
     }
 }

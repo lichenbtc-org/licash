@@ -1,8 +1,12 @@
 package org.licash.wallet.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -18,9 +22,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
@@ -326,8 +332,9 @@ internal fun FoundHubs(engine: Engine, ui: Ui, auto: Boolean) {
         Divider()
     }
     if (shown?.isEmpty() == true) {
-        Entry("None found", tag = "none-found")
-        noneFound(ui.network, ui.hubs.isEmpty())?.let { Problem(it, error = false) }
+        // For a first hub, none to start with: said plainly, and the way left.
+        Entry(if (ui.hubs.isEmpty()) "No hubs available" else "None found", tag = "none-found")
+        noneFound(ui.hubs.isEmpty())?.let { Problem(it, error = false) }
     }
     found?.let { unanswered(it, ui.tor) }?.let { Problem(it, error = false) }
     error?.let { Problem(it) }
@@ -380,15 +387,100 @@ internal fun FoundHubs(engine: Engine, ui: Ui, auto: Boolean) {
 }
 
 /**
- * Why no hub was found, on a `network` where none may run yet, for a wallet
- * with `none` yet: null where nothing more is to be said.
+ * Why no hub was found, for a wallet with `none` yet: where to get one.
+ * Null where nothing more is to be said.
  */
-internal fun noneFound(network: Network, none: Boolean): String? =
-    if (network == Network.BITCOIN && none) NONE_ON_BITCOIN else null
+internal fun noneFound(none: Boolean): String? = if (none) NONE_AVAILABLE else null
 
-/** No hub on Bitcoin yet: what to do to try it. */
-internal const val NONE_ON_BITCOIN = "Licash is in testing: hubs run on test networks only for now. " +
-    "To try it, delete this wallet (Settings, Advanced mode, Advanced) and make one with \"Use a test network\"."
+/** No hub found for a wallet without one: what to do instead. */
+internal const val NONE_AVAILABLE = "Ask a hub's operator for its address and enter it below."
+
+/** A hub shipped with the app, to start with: its address and the name shown. */
+internal data class Known(val url: String, val name: String)
+
+/**
+ * The hubs recommended on `network`, to start with in a tap: the first
+ * that answers is used. None where none is known; then hubs are looked
+ * for on Nostr instead.
+ */
+internal fun recommendedHubs(network: Network): List<Known> = when (network) {
+    Network.MUTINYNET -> listOf(Known("https://hub.licash-mutinynet.sgn.space", "sgn.space"))
+    else -> emptyList()
+}
+
+/**
+ * No hub yet: the one recommended for the wallet's network, in a tap; else,
+ * or once asked for another, those announced on Nostr; else one by the
+ * address its operator gave. What a hub is, once asked.
+ */
+@Composable
+internal fun FirstHub(engine: Engine, ui: Ui) {
+    val recommended = recommendedHubs(ui.network)
+    val scope = rememberCoroutineScope()
+    val feel = rememberFeel()
+    var others by rememberSaveable { mutableStateOf(false) }
+    var adding by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    Column(Modifier.fillMaxWidth()) {
+        Row(Modifier.align(Alignment.CenterHorizontally), verticalAlignment = Alignment.CenterVertically) {
+            Text("Choose a hub", modifier = Modifier.testTag("choose-hub"), style = MaterialTheme.typography.headlineSmall)
+            Info("Hubs", HUB_MEANS)
+        }
+        if (recommended.isNotEmpty() && !others) {
+            val first = recommended.first()
+            Column(
+                Modifier.fillMaxWidth().padding(top = 16.dp).clip(RoundedCornerShape(16.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainer).padding(16.dp),
+            ) {
+                Text("Recommended", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                Text(first.name, modifier = Modifier.testTag("recommended-hub"), style = MaterialTheme.typography.titleLarge)
+                Text(
+                    "Holds your balance and moves it for you.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(16.dp))
+                BigButton(
+                    if (adding) "Connecting…" else "Use this hub",
+                    Modifier.fillMaxWidth().testTag("use-recommended"),
+                    busy = adding,
+                    enabled = !adding,
+                ) {
+                    adding = true
+                    error = null
+                    scope.launch {
+                        // The first that answers.
+                        var last: Throwable? = null
+                        for (known in recommended) {
+                            val added = engine.addHub(known.url, known.name)
+                            if (added.isSuccess) {
+                                feel.confirm()
+                                adding = false
+                                return@launch
+                            }
+                            last = added.exceptionOrNull()
+                        }
+                        feel.reject()
+                        error = last?.let(::explain)
+                        // Not reached: the others to choose from instead.
+                        others = true
+                        adding = false
+                    }
+                }
+                Waited(rememberWait(adding))
+            }
+            TextButton(
+                onClick = { others = true },
+                modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 8.dp).testTag("choose-another"),
+                enabled = !adding,
+            ) { Text("Choose another") }
+        } else {
+            error?.let { Problem("${name(recommended.first().url)} did not answer: $it") }
+            Group("") { FoundHubs(engine, ui, auto = true) }
+            Group("Or its address") { AddHub(engine, "Connect") }
+        }
+    }
+}
 
 /** Something that went wrong, or to know, in a line under what it is about. */
 @Composable
