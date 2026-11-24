@@ -430,7 +430,8 @@ quarter of it and paying more as its window runs out while no block
 holds it. Should all of it fall short, `recoveries` says so, and
 `allow-publication-fee <id> <sats>` lets it pay that much in all, the rest
 from one coin of the wallet's, never two together; if none holds enough,
-`recoveries --chain` pays a coin out of notes (at the richest hub) to the
+`recoveries --chain` pays a coin out of notes (at the richest hub, if it
+holds that much) to the
 wallet's own silent payment address through a swap provider announced on
 its hubs' relays, the request waiting for it until six blocks before its
 deadline. Only as an exception, no payout made in time, are the wallet's
@@ -443,9 +444,14 @@ it until it is `done`, when the claimed notes' value and the wallet's
 reserve are back in it on Bitcoin (with the hub's reserve too on a
 contract opened before graph id 8, or once the hub answered and failed to
 prove its answer). A hub that answers the request instead
-(`answered`) says what the claim is owed, and must prove it on Bitcoin
-before the block `recoveries` shows; otherwise the wallet's timeout pays
-the whole claim. The wallet proves nothing: it checks the hub's proof once
+(`answered`) says what the claim is owed and shows its evidence: the
+wallet checks it, and if it bears the answer out leaves it alone, paid
+what it says by the answer's own terminal. Otherwise, or if the evidence
+cannot be had in time, the wallet contests it (`contesting`, `contested`),
+and the hub must prove its answer on Bitcoin before the block `recoveries`
+shows, or the wallet's timeout pays the whole claim. `recoveries` shows
+what the hub said was owed and, once `done`, what the wallet received
+(`corrected` and `received` with `--json`). The wallet proves nothing: it checks the hub's proof once
 asserted (`asserted`), challenges one that does not verify (`challenging`,
 `challenged`), and carries the payout on to `done` (`succeeding`, `paid`,
 `sweeping`), collecting what the outcome pays it and its reserve. From the
