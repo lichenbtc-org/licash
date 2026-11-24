@@ -817,6 +817,12 @@ fn recovery_line(r: &Recovery) -> String {
             .corrected
             .map_or_else(String::new, |c| format!(" {c} sat owed,"));
         line.push_str(&format!("  the hub says{owed} to prove{by}"));
+    } else if let Some(c) = r.corrected {
+        // What its response said, once past it: what she was paid on.
+        line.push_str(&format!("  the hub said {c} sat owed"));
+    }
+    if let Some(got) = r.received {
+        line.push_str(&format!("  {got} sat received"));
     }
     if let Some(error) = &r.error {
         line.push_str(&format!("  ({error})"));
@@ -831,6 +837,8 @@ fn recovery_json(r: &Recovery) -> serde_json::Value {
         "stage": r.stage.as_str(),
         "irrevocable": r.irrevocable,
         "claimed": r.claimed,
+        "corrected": r.corrected,
+        "received": r.received,
         "notes": r.notes,
         "request": txid(r.request),
         "publication": txid(r.publication),
@@ -967,5 +975,59 @@ mod tests {
         assert!(t
             .lines(mutinynet.blocks_a_day())
             .contains("5,760 blocks (about 2 days)"));
+    }
+
+    fn recovered(stage: recovery::Stage) -> Recovery {
+        Recovery {
+            id: [0x9e; 32],
+            stage,
+            irrevocable: true,
+            claimed: 87_035,
+            corrected: Some(38_912),
+            received: (stage == recovery::Stage::Done).then_some(37_849),
+            notes: 27,
+            request: None,
+            publication: None,
+            requested_at: None,
+            timeout: None,
+            timed_out_at: None,
+            sweep: None,
+            swept_at: None,
+            next_at: None,
+            error: None,
+            response: None,
+            deadline: Some(3_618_380),
+            proved: false,
+            assertion: None,
+            asserted_at: None,
+            challenge: None,
+            payout: None,
+            paid_at: None,
+            fold: None,
+            folded_at: None,
+            fee_capped: false,
+        }
+    }
+
+    /// A recovery the hub's response settled shows what the response said
+    /// was owed and what she received, not only what she claimed: paid
+    /// less than her claim, a stale one, it was once read as paid it all.
+    #[test]
+    fn a_settled_recovery_shows_what_was_owed_and_received() {
+        let answered = recovery_line(&recovered(recovery::Stage::Answered));
+        assert!(answered.contains("the hub says 38912 sat owed, to prove by block 3618380"));
+        assert!(!answered.contains("received"), "{answered}");
+        let done = recovered(recovery::Stage::Done);
+        let line = recovery_line(&done);
+        assert!(line.contains("claims 87035 sat in 27 notes"), "{line}");
+        assert!(
+            line.contains("the hub said 38912 sat owed  37849 sat received"),
+            "{line}"
+        );
+        let json = recovery_json(&done);
+        assert_eq!(
+            (json["corrected"].as_u64(), json["received"].as_u64()),
+            (Some(38_912), Some(37_849))
+        );
     }
 }
