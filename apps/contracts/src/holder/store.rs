@@ -348,7 +348,9 @@ impl Store {
     }
 
     /// Keep the opening at `hub` paid for by the payout `ticket`, of a coin
-    /// worth `value`, before the payout is made.
+    /// worth `value`, before the payout is made. A `max_price` beyond what
+    /// SQLite holds, as no limit asked (`u64::MAX`), is kept as the most it
+    /// holds: no price comes near either.
     pub fn insert_paid(
         &self,
         ticket: &str,
@@ -365,7 +367,7 @@ impl Store {
                 ticket,
                 hub,
                 blocks,
-                i64::try_from(max_price)?,
+                i64::try_from(max_price).unwrap_or(i64::MAX),
                 cap,
                 i64::try_from(value)?,
                 crate::now()
@@ -1212,6 +1214,21 @@ mod tests {
             ("http://a.test", 1_000, 30_000, None, 21_001)
         );
         assert_eq!((row.tries, row.ended.as_deref()), (2, Some("opened")));
+    }
+
+    /// No most price asked (`u64::MAX`, `open-contract --with-notes`
+    /// without `--max-price`) is kept, as the most SQLite holds: once
+    /// refused as a number too large to fit.
+    #[test]
+    fn an_opening_paid_for_with_notes_asking_no_most_price_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&crate::testing::wallet_file(dir.path())).unwrap();
+        store
+            .insert_paid("ab", "http://a.test", (1_000, u64::MAX, None), 24_000)
+            .unwrap();
+        let rows = store.paid().unwrap();
+        assert_eq!(rows[0].max_price, i64::MAX as u64);
+        assert_eq!(rows[0].value, 24_000);
     }
 
     #[test]
