@@ -10,7 +10,9 @@ instantly, privately and almost for free. Unlike ordinary ecash, you hold an
 individual Bitcoin contract with the hub. It lets you recover your notes on
 Bitcoin without the hub's cooperation, up to a limit you choose, like
 insurance. You never prove anything to recover: the hub must prove,
-with a payment you signed, that you are owed less.
+with a payment you signed, that you are owed less. The contract's bitcoin
+is locked for you alone, and when it ends your notes stay valid: only the
+guarantee stops.
 
 It is not meant for your savings. Keep those in cold storage, and use Licash
 for day-to-day spending, as a checking account.
@@ -59,11 +61,12 @@ if you ever recover without the hub, and comes back otherwise.
 - Above your cap, your balance rests on the hub's word, as with any ecash.
 - A contract lasts a set time. Open the app now and then, and before it
   ends, protect again or cash out.
-- Recovering without the hub takes days and pays Bitcoin fees.
+- Recovering without the hub takes days and pays Bitcoin fees, and the
+  wallet must be online for its deadlines.
 - No hub runs on Bitcoin yet, and the code has had no security review.
 
 The [paper](paper/licash.pdf) describes the protocol, its security and its
-privacy.
+privacy. Common questions are answered in the [FAQ](docs/faq.md).
 
 ## Try it
 
