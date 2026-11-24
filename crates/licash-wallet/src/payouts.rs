@@ -601,7 +601,29 @@ impl<T: Transport> Wallet<T> {
                 Err(e) => return Err(e),
             }
         }
+        // The provider claims a payout's lock once its claim reveals the
+        // preimage, so after the payout is done here: its lock is followed
+        // until settled, the change of its notes back.
+        for id in self.done_payouts_unsettled_locks()? {
+            if let Err(e) = self.advance_lock(&ProposalId::from_bytes(id), None).await {
+                pending.push((hex::encode(id), e.to_string()));
+            }
+        }
         Ok((followed, pending))
+    }
+
+    /// The locks of payouts done, not settled or given up.
+    fn done_payouts_unsettled_locks(&self) -> Result<Vec<[u8; 32]>, Error> {
+        self.store.read(|c| {
+            let mut stmt = c.prepare(
+                "SELECT l.id FROM payouts p JOIN locks l ON l.hash = p.hash AND l.hub = p.from_hub
+                 WHERE p.done_at IS NOT NULL AND p.failed IS NULL AND l.abandoned IS NULL
+                   AND l.id NOT IN (SELECT id FROM lock_settlements)
+                 ORDER BY l.created_at, l.rowid",
+            )?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            Ok(rows.collect::<Result<_, _>>()?)
+        })
     }
 
     /// The claims of payouts not done, to broadcast: again after each

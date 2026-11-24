@@ -766,6 +766,39 @@ async fn a_payout_pays_the_address_exactly_and_the_provider_its_lock() {
     assert_eq!(eco.client.payouts().unwrap(), vec![done]);
 }
 
+/// A payout's lock is claimed by the provider only once the payout's claim
+/// revealed the preimage, after the payout is done: following the payouts
+/// follows it on, the change of its notes back. Once, the change stayed
+/// pending until `resume`.
+#[tokio::test]
+async fn following_payouts_settles_the_lock_of_one_done() {
+    let eco = Eco::new().await;
+    let quote = eco
+        .client
+        .payout_quote(PROVIDER, A, PAYEE, 1000, MAX_FEE, ONE_SAT)
+        .await
+        .unwrap();
+    let payout = eco.pay_out(1000).await;
+    let coin = eco.desk.fund(None, None);
+    eco.follow(&payout).await.unwrap();
+    let claims = eco.client.payout_claims().unwrap();
+    eco.net.confirm(A, claims.clone());
+    assert_eq!(eco.follow(&payout).await.unwrap().state, PayoutState::Done);
+    eco.desk.settle(&claims[0], coin).await;
+    let total = quote.value() + quote.fee;
+    assert!(eco.held() < 3000 - total - FEE.base, "its change pending");
+    let (_, waiting) = eco.client.follow_payouts(&eco.view).await.unwrap();
+    assert!(waiting.is_empty(), "{waiting:?}");
+    let locks = eco.client.locks().unwrap();
+    assert!(matches!(locks[0].state, LockState::Paid(_)), "{locks:?}");
+    assert_eq!(eco.held(), 3000 - total - FEE.base);
+    // Settled, it is not asked of again.
+    let asked = || eco.client.transport().2.load(Ordering::Relaxed);
+    let before = asked();
+    eco.client.follow_payouts(&eco.view).await.unwrap();
+    assert_eq!(asked(), before);
+}
+
 #[tokio::test]
 async fn a_payout_asks_its_hub_what_it_says_of_itself_once_to_lock() {
     let eco = Eco::new().await;
