@@ -638,6 +638,11 @@ internal object Glyphs {
         )
     }
 
+    /** How Licash works: a vault, its dial and handle, as the tour draws it. */
+    val vault by lazy {
+        icon("vault", "M3,3h18v16h-2v2h-3v-2H8v2H5v-2H3zM5,5v12h14V5zM9,11a3,3 0 1,0 6,0a3,3 0 1,0 -6,0zM17,9h1v4h-1z")
+    }
+
     private fun icon(name: String, path: String): ImageVector =
         ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f)
             .addPath(addPathNodes(path), fill = SolidColor(Color.Black))

@@ -88,14 +88,23 @@ private const val ADVANCED_MEANS =
 @Composable
 fun Settings(engine: Engine, ui: Ui, balance: () -> Unit, back: () -> Unit) {
     var page by rememberSaveable { mutableStateOf<Page?>(null) }
-    BackHandler(enabled = page != null) { page = null }
+    // The tour again, as shown before the wallet was made.
+    var touring by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = page != null || touring) { if (touring) touring = false else page = null }
+    if (touring) {
+        Tour {
+            BigButton("Done", Modifier.fillMaxWidth().testTag("tour-done")) { touring = false }
+            Spacer(Modifier.height(24.dp))
+        }
+        return
+    }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp),
     ) {
         when (val p = page) {
             null -> {
                 TopBar("Settings", back)
-                Overview(engine, ui) { page = it }
+                Overview(engine, ui, tour = { touring = true }) { page = it }
             }
             else -> {
                 TopBar(p.title, back = { page = null })
@@ -114,9 +123,9 @@ fun Settings(engine: Engine, ui: Ui, balance: () -> Unit, back: () -> Unit) {
     }
 }
 
-/** The first page: hubs; Bitcoin and Tor; about the app; advanced mode. */
+/** The first page: hubs; Bitcoin and Tor; how Licash works and about the app; advanced mode. */
 @Composable
-private fun Overview(engine: Engine, ui: Ui, open: (Page) -> Unit) {
+private fun Overview(engine: Engine, ui: Ui, tour: () -> Unit, open: (Page) -> Unit) {
     val scope = rememberCoroutineScope()
     var torFailed by remember { mutableStateOf<String?>(null) }
     Group("") {
@@ -161,6 +170,8 @@ private fun Overview(engine: Engine, ui: Ui, open: (Page) -> Unit) {
         }
     }
     Group("") {
+        Entry("How Licash works", icon = Glyphs.vault, tag = "how-it-works", onClick = tour)
+        Divider()
         Entry("About", icon = Icons.Outlined.Info, tag = "about") { open(Page.About) }
     }
     Group("") {

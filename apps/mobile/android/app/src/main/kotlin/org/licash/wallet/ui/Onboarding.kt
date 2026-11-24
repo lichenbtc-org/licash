@@ -3,6 +3,7 @@ package org.licash.wallet.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -33,71 +34,43 @@ import org.licash.wallet.Ui
 import org.licash.wallet.explain
 
 /**
- * No wallet yet: make one, on Bitcoin unless a test network is chosen
- * first ([networksShown]): the network is the wallet's for good.
+ * No wallet yet: the tour, then on its last page make one, on Bitcoin
+ * unless a test network is chosen first ([networksShown]): the network is
+ * the wallet's for good. A wallet that could not be opened says why
+ * instead, and nothing is made over it.
  */
 @Composable
 fun Onboarding(engine: Engine, ui: Ui) {
+    val unopened = ui.unopened
+    if (unopened != null) {
+        Unopened(unopened)
+        return
+    }
     val scope = rememberCoroutineScope()
     var testing by rememberSaveable { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var restoring by remember { mutableStateOf(false) }
-    Column(
-        Modifier.fillMaxSize().padding(horizontal = 32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Column(
-            Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) {
-            Wordmark(size = 56)
-            Spacer(Modifier.height(12.dp))
+    Tour {
+        val shown = networksShown(testing, ui)
+        if (shown) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
+                for (network in Network.entries) {
+                    FilterChip(
+                        selected = ui.network == network,
+                        onClick = { scope.launch { engine.setNetwork(network) } },
+                        label = { Text(named(network)) },
+                        modifier = Modifier.testTag("network ${network.name.lowercase()}"),
+                    )
+                }
+            }
             Text(
-                "Bitcoin, paid in a tap",
-                style = MaterialTheme.typography.titleMedium,
+                TEST_NETWORKS,
+                modifier = Modifier.padding(bottom = 12.dp),
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
             )
-            ui.unopened?.let {
-                Spacer(Modifier.height(32.dp))
-                Text(UNOPENED, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
-                Text(
-                    unopenedWords(it),
-                    modifier = Modifier.padding(top = 8.dp).testTag("unopened"),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                )
-            }
-            if (ui.unopened == null && networksShown(testing, ui)) {
-                Spacer(Modifier.height(32.dp))
-                Text("Network", style = MaterialTheme.typography.labelLarge)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
-                    for (network in Network.entries) {
-                        FilterChip(
-                            selected = ui.network == network,
-                            onClick = { scope.launch { engine.setNetwork(network) } },
-                            label = { Text(named(network)) },
-                            modifier = Modifier.testTag("network ${network.name.lowercase()}"),
-                        )
-                    }
-                }
-                Text(
-                    TEST_NETWORKS,
-                    modifier = Modifier.padding(top = 8.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                )
-            }
-        }
-        Spacer(Modifier.height(16.dp))
-        // A wallet is here: none is made or restored over it.
-        if (ui.unopened != null) {
-            Spacer(Modifier.height(24.dp))
-            return@Column
         }
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center) }
         Waited(rememberWait(busy), Modifier.padding(bottom = 8.dp), center = true)
@@ -113,27 +86,49 @@ fun Onboarding(engine: Engine, ui: Ui) {
                 busy = false
             }
         }
-        TextButton(
-            onClick = { restoring = true },
-            modifier = Modifier.padding(top = 8.dp).testTag("restore-wallet"),
-            enabled = !busy,
-        ) { Text("Restore a wallet") }
-        // Advanced mode shows the networks anyway.
-        val shown = networksShown(testing, ui)
-        if (!ui.developer) {
+        Row(horizontalArrangement = Arrangement.Center, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
             TextButton(
-                onClick = {
-                    testing = !shown
-                    if (shown && ui.network != Network.BITCOIN) scope.launch { engine.setNetwork(Network.BITCOIN) }
-                },
-                modifier = Modifier.testTag("test-network"),
+                onClick = { restoring = true },
+                modifier = Modifier.testTag("restore-wallet"),
                 enabled = !busy,
-            ) { Text(if (shown) "Use Bitcoin" else "Use a test network") }
+            ) { Text("Restore a wallet") }
+            // Advanced mode shows the networks anyway.
+            if (!ui.developer) {
+                TextButton(
+                    onClick = {
+                        testing = !shown
+                        if (shown && ui.network != Network.BITCOIN) scope.launch { engine.setNetwork(Network.BITCOIN) }
+                    },
+                    modifier = Modifier.testTag("test-network"),
+                    enabled = !busy,
+                ) { Text(if (shown) "Use Bitcoin" else "Use a test network") }
+            }
         }
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(16.dp))
     }
     if (restoring) {
         Restore(engine) { restoring = false }
+    }
+}
+
+/** A wallet is on the device but could not be opened: why, and how to start over. */
+@Composable
+private fun Unopened(reason: String) {
+    Column(
+        Modifier.fillMaxSize().padding(horizontal = 32.dp).verticalScroll(rememberScrollState()),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Wordmark(size = 56)
+        Spacer(Modifier.height(32.dp))
+        Text(UNOPENED, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+        Text(
+            unopenedWords(reason),
+            modifier = Modifier.padding(top = 8.dp).testTag("unopened"),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
     }
 }
 

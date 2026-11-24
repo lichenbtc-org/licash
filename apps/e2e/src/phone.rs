@@ -461,12 +461,35 @@ impl Phone {
         .with_context(|| format!("{} shown", shown.get()))
     }
 
+    /// The first screen with no wallet, past the tour: Create and Restore
+    /// in sight.
+    pub async fn past_tour(&self) -> anyhow::Result<()> {
+        until("the tour", 60, || async {
+            let views = self.views().await?;
+            Ok(views
+                .iter()
+                .any(|v| v.id == "tour-skip" || v.id == "create")
+                .then_some(()))
+        })
+        .await?;
+        if self.has("tour-skip").await? {
+            self.tap_id("tour-skip").await?;
+        }
+        self.by_id("create", 30).await?;
+        Ok(())
+    }
+
     /// Make a wallet on regtest, its light client reaching Bitcoin Core
     /// only, chosen behind "Use a test network", then turn on advanced
     /// mode in Settings, for the views the tests read. Home then asks for
-    /// a hub.
+    /// a hub. The tour comes first: a page of it, then skipped.
     pub async fn onboard(&self) -> anyhow::Result<()> {
-        self.by_id("create", 60).await?;
+        self.tagged("tour-title", "Bitcoin is gold in a vault", 60)
+            .await?;
+        self.tap_id("tour-next").await?;
+        self.tagged("tour-title", "Paying from the vault", 30)
+            .await?;
+        self.past_tour().await?;
         // Advanced mode, kept from a wallet deleted before, shows them already.
         if !self.has("network regtest").await? {
             self.tap_id("test-network").await?;

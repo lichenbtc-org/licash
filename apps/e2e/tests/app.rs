@@ -756,8 +756,7 @@ async fn deleted(phone: &Phone) -> anyhow::Result<()> {
     let delete = phone.scroll_to_id("delete-wallet").await?;
     phone.tap_view(&delete).await?;
     phone.tap_id("delete").await?;
-    phone.by_id("create", 60).await?;
-    Ok(())
+    phone.past_tour().await
 }
 
 /// The question the app asks, or what it says went wrong, starting with
