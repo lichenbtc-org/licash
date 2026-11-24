@@ -166,8 +166,9 @@ private fun Summary(
             )
         }
     }
+    // Notes are how it is held, not what: counted in advanced mode only.
     // In line with the total above it, not the groups' insides.
-    Line("Notes", digits(noteCount(notes)), Modifier.padding(horizontal = 4.dp), tag = "note-count")
+    if (ui.developer) Line("Notes", digits(noteCount(notes)), Modifier.padding(horizontal = 4.dp), tag = "note-count")
     Group("") {
         held.forEach { holding ->
             // How much of it its contracts cover, and the notes it is in.
@@ -175,7 +176,7 @@ private fun Summary(
             Entry(
                 engine.called(holding.hub),
                 value = sat(holding.available + holding.pending),
-                sub = listOfNotNull(cover.says, cover.noteWords.takeIf { cover.notes > 0uL })
+                sub = listOfNotNull(cover.says, cover.noteWords.takeIf { ui.developer && cover.notes > 0uL })
                     .joinToString(" · ").ifEmpty { null },
                 tag = "holding",
                 onClick = { go(holding.hub) },

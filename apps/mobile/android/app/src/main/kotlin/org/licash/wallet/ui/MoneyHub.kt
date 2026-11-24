@@ -117,7 +117,8 @@ internal fun HubPage(
     cover.says?.let {
         CoverBar(cover, Modifier.padding(horizontal = 4.dp, vertical = 4.dp))
         Text(
-            "$it · ${cover.noteWords}",
+            // Its notes counted in advanced mode only.
+            if (ui.developer) "$it · ${cover.noteWords}" else it,
             modifier = Modifier.padding(horizontal = 4.dp).testTag("hub-cover"),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

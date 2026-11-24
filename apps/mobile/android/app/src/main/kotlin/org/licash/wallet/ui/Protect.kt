@@ -176,8 +176,15 @@ private fun ContractLayout(info: ContractInspection, explorer: (String) -> Strin
     Line("Payout pool", sat(info.payoutPool))
     Line("Your reserve", sat(info.holderReserve))
     Line("Hub reserve", sat(info.hubReserve))
-    Line("Maximum claim", sat(info.claimLimit.toULong()))
-    Say("The claim limit is inside the pool, not extra bitcoin. The recovery outcome decides how the pool and reserves are paid.")
+    // What the limit means, once asked.
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Line("Maximum claim", sat(info.claimLimit.toULong()), Modifier.weight(1f))
+        Info(
+            "Maximum claim",
+            "The claim limit is inside the pool, not extra bitcoin. The recovery outcome decides how the pool and reserves are paid.",
+            Modifier.testTag("claim-info"),
+        )
+    }
     explorer(info.address)?.let { link ->
         Entry("View contract on Bitcoin", tag = "contract-explorer", onClick = {
             runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link))) }
