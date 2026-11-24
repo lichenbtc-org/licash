@@ -54,7 +54,7 @@ internal val SLIDES = listOf(
     ),
     Slide(
         "Licash tokens come with your own vault",
-        "Real bitcoin is locked in it for you, so your tokens can be redeemed for sure, even if the hub disappears.",
+        "Real bitcoin is locked in it for you alone, so your tokens can be redeemed for sure, even if the hub disappears.",
     ),
     Slide(
         "Room to be paid",
