@@ -311,11 +311,11 @@ No change comes back from the coin, so what the contract takes of it is all
 of it but less than dust: a coin short of the price, or beyond what the hub's
 largest contract takes, opens none, and says so. Until the notes come the
 contract can't be closed early, and should the hub never issue them, forcing
-it closed claims them. It downloads about 100 MB of instances, kept in
-`contracts/` next to the wallet file; the contracts themselves are in the
-wallet file: back them up together (a snapshot of the wallet file, such as
-`sqlite3 wallet.sqlite ".backup FILE"`, holds the wallet and its contracts as
-one). `--blocks` sets the blocks to its close (by default the most the hub
+it closed claims them. It uploads about 250 MB to the hub, the garbled
+instances the hub keeps (25 MB each), and keeps none of them: it derives
+them again when needed. The contracts are in the wallet file (a snapshot of
+it, such as `sqlite3 wallet.sqlite ".backup FILE"`, holds the wallet and its
+contracts as one); `contracts/` next to it holds what a forced close under way uses. `--blocks` sets the blocks to its close (by default the most the hub
 allows), `--max-price` the most to pay besides your part (by default no more
 than sane fees make it). At a hub that lets wallets choose (its info names a
 range), `--cap` with `--blocks` sets the least the contract protects, one of

@@ -663,7 +663,8 @@ pub struct ContractQuote {
     /// The value of the coin that would pay it, if one does: the rest
     /// comes back as change.
     pub coin: Option<u64>,
-    /// What opening it downloads and keeps, in bytes, about.
+    /// What opening it uploads to the hub, in bytes, about: the instances
+    /// the hub keeps. Nothing of it is kept on the phone.
     pub download: u64,
     /// The caps and durations the wallet may choose instead, if the hub
     /// lets it ([`Wallet::open_chosen_contract`]).

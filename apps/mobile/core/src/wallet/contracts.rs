@@ -164,7 +164,7 @@ impl Wallet {
     /// default, what its info says), broadcasting its funding through
     /// `chain`: the contract, confirming once its funding is signed.
     /// Paid from the smallest coin on Bitcoin that pays it, its change
-    /// back to the wallet on Bitcoin. Takes minutes: its downloads are
+    /// back to the wallet on Bitcoin. Takes minutes: its uploads are
     /// large. One at a time; under way, [`Wallet::resume_contracts`]
     /// carries it on.
     pub fn open_contract(
