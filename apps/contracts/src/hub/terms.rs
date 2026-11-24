@@ -356,6 +356,21 @@ impl Timing {
         }
     }
 
+    /// That the hub's locks, living `window` blocks at most
+    /// (`--lock-window`), give a swap provider time to force its contract
+    /// closed: it reads that window as the blocks the hub may take to
+    /// respond ([`licash::route::Hop::window`]), so one below the
+    /// contracts' least response window leaves its lead too short to be
+    /// refunded in.
+    pub fn covers_locks(&self, window: u32) -> Result<()> {
+        ensure!(
+            window >= u32::from(self.response_window),
+            "a lock window of {window} blocks, below the contracts' response window of {}",
+            self.response_window
+        );
+        Ok(())
+    }
+
     /// The hub's fixed quote on `keyset` at `checkpoint`, of [`CAP`] sat
     /// over [`LOCK`] blocks: the one asked for without terms.
     /// The blocks the hub's prover has for a proof its quotes commit it
@@ -899,5 +914,29 @@ mod tests {
             })
         )
         .is_err());
+    }
+
+    /// A lock window as long as the contracts' response window or longer
+    /// is admitted, one shorter refused; the hub service's default (144)
+    /// covers every network's.
+    #[test]
+    fn the_lock_window_must_cover_the_contracts_response_window() {
+        let signet = Timing::of(ChainProfile::Core30Signet, None).unwrap();
+        assert!(signet.covers_locks(12).is_ok());
+        assert!(signet.covers_locks(144).is_ok());
+        let short = signet.covers_locks(11).unwrap_err();
+        assert!(
+            format!("{short}").contains("response window of 12"),
+            "{short}"
+        );
+        // The hub service's default lock window, 144 blocks.
+        for profile in [
+            ChainProfile::Core30DefaultRegtest,
+            ChainProfile::Core30Signet,
+            ChainProfile::Mutinynet,
+        ] {
+            let timing = Timing::of(profile, None).unwrap();
+            assert!(timing.covers_locks(144).is_ok(), "{profile}");
+        }
     }
 }

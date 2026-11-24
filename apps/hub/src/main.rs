@@ -447,7 +447,9 @@ struct PolicyArgs {
     #[arg(long, env = "LICASH_HUB_OUTPUT_FEE_MSAT", default_value_t = OUTPUT_FEE_MSAT)]
     output_fee_msat: u64,
     /// A lock's expiry, depth and reaction fit within this many blocks of
-    /// the scanned tip: how long a lock lives at most.
+    /// the scanned tip: how long a lock lives at most. Swap providers read
+    /// it as the hub's response window too: with --contracts, the hub
+    /// refuses to start with one below its contracts' response window.
     #[arg(long, env = "LICASH_HUB_LOCK_WINDOW", default_value_t = Timing::default().window)]
     lock_window: u32,
     /// Blocks the hub needs to produce and confirm a response.
@@ -1092,6 +1094,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             notify_kinds,
         } => {
             let policy = policy.policy();
+            let lock_window = policy.timing.window;
             let (indexing, tweaks_from) = (chain.tweaks, chain.tweaks_from);
             let contracting = chain.contracts;
             let response_poll = Duration::from_secs(chain.chain_poll);
@@ -1233,6 +1236,9 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                         range,
                     );
                     let openings = runtime.block_on(opening).context("open the contracts")?;
+                    openings
+                        .check_lock_window(lock_window)
+                        .context("--lock-window")?;
                     if let Some(payout) = payout_wallet {
                         runtime
                             .block_on(openings.pay_out_to(payout))

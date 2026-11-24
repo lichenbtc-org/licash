@@ -501,6 +501,12 @@ impl Openings {
         Ok(())
     }
 
+    /// That the hub's locks, living `window` blocks at most, outlive its
+    /// contracts' response window ([`Timing::covers_locks`]).
+    pub fn check_lock_window(&self, window: u32) -> Result<()> {
+        self.timing().covers_locks(window)
+    }
+
     /// Its terms now.
     fn timing(&self) -> Timing {
         *self.timing.read().unwrap_or_else(|e| e.into_inner())
