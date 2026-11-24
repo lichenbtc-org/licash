@@ -673,7 +673,11 @@ async fn guided_again(phone: &Phone) -> anyhow::Result<()> {
     phone.tap_id("guide-start").await?;
     phone.tagged("funding-title", "Fill your vault", 30).await?;
     phone.by_id("funding-address", 30).await?;
-    phone.tap_id("funding-hide").await?;
+    // Below the address, its steps and the copy button: out of sight until
+    // scrolled to. Its words in sight, not only its tag, so that the center
+    // of its bounds is not under the buttons below.
+    let hide = phone.scroll_to_text("Hide guide").await?;
+    phone.tap_view(&hide).await?;
     phone.gone("funding", 10).await?;
     Ok(())
 }
