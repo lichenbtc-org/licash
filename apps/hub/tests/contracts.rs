@@ -2695,6 +2695,14 @@ struct StaleCopy<T: licash_wallet::Transport> {
     rate: bitcoin::FeeRate,
 }
 
+/// The terms a [`StaleCopy`]'s holder chooses within.
+const STALE_RANGE: Range = Range {
+    max_cap: 50_000_000,
+    max_blocks: 5_000,
+    ppm_year: 10_000,
+    ppm_year_funded: 0,
+};
+
 async fn stale_copy<T: licash_wallet::Transport>(
     seed: [u8; 32],
     transport: T,
@@ -2702,13 +2710,7 @@ async fn stale_copy<T: licash_wallet::Transport>(
     let rt = Regtest::start_standard()?;
     let dir = tempfile::tempdir()?;
     let at = dir.path().join("hub");
-    let range = Range {
-        max_cap: 50_000_000,
-        max_blocks: 5_000,
-        ppm_year: 10_000,
-        ppm_year_funded: 0,
-    };
-    let (url, source, hub, openings) = hub_answering_with(&rt, &at, Some(range)).await?;
+    let (url, source, hub, openings) = hub_answering_with(&rt, &at, Some(STALE_RANGE)).await?;
     let chain = Node(source.clone());
     let (mine, wallet) = holder_wallet(&rt, &chain, dir.path(), &url, seed, &[COIN, COIN]).await?;
     let chosen = Ask {
@@ -4250,6 +4252,181 @@ async fn a_holder_challenges_a_false_assertion_and_its_failure_pays_her_whole_cl
     let marker = licash_contracts::holder::recovery::challenge_marker(&done.id);
     let held = s.wallet.silent_coins()?;
     ensure!(held.iter().all(|c| c.spending != Some(marker)), "{held:?}");
+    Ok(())
+}
+
+/// A backup of the hub's data directory `from` made in `to` while it runs,
+/// as docs/hub.md tells: each database copied online (`VACUUM INTO`, a
+/// consistent copy as SQLite's `.backup` makes), every other file as it
+/// is, but the kept instances (`opening-instances`) unless `instances`.
+fn backed_up(from: &Path, to: &Path, instances: bool) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            if instances || name != "opening-instances" {
+                backed_up(&entry.path(), &target, instances)?;
+            }
+        } else if name.ends_with(".sqlite") {
+            let db = rusqlite::Connection::open(entry.path())?;
+            let into = target.to_str().context("a path")?;
+            db.execute("VACUUM INTO ?1", [into])?;
+        } else if !name.ends_with("-wal") && !name.ends_with("-shm") {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+/// The hub of a [`StaleCopy`] restored from its backup in `dir` on
+/// another machine, as the hub service runs it: its ledger and openings
+/// opened, holders' claims decided against that ledger. It serves no
+/// wallets.
+async fn restored(rt: &Regtest, dir: &Path) -> Result<(Arc<Hub>, Arc<Openings>)> {
+    let hub = Hub::open(
+        &dir.join("seed"),
+        &dir.join("hub.sqlite"),
+        Policy::default(),
+    )?;
+    let hub = Arc::new(hub);
+    let url = format!(
+        "{}/wallet/harness?cookie={}",
+        rt.rpc_url(),
+        rt.cookie().display()
+    );
+    let source: Source = url.parse()?;
+    let keyset = hub.info().keysets[0].clone();
+    let openings =
+        Openings::with_wallet(dir, source.clone(), source, keyset, Some(STALE_RANGE)).await?;
+    licash_hub_service::answer_from(&openings, hub.clone());
+    Ok((hub, openings))
+}
+
+/// What `openings` tell their operator from now on.
+fn told(openings: &Openings) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let told = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let alerts = told.clone();
+    openings.alert_with(Arc::new(move |message: &str| {
+        alerts.lock().unwrap().push(message.to_owned())
+    }));
+    told
+}
+
+/// A holder who challenges every assertion for as long as it lives
+/// ([`licash_contracts::holder::recovery::doubt_assertions`]): trusting
+/// again when the test ends, however it does.
+struct Doubting;
+
+impl Doubting {
+    fn of() -> Self {
+        licash_contracts::holder::recovery::doubt_assertions(true);
+        Self
+    }
+}
+
+impl Drop for Doubting {
+    fn drop(&mut self) {
+        licash_contracts::holder::recovery::doubt_assertions(false);
+    }
+}
+
+/// The hub's machine is lost mid-dispute and the hub is restored from a
+/// backup of its data directory taken while it ran. Restored from its
+/// databases and seed alone, it tells its operator that a contract's kept
+/// instances are missing before any claim comes. Restored whole, it meets
+/// the claim she forced while it was down as the hub it replaces would: it
+/// responds what her notes are worth on its ledger and shows no evidence,
+/// so she contests; it proves and asserts, and answers her (wrong)
+/// challenge of the assertion with an instance from the backup. She is
+/// paid what is left, not all she claimed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_hub_restored_from_its_backup_mid_dispute_answers_her_challenge() -> Result<()> {
+    use licash_contracts::holder::recovery;
+
+    let StaleCopy {
+        rt,
+        dir,
+        chain,
+        wallet,
+        mine,
+        id,
+        rate,
+        ..
+    } = stale_copy([42; 32], Http::new(None)?).await?;
+    let at = dir.path().join("hub");
+    let (whole, partial) = (dir.path().join("restored"), dir.path().join("db-only"));
+    backed_up(&at, &whole, true)?;
+    backed_up(&at, &partial, false)?;
+    ensure!(
+        whole.join("opening-instances").is_dir(),
+        "no instances kept"
+    );
+
+    // Restored without its instances, it says so while her contract stands.
+    let (_, openings) = restored(&rt, &partial).await?;
+    let told_partial = told(&openings);
+    let round = openings.answer_requests().await?;
+    ensure!(round.failed == 0 && round.answered == 0, "{round:?}");
+    let missing = told_partial.lock().unwrap().clone();
+    ensure!(
+        missing
+            .iter()
+            .any(|m| m.contains("kept instances are missing")),
+        "{missing:?}"
+    );
+    drop(openings);
+
+    // The hub down, never to play again, she forces her contract closed.
+    let forced =
+        recovery::force_close(&wallet, &chain, &mine.join("wallet.sqlite"), &id, rate).await?;
+    ensure!((forced.claimed, forced.notes) == (131_071, 4), "{forced:?}");
+    rt.mine_to_height(forced.next_at.context("no lock")? - 1)?;
+    recovery::advance(&wallet, &chain, &mine.join("wallet.sqlite"), rate).await?;
+    rt.mine(1)?;
+    // A coin for a challenge's fee, set aside from her next round.
+    let to = wallet.fallback_address()?.script_pubkey();
+    rt.fund(&to, Amount::from_sat(100_000))?;
+    rt.mine(1)?;
+    scan(&wallet, &chain).await?;
+
+    let (hub, openings) = restored(&rt, &whole).await?;
+    let told_whole = told(&openings);
+    openings.refuse_evidence();
+    let _doubting = Doubting::of();
+    let s = Stale {
+        rt,
+        _dir: dir,
+        hub,
+        openings,
+        chain,
+        wallet,
+        mine,
+        rate,
+    };
+    let done = played(&s, |_| true).await?;
+    let alerts = told_whole.lock().unwrap().clone();
+    ensure!(
+        alerts.iter().all(|m| !m.contains("kept instances")),
+        "{alerts:?}"
+    );
+    ensure!(done.response.is_some(), "no response: {done:?}");
+    ensure!(
+        done.assertion.is_some() && done.challenge.is_some(),
+        "{done:?}"
+    );
+    ensure!(done.corrected == Some(98_304), "{done:?}");
+    // Paid by the hub's answer to her challenge, not by a timeout.
+    ensure!(done.payout.is_some() && done.timeout.is_none(), "{done:?}");
+    let received = done.received.context("nothing received")?;
+    ensure!(
+        received < 131_071,
+        "{received} of a claim of 131071: {done:?}"
+    );
+    eprintln!("restored mid-dispute: a challenged claim of 131071 paid {received}");
     Ok(())
 }
 

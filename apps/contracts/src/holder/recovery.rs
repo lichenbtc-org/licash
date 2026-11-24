@@ -492,6 +492,17 @@ pub fn forge_filings(forge: Option<Forge>) {
     *FORGE.write().unwrap_or_else(|e| e.into_inner()) = forge;
 }
 
+#[cfg(feature = "faults")]
+static DOUBT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Take, if `doubt`, every assertion seen from now on in this process for
+/// one that does not verify, as a holder who challenges whatever the hub
+/// proves would: for tests of the hub's answer to a wrong challenge.
+#[cfg(feature = "faults")]
+pub fn doubt_assertions(doubt: bool) {
+    DOUBT.store(doubt, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Whether the statement of the contract of `base` would owe the claim
 /// filed as `filed` under `request` whole, should the hub show nothing
 /// against it: its own judgment ([`licash::recovery::owed`]), on the
@@ -2249,7 +2260,10 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
             }
             Stage::Contested => {
                 if self.is_link("assert", &tx)? {
-                    state.verified = Some(self.o.verify_assertion(&tx)?);
+                    let verified = self.o.verify_assertion(&tx)?;
+                    #[cfg(feature = "faults")]
+                    let verified = verified && !DOUBT.load(std::sync::atomic::Ordering::SeqCst);
+                    state.verified = Some(verified);
                     state.assertion = Some(tx);
                     state.assertion_height = Some(height);
                     state.payout = None;
