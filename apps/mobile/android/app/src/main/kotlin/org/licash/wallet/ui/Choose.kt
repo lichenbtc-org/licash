@@ -65,6 +65,8 @@ internal fun OfferSheet(engine: Engine, q: ContractQuote, ready: Boolean, dismis
         hub = engine.called(q.hub),
         title = "Add to balance, protected",
         verb = "Add",
+        intent = intentOf(engine.prefs.intent),
+        chooseIntent = { engine.prefs.intent = it.name },
         open = { chosen, price ->
             dismiss()
             engine.openContract(q.hub, price, chosen)
@@ -100,14 +102,38 @@ internal fun fitsFrom(least: ULong, fit: (least: ULong) -> ContractFit?): List<C
 }
 
 /**
+ * What protection is mostly for, which sizes it at first: room for what
+ * she puts in and holds at the hub (`halves` of it, in halves), to pay
+ * with; half as much again, to be paid too; or three times it, to be paid
+ * mostly. The hub funds the room beyond her part.
+ */
+internal enum class Intent(val label: String, val says: String, val halves: ULong) {
+    PAY("Mostly pay", "Room for what you put in, to pay with.", 2uL),
+    BOTH("Both", "Room for half as much again, to receive.", 3uL),
+    RECEIVE("Mostly receive", "Room to receive twice what you put in.", 6uL),
+}
+
+/** The intent the owner last chose: [Intent.BOTH], as before there was a choice, if none. */
+internal fun intentOf(saved: String?): Intent = Intent.entries.find { it.name == saved } ?: Intent.BOTH
+
+/**
+ * The contract offered at first of `fits` for a coin of `coin` sat, with
+ * `missing` sat at its hub not protected yet, for `intent`: the smallest
+ * covering both as [Intent.halves] says, else the largest the hub allows
+ * for it.
+ */
+internal fun intentFit(fits: List<ContractFit>, coin: ULong, missing: ULong, intent: Intent): ContractFit? {
+    val wanted = (coin + missing) * intent.halves / 2uL
+    return fits.firstOrNull { it.cap >= wanted } ?: fits.lastOrNull()
+}
+
+/**
  * The contract offered at first of `fits` for a coin of `coin` sat, with
  * `missing` sat at its hub not protected yet: the smallest covering half
  * again both, room to be paid more, else the largest the hub allows for it.
  */
-internal fun suggestedFit(fits: List<ContractFit>, coin: ULong, missing: ULong = 0uL): ContractFit? {
-    val both = coin + missing
-    return fits.firstOrNull { it.cap >= both + both / 2uL } ?: fits.lastOrNull()
-}
+internal fun suggestedFit(fits: List<ContractFit>, coin: ULong, missing: ULong = 0uL): ContractFit? =
+    intentFit(fits, coin, missing, Intent.BOTH)
 
 /** The contract offered at first for `coin`, if one takes it whole. */
 internal fun fitOf(q: ContractQuote, range: ContractRange, blocks: UInt, coin: DepositCoin): ContractFit? =
@@ -128,9 +154,13 @@ internal fun coversOf(fits: List<Pair<DepositCoin, List<ContractFit>>>): List<Pa
  * The cover offered at first: the one suggested for the smallest coin a
  * contract takes whole, with `missing` sat at its hub not protected yet.
  */
-internal fun suggestedCover(fits: List<Pair<DepositCoin, List<ContractFit>>>, missing: ULong = 0uL): ULong? =
+internal fun suggestedCover(
+    fits: List<Pair<DepositCoin, List<ContractFit>>>,
+    missing: ULong = 0uL,
+    intent: Intent = Intent.BOTH,
+): ULong? =
     fits.filter { it.second.isNotEmpty() }.minByOrNull { it.first.value }
-        ?.let { (coin, its) -> suggestedFit(its, coin.value, missing)?.cap }
+        ?.let { (coin, its) -> intentFit(its, coin.value, missing, intent)?.cap }
 
 /** What to cash out to herself to protect what she holds at a hub: a coin of `coin` sat opening `cap`. */
 internal data class CashOutFirst(val cap: ULong, val coin: ULong)
@@ -188,6 +218,9 @@ internal fun ChooseSheet(
     payWithNotes: ((cap: ULong, blocks: UInt) -> Unit)? = null,
     // With no coin paying it: cashing out a coin of so many sat to herself first, to pay it.
     cashOut: ((ULong) -> Unit)? = null,
+    // What it is mostly for, sizing it at first, and where her choice is kept.
+    intent: Intent = Intent.BOTH,
+    chooseIntent: (Intent) -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
     val download = android.text.format.Formatter.formatShortFileSize(LocalContext.current, q.download.toLong())
@@ -199,7 +232,8 @@ internal fun ChooseSheet(
     // none does, the one suggested.
     var chosenCap by remember(q) { mutableStateOf<ULong?>(null) }
     var chosenCoin by remember(q) { mutableStateOf<DepositCoin?>(null) }
-    val cap = chosenCap?.takeIf { c -> covers.any { it.first == c } } ?: suggestedCover(fits, cover.missing)
+    var picked by remember(q) { mutableStateOf(intent) }
+    val cap = chosenCap?.takeIf { c -> covers.any { it.first == c } } ?: suggestedCover(fits, cover.missing, picked)
     val payers = covers.firstOrNull { it.first == cap }?.second.orEmpty()
     val coin = chosenCoin?.takeIf { it in payers } ?: payers.firstOrNull()
     val fit = coin?.let { c -> fits.first { it.first == c }.second.firstOrNull { it.cap == cap } }
@@ -240,34 +274,22 @@ internal fun ChooseSheet(
                 )
             }
         }
-        Line("Covers up to", sat(first?.cap ?: capped), tag = "quote-cap")
-        // Larger, the hub funds more of it: room to be paid more, at its interest.
+        // What it is for sizes it: the exact size, and the coin, under More.
         if (fit != null && covers.size > 1) {
-            val at = covers.indexOfFirst { it.first == capped }
-            Slider(
-                value = at.toFloat(),
-                onValueChange = { chosenCap = covers[it.roundToInt().coerceIn(covers.indices)].first },
-                valueRange = 0f..covers.lastIndex.toFloat(),
-                steps = covers.size - 2,
-                modifier = Modifier.testTag("contract-cap"),
+            Segmented(Intent.entries.map { it.label }, picked.ordinal, Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                picked = Intent.entries[it]
+                chosenCap = null
+                chooseIntent(picked)
+            }
+            Text(
+                if (chosenCap == null) picked.says else "Size chosen under More.",
+                modifier = Modifier.padding(bottom = 4.dp).testTag("intent-says"),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant,
             )
         }
+        Line("Covers up to", sat(first?.cap ?: capped), tag = "quote-cap")
         if (fit != null && coin != null) {
-            if (payers.size > 1) {
-                Text("Paid with", modifier = Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyLarge)
-                Row(Modifier.horizontalScroll(rememberScrollState())) {
-                    for (c in payers) {
-                        FilterChip(
-                            selected = c == coin,
-                            onClick = { chosenCoin = c },
-                            label = { Text(sat(c.value)) },
-                            modifier = Modifier.padding(end = 8.dp).testTag("contract-coin"),
-                        )
-                    }
-                }
-            } else {
-                Line("Paid with", "${sat(coin.value)} on Bitcoin", tag = "contract-paid-with")
-            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 FeeLine(
                     "Cost", cost, capped, tag = "quote-price", value = sat(cost),
@@ -338,6 +360,35 @@ internal fun ChooseSheet(
                         "${sat(fee.interestFunded)} · ${percent(range.ppmYearFunded.toULong())} a year",
                         tag = "contract-interest-funded",
                     )
+                }
+            }
+            // Its size, after what it costs: larger, the hub funds more of it, room to be paid more at its interest.
+            if (fit != null && covers.size > 1) {
+                Text("Size", modifier = Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyLarge)
+                val at = covers.indexOfFirst { it.first == capped }
+                Slider(
+                    value = at.toFloat(),
+                    onValueChange = { chosenCap = covers[it.roundToInt().coerceIn(covers.indices)].first },
+                    valueRange = 0f..covers.lastIndex.toFloat(),
+                    steps = covers.size - 2,
+                    modifier = Modifier.testTag("contract-cap"),
+                )
+            }
+            if (fit != null && coin != null) {
+                if (payers.size > 1) {
+                    Text("Paid with", modifier = Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyLarge)
+                    Row(Modifier.horizontalScroll(rememberScrollState())) {
+                        for (c in payers) {
+                            FilterChip(
+                                selected = c == coin,
+                                onClick = { chosenCoin = c },
+                                label = { Text(sat(c.value)) },
+                                modifier = Modifier.padding(end = 8.dp).testTag("contract-coin"),
+                            )
+                        }
+                    }
+                } else {
+                    Line("Paid with", "${sat(coin.value)} on Bitcoin", tag = "contract-paid-with")
                 }
             }
             Line("Takes", "$SETUP_TAKES · $download")

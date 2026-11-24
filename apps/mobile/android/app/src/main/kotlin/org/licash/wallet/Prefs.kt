@@ -41,6 +41,15 @@ class Prefs(context: Context) {
         get() = prefs.getBoolean("tor", network != Network.REGTEST)
         set(on) = prefs.edit().putBoolean("tor", on).apply()
 
+    /**
+     * What the owner said protection is mostly for, by name, if ever said:
+     * the size offered at first. None, as in a wallet of an earlier
+     * version, means the size offered before there was a choice.
+     */
+    var intent: String?
+        get() = prefs.getString("intent", null)
+        set(name) = prefs.edit().putString("intent", name).apply()
+
     /** The coin on Bitcoin (`txid:vout`) whose offer of protection was last declined, if any. */
     var offerDeclined: String?
         get() = prefs.getString("offer_declined", null)

@@ -1137,17 +1137,19 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
         cap == wanted,
         "a cap of {cap} offered on {coin}, cashed out for {wanted}"
     );
-    phone.by_id("contract-cap", 10).await?;
     for gone in ["contract-funding", "cash-out-first"] {
         ensure!(!phone.has(gone).await?, "{gone:?} on {coin}");
     }
     // Its reserve apart from its cost, hers, and her part, in sight with
-    // the coin paying it and what the hub protects then; how long folded.
+    // what the hub protects then; its size, the coin paying it and how
+    // long folded under More.
     phone.tagged("contract-reserve", "20,000 sat", 10).await?;
-    for shown in ["contract-funded", "contract-paid-with", "contract-after"] {
+    for shown in ["contract-funded", "contract-after"] {
         phone.by_id(shown, 10).await?;
     }
-    ensure!(!phone.has("contract-blocks").await?, "how long unfolded");
+    for folded in ["contract-blocks", "contract-cap", "contract-paid-with"] {
+        ensure!(!phone.has(folded).await?, "{folded:?} unfolded");
+    }
     phone.tap_id("contract-more").await?;
     // Its fit over `blocks`, as shown: her part and its cost, the reserve
     // paid beside them.
@@ -1206,6 +1208,10 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
         fit(1_000).await? == (funded, paid),
         "another fit over 1000 blocks"
     );
+    // Its size and the coin paying it, unfolded below what it costs.
+    for shown in ["contract-cap", "contract-paid-with"] {
+        phone.scroll_to_id(shown).await?;
+    }
     // Below what was unfolded: scrolled to, its words in sight. The button,
     // tagged, has none for uiautomator: they are those of the text in it.
     let words = phone.scroll_to_text("Protect for").await?;

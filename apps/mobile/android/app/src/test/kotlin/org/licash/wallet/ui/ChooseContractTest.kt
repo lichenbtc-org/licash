@@ -103,4 +103,27 @@ class ChooseContractTest {
     fun what_protection_asks_says_the_day_it_ends() {
         assertEquals("Open Licash now and then, and before it ends on May 21.", duty("May 21"))
     }
+
+    @Test
+    fun what_the_vault_is_for_sizes_it() {
+        val caps = listOf(131_071uL, 262_143uL, 524_287uL, 1_048_575uL)
+        val fits = caps.map { ContractFit(cap = it, funded = 100_000uL) }
+        // 100,000 put in: room for it, half again, or three times it.
+        assertEquals(131_071uL, intentFit(fits, 100_000uL, 0uL, Intent.PAY)?.cap)
+        assertEquals(262_143uL, intentFit(fits, 100_000uL, 0uL, Intent.BOTH)?.cap)
+        assertEquals(524_287uL, intentFit(fits, 100_000uL, 0uL, Intent.RECEIVE)?.cap)
+        // Beyond the largest the coin pays: the largest.
+        assertEquals(1_048_575uL, intentFit(fits, 1_000_000uL, 0uL, Intent.RECEIVE)?.cap)
+        // Both is what was offered before there was a choice.
+        for (coin in listOf(1uL, 99_999uL, 100_001uL, 700_000uL)) {
+            assertEquals(suggestedFit(fits, coin), intentFit(fits, coin, 0uL, Intent.BOTH))
+        }
+    }
+
+    @Test
+    fun no_intent_saved_means_both() {
+        assertEquals(Intent.BOTH, intentOf(null))
+        assertEquals(Intent.BOTH, intentOf("something else"))
+        assertEquals(Intent.RECEIVE, intentOf("RECEIVE"))
+    }
 }

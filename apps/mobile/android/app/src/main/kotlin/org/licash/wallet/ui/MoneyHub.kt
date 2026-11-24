@@ -234,6 +234,8 @@ internal fun HubPage(
                 dismiss = { quote = null },
                 hub = engine.called(q.hub),
                 payWithNotes = { cap, blocks -> payWithNotes(cap, blocks) },
+                intent = intentOf(engine.prefs.intent),
+                chooseIntent = { engine.prefs.intent = it.name },
                 cashOut = { coin ->
                     quote = null
                     scope.launch {
