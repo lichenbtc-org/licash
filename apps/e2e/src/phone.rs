@@ -540,13 +540,12 @@ impl Phone {
         Ok(code)
     }
 
-    /// The payment code with an address on Bitcoin any wallet pays, which
-    /// Receive shows once asked for among its other ways, back on Home
-    /// after.
+    /// The address on Bitcoin any wallet pays, bare, as Receive's Bitcoin
+    /// tab shows it, back on Home after.
     pub async fn bitcoin_code(&self) -> anyhow::Result<String> {
         self.tap_id("receive").await?;
-        self.tap_id("other-ways").await?;
-        self.tap_id("way-bitcoin").await?;
+
+        self.tap_id("segment Bitcoin").await?;
         self.tagged("way", "Bitcoin address", 30).await?;
         // The code shown before it gives way once the address is made.
         let code = until("a code with an address on Bitcoin", 30, || async {
@@ -557,6 +556,19 @@ impl Phone {
         self.tap("Back").await?;
         self.home(30).await?;
         Ok(code)
+    }
+
+    /// The silent payment address Receive shows under More, back on Home
+    /// after.
+    pub async fn silent_address(&self) -> anyhow::Result<String> {
+        self.tap_id("receive").await?;
+
+        self.tap_id("other-ways").await?;
+        self.tap_id("way-silent").await?;
+        let silent = self.by_id("silent", 30).await?.text;
+        self.tap("Back").await?;
+        self.home(30).await?;
+        Ok(silent)
     }
 
     /// Save what the screen shows to `path`, to see why a test failed.

@@ -137,4 +137,16 @@ class ReceiveTest {
             donationWords(address.copy(stocked = false, reachable = false)),
         )
     }
+
+    @Test
+    fun receive_has_a_tab_for_licash_lightning_and_bitcoin_and_the_rest_under_more() {
+        assertEquals(listOf("Licash", "Lightning", "Bitcoin"), TABS.map { it.second })
+        assertEquals(listOf(Way.CODE, Way.LIGHTNING, Way.BITCOIN), TABS.map { it.first })
+    }
+
+    @Test
+    fun the_bitcoin_tab_shows_the_bare_address() {
+        assertEquals("BITCOIN:BCRT1QABC", bareQr("bcrt1qabc", null))
+        assertEquals("BITCOIN:BCRT1QABC?amount=0.00050000", bareQr("bcrt1qabc", 50_000L))
+    }
 }

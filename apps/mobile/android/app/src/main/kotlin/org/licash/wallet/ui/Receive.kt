@@ -81,6 +81,13 @@ internal enum class Way(val label: String, val says: String, val tag: String) {
     DONATIONS("Donation address", "Any Lightning wallet, again and again, even while you're offline", "way-donations"),
 }
 
+/** The ways Receive shows a tab of, in its order: the rest are under More. */
+internal val TABS = listOf(Way.CODE to "Licash", Way.LIGHTNING to "Lightning", Way.BITCOIN to "Bitcoin")
+
+/** The bare address Receive shows on Bitcoin, for `amount` if any, as a QR code holds it best. */
+internal fun bareQr(address: String, amount: Long?): String =
+    "BITCOIN:${address.uppercase()}" + (amount?.let { "?amount=${btc(it.toULong())}" } ?: "")
+
 /**
  * The way Receive picks for `amount`: an invoice any wallet pays, if a
  * hub trusted takes `lightning` payments; else the wallet's code.
@@ -247,7 +254,7 @@ fun Receive(engine: Engine, back: () -> Unit) {
         Way.SILENT -> silent?.let { way.label to it }
         Way.DONATIONS -> donations?.let { way.label to it.lnurl }
         Way.CODE -> code?.let { way.label to it.text }
-        Way.BITCOIN -> bitcoin?.let { way.label to it.text }
+        Way.BITCOIN -> bitcoin?.address?.let { way.label to it }
     }
     LaunchedEffect(received) {
         codes = engine.codes().getOrDefault(emptyList())
@@ -398,8 +405,15 @@ fun Receive(engine: Engine, back: () -> Unit) {
         }
     }
     if (choosing) {
-        Sheet("Other ways", dismiss = { choosing = false }) {
-            ways.filter { it != way }.forEach { other ->
+        Sheet("More ways", dismiss = { choosing = false }) {
+            // Which identity the Licash code is of.
+            if (way == Way.CODE) {
+                Entry("Identity", value = codeName(codeIndex.toUInt(), codes), tag = "which-code") {
+                    choosing = false
+                    pickingCode = true
+                }
+            }
+            ways.filter { it != way && TABS.none { (tab, _) -> tab == it } }.forEach { other ->
                 Entry(other.label, sub = other.says, tag = other.tag) {
                     choosing = false
                     chosen = other
@@ -415,7 +429,7 @@ fun Receive(engine: Engine, back: () -> Unit) {
                 lookingForDonations,
                 lookingForLightning,
             )
-            closed.forEach { (other, why) ->
+            closed.filter { (other, _) -> TABS.none { (tab, _) -> tab == other } }.forEach { (other, why) ->
                 Entry(
                     other.label,
                     sub = why,
@@ -427,6 +441,18 @@ fun Receive(engine: Engine, back: () -> Unit) {
     }
     Column(Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
         TopBar("Receive", back)
+        Segmented(TABS.map { it.second }, TABS.indexOfFirst { it.first == way }, Modifier.fillMaxWidth()) { i ->
+            val tab = TABS[i].first
+            if (tab !in ways) {
+                // Not open now: why, in place of it.
+                error = closedWays(takesLightning, true, true, false, lookingForLightning).find { it.first == tab }?.second
+                return@Segmented
+            }
+            chosen = tab
+            error = null
+            // An invoice asks for an amount.
+            if (tab == Way.LIGHTNING && amount == null) edit() else editing = false
+        }
         Column(
             Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -475,7 +501,20 @@ fun Receive(engine: Engine, back: () -> Unit) {
                         )
                     }
                 }
-                else -> when (val made = if (way == Way.BITCOIN) bitcoin else code) {
+                way == Way.BITCOIN -> when (val address = bitcoin?.address) {
+                    null -> if (error == null) Waiting()
+                    else -> {
+                        QrCode(bareQr(address, amount))
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            address,
+                            modifier = Modifier.testTag("bitcoin-address"),
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                }
+                else -> when (val made = code) {
                     null -> if (error == null) Waiting()
                     else -> QrCode(made.qr)
                 }
@@ -519,7 +558,7 @@ fun Receive(engine: Engine, back: () -> Unit) {
             val waits = invoice?.reason?.takeIf { lightning && amount != null && request == null }
             val says = when (way) {
                 Way.SILENT -> "Found once in a block. Each payment lands at an address of its own."
-                Way.BITCOIN -> "Found once in a block. Once paid, the next address shows. To pay with it, add it to your balance under Balance, On Bitcoin."
+                Way.BITCOIN -> "Any Bitcoin wallet or exchange. Arrives once in a block, about 10 minutes."
                 Way.DONATIONS -> donations?.let { donationWords(it) }
                 else -> paying ?: waits
             }
@@ -531,14 +570,9 @@ fun Receive(engine: Engine, back: () -> Unit) {
                     textAlign = TextAlign.Center,
                 )
             }
-            if (!editing && way == Way.CODE) {
-                TextButton(onClick = { pickingCode = true }, modifier = Modifier.testTag("which-code")) {
-                    Text(codeName(codeIndex.toUInt(), codes))
-                }
-            }
             if (!editing) {
                 TextButton(onClick = { choosing = true }, modifier = Modifier.testTag("other-ways")) {
-                    Text("Other ways")
+                    Text("More")
                 }
             }
         }

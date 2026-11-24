@@ -191,6 +191,7 @@ async fn separate_code(phone: &Phone, bob: &licash_e2e::Wallet) -> anyhow::Resul
     let own = phone.code().await?;
     phone.tap_id("receive").await?;
     phone.wait("QR code", 30).await?;
+    phone.tap_id("other-ways").await?;
     phone.tap_id("which-code").await?;
     phone.tap_id("new-code").await?;
     // Typed, the keyboard not hidden after: in a sheet, Escape closes the
@@ -473,8 +474,8 @@ async fn used(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     phone.connect(hub).await?;
 
     // Its code names the hub and its mailbox, nothing on Bitcoin; its
-    // code on Bitcoin, among the other ways, an address for any wallet and
-    // a silent payment address, the hub serving tweaks, nothing in notes.
+    // address on Bitcoin, in a tab of its own, bare, for any wallet; its
+    // silent payment address under More, the hub serving tweaks.
     let shown: PaymentCode = phone.code().await?.parse()?;
     ensure!(
         shown.address.is_none() && shown.silent.is_none(),
@@ -486,7 +487,8 @@ async fn used(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     ensure!(code.licash.is_none(), "a Licash code in {code}");
     let fallback = code.address.clone().context("a fallback address")?;
     let fallback = fallback.assume_checked().to_string();
-    let silent = code.silent.context("a silent payment address")?;
+    ensure!(code.silent.is_none(), "a silent payment address in {code}");
+    let silent = phone.silent_address().await?;
     // Paid at the fallback address: Home says it is on its way, then it
     // is found in a block and moved into the balance once asked, the next
     // address shown from then on.
@@ -511,7 +513,10 @@ async fn used(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     phone.back_to("receive").await?;
     let next: PaymentCode = phone.bitcoin_code().await?.parse()?;
     ensure!(next.address != code.address, "paid at, and shown again");
-    ensure!(next.silent == code.silent, "another silent payment address");
+    ensure!(
+        phone.silent_address().await? == silent,
+        "another silent payment address"
+    );
 
     let bob = eco.wallet("bob")?;
     bob.add_hub(hub).await?;
@@ -520,7 +525,7 @@ async fn used(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     refused(eco, phone, &bobs).await?;
 
     // Paid at its silent payment address: found and moved in too.
-    eco.pay_silent(&silent.to_string(), 20_000).await?;
+    eco.pay_silent(&silent, 20_000).await?;
     eco.mine(1).await?;
     move_in(eco, phone).await?;
     settle(eco, phone, 2).await?;
@@ -530,7 +535,7 @@ async fn used(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
         "{} moved in",
         held - moved
     );
-    silently(phone, &silent.to_string()).await?;
+    silently(phone, &silent).await?;
 
     // It pays Bob at the hub, an amount it enters, to his mailbox.
     phone.link(&bobs.to_string()).await?;
