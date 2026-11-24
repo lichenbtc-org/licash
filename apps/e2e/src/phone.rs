@@ -373,28 +373,59 @@ impl Phone {
 
     /// Scroll down until a view tagged `id` shows: it.
     pub async fn scroll_to_id(&self, id: &str) -> anyhow::Result<View> {
-        self.scroll_to(&format!("view {id:?}"), |v| v.id == id)
+        self.scroll_to(&format!("view {id:?}"), false, |v| v.id == id)
             .await
     }
 
     /// Scroll down until a view whose text starts with `start` shows: it.
     /// A view partly in sight may show no text yet, only its tag.
     pub async fn scroll_to_text(&self, start: &str) -> anyhow::Result<View> {
-        self.scroll_to(&format!("text {start:?}"), |v| v.text.starts_with(start))
-            .await
+        self.scroll_to(&format!("text {start:?}"), false, |v| {
+            v.text.starts_with(start)
+        })
+        .await
     }
 
-    async fn scroll_to(&self, what: &str, wanted: impl Fn(&View) -> bool) -> anyhow::Result<View> {
+    /// [`Self::scroll_to_text`] on Home, where a swipe up of 64 dp beyond
+    /// the end of its middle opens the history: swipes of 48 dp, many.
+    pub async fn scroll_home_to_text(&self, start: &str) -> anyhow::Result<View> {
+        self.scroll_to(&format!("text {start:?} on Home"), true, |v| {
+            v.text.starts_with(start)
+        })
+        .await
+    }
+
+    async fn scroll_to(
+        &self,
+        what: &str,
+        short: bool,
+        wanted: impl Fn(&View) -> bool,
+    ) -> anyhow::Result<View> {
         let size = self.shell("wm size").await?;
         let size = size.rsplit(' ').next().context("no screen size")?.trim();
         let (width, height) = size.split_once('x').context("no screen size")?;
         let (x, height): (i32, i32) = (width.parse::<i32>()? / 2, height.parse()?);
-        for _ in 0..8 {
+        let (from, to, tries) = if short {
+            // The density in use: the override, printed last, if any.
+            let density = self.shell("wm density").await?;
+            let density: i32 = density
+                .rsplit(' ')
+                .next()
+                .context("no screen density")?
+                .trim()
+                .parse()?;
+            let step = 48 * density / 160;
+            (height / 2 + step / 2, height / 2 - step / 2, 40)
+        } else {
+            (height * 7 / 10, height * 3 / 10, 8)
+        };
+        for _ in 0..tries {
             if let Some(view) = self.views().await?.into_iter().find(&wanted) {
                 return Ok(view);
             }
-            let (from, to) = (height * 7 / 10, height * 3 / 10);
-            self.shell(&format!("input swipe {x} {from} {x} {to} 300"))
+            // Slow when short: no fling to carry it further.
+            let ms = if short { 600 } else { 300 };
+            self.shell(&format!("input swipe {x} {from} {x} {to} {ms}"))
                 .await?;
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
