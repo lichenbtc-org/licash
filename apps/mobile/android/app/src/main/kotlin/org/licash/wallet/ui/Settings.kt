@@ -123,17 +123,21 @@ fun Settings(engine: Engine, ui: Ui, balance: () -> Unit, back: () -> Unit) {
     }
 }
 
-/** The first page: hubs; Bitcoin and Tor; how Licash works and about the app; advanced mode. */
+/**
+ * The first page: the backup and hubs; how Licash works and about it;
+ * Bitcoin and Tor folded under Network, what is wrong with them in sight;
+ * advanced mode.
+ */
 @Composable
 private fun Overview(engine: Engine, ui: Ui, tour: () -> Unit, open: (Page) -> Unit) {
     val scope = rememberCoroutineScope()
     var torFailed by remember { mutableStateOf<String?>(null) }
     Group("") {
-        Entry("Hubs", value = "${ui.hubs.size}", icon = Glyphs.bank, tag = "hubs") { open(Page.Hubs) }
         if (ui.wallet) {
-            Divider()
             Entry("Backup", icon = Glyphs.key, tag = "backup") { open(Page.Backup) }
+            Divider()
         }
+        Entry("Hubs", value = "${ui.hubs.size}", icon = Glyphs.bank, tag = "hubs") { open(Page.Hubs) }
         // An advanced feature: shown in advanced mode, or once set up.
         val cold = ui.cold
         if (ui.wallet && (ui.developer || cold != null)) {
@@ -148,31 +152,34 @@ private fun Overview(engine: Engine, ui: Ui, tour: () -> Unit, open: (Page) -> U
         }
     }
     Group("") {
-        val (state, detail) = status(ui, ui.developer)
-        Entry("Bitcoin", value = state, sub = detail, icon = Glyphs.bitcoin, tag = "chain") { open(Page.Bitcoin) }
-        ui.problem?.let { Problem(it) }
-        Divider()
-        Toggle("Tor", ui.tor, sub = "Hides where you are, slower", icon = Icons.Filled.Lock, means = TOR_MEANS) { on ->
-            torFailed = null
-            scope.launch { engine.setTor(on).onFailure { torFailed = explain(it) } }
-        }
-        torFailed?.let { Problem(it) }
-        if (ui.tor) {
-            Divider()
-            val tor = ui.torStatus
-            val value = when {
-                tor == null -> "Starting"
-                tor.ready -> "Connected"
-                tor.blocked != null -> "Stuck"
-                else -> "${tor.percent}%"
-            }
-            Entry("Tor status", value = value, tag = "tor-status") { open(Page.Tor) }
-        }
-    }
-    Group("") {
         Entry("How Licash works", icon = Glyphs.vault, tag = "how-it-works", onClick = tour)
         Divider()
         Entry("About", icon = Icons.Outlined.Info, tag = "about") { open(Page.About) }
+    }
+    // What is wrong stays in sight; the rest only once asked.
+    ui.problem?.let { Problem(it) }
+    torFailed?.let { Problem(it) }
+    More("Network", Modifier.padding(top = 8.dp).testTag("network")) {
+        Group("") {
+            val (state, detail) = status(ui, ui.developer)
+            Entry("Bitcoin", value = state, sub = detail, icon = Glyphs.bitcoin, tag = "chain") { open(Page.Bitcoin) }
+            Divider()
+            Toggle("Tor", ui.tor, sub = "Hides where you are, slower", icon = Icons.Filled.Lock, means = TOR_MEANS) { on ->
+                torFailed = null
+                scope.launch { engine.setTor(on).onFailure { torFailed = explain(it) } }
+            }
+            if (ui.tor) {
+                Divider()
+                val tor = ui.torStatus
+                val value = when {
+                    tor == null -> "Starting"
+                    tor.ready -> "Connected"
+                    tor.blocked != null -> "Stuck"
+                    else -> "${tor.percent}%"
+                }
+                Entry("Tor status", value = value, tag = "tor-status") { open(Page.Tor) }
+            }
+        }
     }
     Group("") {
         Toggle("Advanced mode", ui.developer, icon = Glyphs.code, means = ADVANCED_MEANS) { engine.setDeveloper(it) }
