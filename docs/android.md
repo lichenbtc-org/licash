@@ -6,10 +6,38 @@ under a Jetpack Compose UI.
 
 ## What it shows
 
+### First run
+
+With no wallet, the app opens on a five-slide tour, skippable, that tells
+Licash through a vault: the hub keeps the gold, the vault on Bitcoin keeps
+the hub honest, the hub can add room to be paid, and a vault is opened with
+bitcoin sent to an address. Its last slide creates or restores the wallet
+(and picks a test network). It never shows for a wallet already there, and
+Settings replays it as "How Licash works". The pictures are drawn in
+Compose, the same shapes in the dark and light themes.
+
+The first hub: on a network with a recommended hub (Mutinynet only, for
+now), "Use this hub" adds the first one that answers; "Choose another", or
+a failure, lists the hubs announced on Nostr and takes one by its address,
+and none found says "No hubs available". Then, until the wallet holds or
+ever paid with notes, Home guides the first funding: what the vault is
+mostly for (pay, both, or receive, sizing it at the coin, half again, or
+three times it), the least to send, the address to send bitcoin to as a QR
+code with a copy button, and where it stands (Waiting, Seen, In a block,
+Opening vault, Ready). Nothing opens without a tap: once the coin is in a
+block, "Open your vault" shows the offer, sized by the choice, saved for
+the next offers too (a wallet of an earlier version keeps "both").
+
 ### Home
 
-Home is the balance, how much of it is protected, one line while something
-is going on, Receive and Send. The rest waits behind a tap: where the money
+Home is the balance, a gauge of how much of it is protected, one line while
+something is going on, at most one suggested next step, Receive and Send.
+The step is, the most pressing first: the first funding above; the offer
+for bitcoin that arrived; bitcoin too little for a vault, to add; saving
+the recovery words of a wallet made here, once it holds something (a
+wallet restored, or of an earlier version, is never asked); renewing a
+vault ending within two weeks of blocks, unless another at its hub takes
+over; protecting what a hub holds beyond its vaults. The rest waits behind a tap: where the money
 is behind the balance (a page for each hub, to cash out and protect, and
 one for what is on Bitcoin), the history behind Activity (or a swipe up),
 and behind its chart button Stats, what the history came to, what a payment
@@ -49,8 +77,8 @@ back while another serves them, and each of them learns how far the
 wallet has looked, as the one asked alone did before.
 
 Home says when bitcoin paid to the wallet waits outside the balance and no
-protection is offered for it ("Pay with your N sat on Bitcoin", as the
-offer says); it
+protection is offered for it ("N sat on Bitcoin", its card's button "See
+it"); it
 opens the page for what is on Bitcoin, which lists each hub's protection to
 open. That page is always one tap from the balance: its row says "Add it
 to your balance, protected or not" while bitcoin is held and nothing is
@@ -151,8 +179,8 @@ address shown in Receive. How the app looks and speaks, and the shared parts to 
 
 A wallet is made on Bitcoin unless "Use a test network", on the first
 screen, picks signet, Mutinynet or regtest first: a wallet keeps the network
-it is made on, and with no hub on Bitcoin yet, the empty list of hubs says
-so. The Advanced mode switch in Settings turns on
+it is made on. Settings shows the backup, the hubs, the tour and About;
+Bitcoin and Tor are folded under Network, a problem with them in sight. The Advanced mode switch in Settings turns on
 advanced mode: the networks on the first screen, the light client's peers and
 its block-dn server, the block explorer transactions link to, the most the
 app pays, on its own, to renew notes a hub that restarted no longer unlinks
@@ -202,19 +230,20 @@ instead, its node holding the payment until the provider locks its notes
 to the app at a hub it trusts, which the app claims as it claims a hub's:
 nothing is trusted to the provider, but it sees the amount, the memo and
 which payments go to one wallet. Receive says the provider's fee taken.
-Without an amount Receive shows the
-wallet's code (its hubs, and its silent payment address); an address on
-Bitcoin any wallet pays, the code alone and the silent payment address
-alone are under Other ways, the address handed out only once asked for.
+Receive has a tab each for the Licash code (its hubs, and its silent
+payment address), Lightning (asking an amount first) and Bitcoin (the bare
+address any wallet pays, handed out only once asked for); the code alone,
+the silent payment address alone and which identity the code is of are
+under More.
 Once a swap provider announced on the hubs' relays takes donations
-(`licash-swaps run` with `--lnd` and `--lnurl-url URL`) at a hub of the code, Other ways also
+(`licash-swaps run` with `--lnd` and `--lnurl-url URL`) at a hub of the code, More also
 offers a donation address: a static LNURL any Lightning wallet pays, again
 and again, while the phone is offline, the provider paying each donation in
 notes at the code's hub, less its fee. Once shown, its provider and code
 are kept and shown again, even unreachable, as an address handed out stays:
 the code while all its hubs are trusted, hubs added since or not; another
 takes its place only once it takes no more donations, or has failed to for a
-week while another can. A way not open says why under Other ways, grayed
+week while another can. A way not open says why under More, grayed
 out (no hub or provider taking Lightning, no hub indexing silent payments,
 no provider taking donations, or still looking for one). Tapping a hub in Settings lists its fees. Silent payments
 before the first block the hub indexed are not found; payments to the

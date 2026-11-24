@@ -10,9 +10,9 @@ Tor) watches Bitcoin for you.
 
 Install `licash-main.apk` from the
 [`main-build` release](https://github.com/lichenbtc-org/licash/releases/tag/main-build).
-To try it on Mutinynet or signet, tap "Use a test network" on the first
-screen, pick the network, create the wallet and choose one of the hubs it
-lists. A wallet keeps the network it is made on.
+To try it on Mutinynet or signet, swipe to the last slide of the tour, tap
+"Use a test network", pick the network, create the wallet and use the hub it
+recommends (or choose another). A wallet keeps the network it is made on.
 
 ## Build
 

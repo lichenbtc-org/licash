@@ -71,6 +71,7 @@ a person sees. The apps differ in medium, not in manners.
 | Fee, Total | Base + ppm, margin |
 | On Bitcoin, over Lightning, in Licash | On-chain, L1, LN |
 | Couldn't pay, Can't send on Bitcoin | Error, failed (alone) |
+| Vault, only as the picture: the tour, the first funding, a step card | Vault for a protection's rows and states |
 
 Core error reasons pass through `explain()` and `plain()` (Android,
 `Format.kt`): a sentence, amounts grouped, swap providers unnamed.
@@ -118,6 +119,11 @@ type in `ui/Theme.kt`. Use them; do not restyle a screen on its own.
 - **Advanced mode** (`ui.developer`) adds the technical: blocks, notes,
   providers, ids, the light client's settings, the log. Basic mode never
   shows them.
+- **One next step.** Home suggests at most one thing to do, as a card
+  (`StepCard`, `ui/NextStep.kt`): a title, a line and its button. The
+  rest of the screen stays the balance, its gauge and Receive and Send.
+- **Pictures** are drawn in Compose (`ui/Drawings.kt`), the same shapes in
+  both themes: flat in dark, outlined in light. No raster images.
 - **Tests read tags.** Every view the end-to-end test reads or taps has a
   `testTag` (sheets set `testTagsAsResourceId`); change a tag only with
   `apps/e2e/tests/app.rs`.

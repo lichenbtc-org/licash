@@ -75,8 +75,8 @@ and a contract's recovery there is only as strong as that work.
 
 - **Android:** install `licash-main.apk` from the
   [`main-build` release](https://github.com/lichenbtc-org/licash/releases/tag/main-build).
-  On the first screen, tap "Use a test network", pick Mutinynet, create the
-  wallet and choose one of the hubs it lists.
+  On the last slide of the tour, tap "Use a test network", pick Mutinynet,
+  create the wallet and use the hub it recommends.
 - **Command line:**
 
   ```sh
