@@ -405,22 +405,26 @@ impl Phone {
         let size = size.rsplit(' ').next().context("no screen size")?.trim();
         let (width, height) = size.split_once('x').context("no screen size")?;
         let (x, height): (i32, i32) = (width.parse::<i32>()? / 2, height.parse()?);
+        // The density in use: the override, printed last, if any.
+        let density = self.shell("wm density").await?;
+        let density: i32 = density
+            .rsplit(' ')
+            .next()
+            .context("no screen density")?
+            .trim()
+            .parse()?;
+        let dp48 = 48 * density / 160;
+        // Above the navigation bar, 48 dp at most: a view lower, cut off
+        // under it or still sliding in, a tap on it would go to Home.
+        let clear = height - dp48;
         let (from, to, tries) = if short {
-            // The density in use: the override, printed last, if any.
-            let density = self.shell("wm density").await?;
-            let density: i32 = density
-                .rsplit(' ')
-                .next()
-                .context("no screen density")?
-                .trim()
-                .parse()?;
-            let step = 48 * density / 160;
-            (height / 2 + step / 2, height / 2 - step / 2, 40)
+            (height / 2 + dp48 / 2, height / 2 - dp48 / 2, 40)
         } else {
             (height * 7 / 10, height * 3 / 10, 8)
         };
         for _ in 0..tries {
-            if let Some(view) = self.views().await?.into_iter().find(&wanted) {
+            let found = self.settled(&wanted).await?;
+            if let Some(view) = found.filter(|v| v.bounds[3] <= clear) {
                 return Ok(view);
             }
             // Slow when short: no fling to carry it further.
@@ -429,7 +433,23 @@ impl Phone {
                 .await?;
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        anyhow::bail!("no {what} however far scrolled")
+        anyhow::bail!("no {what} in sight however far scrolled")
+    }
+
+    /// The view `wanted`, once at rest: where two dumps in a row show it,
+    /// not moving with a sheet sliding up or a list still flung. None if
+    /// not on screen; where last seen if it never rests in 3 s.
+    async fn settled(&self, wanted: impl Fn(&View) -> bool) -> anyhow::Result<Option<View>> {
+        let mut seen = self.views().await?.into_iter().find(&wanted);
+        for _ in 0..10 {
+            let Some(before) = seen else { return Ok(None) };
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            seen = self.views().await?.into_iter().find(&wanted);
+            if seen.as_ref().is_some_and(|now| now.bounds == before.bounds) {
+                return Ok(seen);
+            }
+        }
+        Ok(seen)
     }
 
     pub async fn back(&self) -> anyhow::Result<()> {
