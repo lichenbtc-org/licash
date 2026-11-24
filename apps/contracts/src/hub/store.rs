@@ -241,12 +241,23 @@ impl Store {
 
     pub fn kept_instance(&self, id: &[u8; 32], i: u32) -> Result<Vec<u8>> {
         ensure!(i > 0, "instances are numbered from one");
-        let path = self
-            .2
-            .join("opening-instances")
-            .join(crate::hex_id(id))
-            .join(i.to_string());
+        let path = self.instance_path(id, i);
         std::fs::read(&path).with_context(|| path.display().to_string())
+    }
+
+    /// Of the kept instances `kept` of opening `id`, those whose files are
+    /// not in the data directory, as of one restored without them: the
+    /// hub answers no challenge of its assertion with those.
+    pub fn missing_instances(&self, id: &[u8; 32], kept: &[u32]) -> Vec<u32> {
+        (kept.iter().copied())
+            .filter(|&i| i == 0 || !self.instance_path(id, i).is_file())
+            .collect()
+    }
+
+    fn instance_path(&self, id: &[u8; 32], i: u32) -> PathBuf {
+        (self.2.join("opening-instances"))
+            .join(crate::hex_id(id))
+            .join(i.to_string())
     }
 
     /// Keep `fees`, what the hub charges, with each opening that starts
@@ -882,6 +893,28 @@ mod tests {
         std::fs::write(blocked.path().join("opening-instances"), b"not a directory")?;
         assert!(store.keep(&[1; 32], 1, b"cannot save").is_err());
         assert!(store.row(&[1; 32])?.is_none());
+        Ok(())
+    }
+
+    /// A data directory restored without an opening's kept instances, or
+    /// with some, tells which are missing; a partial upload is not one.
+    #[test]
+    fn instances_missing_from_a_restored_directory_are_told() -> Result<()> {
+        let data = tempfile::tempdir()?;
+        let store = Store::open(&crate::testing::hub_data(data.path()))?;
+        store.keep(&[1; 32], 1, b"first")?;
+        store.keep(&[1; 32], 3, b"third")?;
+        assert!(store.missing_instances(&[1; 32], &[1, 3]).is_empty());
+        assert_eq!(store.missing_instances(&[1; 32], &[1, 2, 3]), [2]);
+        let dir = data
+            .path()
+            .join("opening-instances")
+            .join(crate::hex_id(&[1; 32]));
+        std::fs::write(dir.join(".2.interrupted.new"), b"partial")?;
+        assert_eq!(store.missing_instances(&[1; 32], &[1, 2, 3]), [2]);
+        std::fs::remove_dir_all(data.path().join("opening-instances"))?;
+        assert_eq!(store.missing_instances(&[1; 32], &[1, 3]), [1, 3]);
+        assert_eq!(store.missing_instances(&[2; 32], &[0]), [0]);
         Ok(())
     }
 

@@ -175,6 +175,28 @@ impl Openings {
         Ok(loaded)
     }
 
+    /// Tell the operator, if any of signed opening `id`'s kept instances
+    /// `kept` are not in the data directory, as of one restored from a
+    /// backup of its database alone: the hub still responds and asserts,
+    /// but answers no challenge, and her challenge of its assertion pays
+    /// her all she claims.
+    fn missing_instances(&self, id: &[u8; 32], kept: &[u32]) {
+        let missing = self.store().missing_instances(id, kept);
+        if missing.is_empty() {
+            return;
+        }
+        let id = crate::hex_id(id);
+        tracing::error!(%id, ?missing, "kept instances missing");
+        self.alert(&format!(
+            "contract {id}: {} of its {} kept instances are missing from \
+             opening-instances/{id} in the hub's data directory: restore them \
+             from a backup, or a challenge of its assertion goes unanswered and \
+             pays its holder all she claims",
+            missing.len(),
+            kept.len()
+        ));
+    }
+
     /// Forget the openings loaded but those of `ids`: played no more.
     pub(super) fn keep_loaded(&self, ids: &[[u8; 32]]) {
         let mut cache = self
@@ -191,6 +213,9 @@ impl Openings {
         ensure!(!row.abandoned, "an opening given up");
         let loaded = self.loaded(id, &row.state, &ctx)?;
         let (hub, o) = (&loaded.0, &loaded.1);
+        if self.once(id, "instances checked") {
+            self.missing_instances(id, &o.kept);
+        }
         let tip = ctx.tip;
         let funding = &o.funding;
         let contract = OutPoint {
