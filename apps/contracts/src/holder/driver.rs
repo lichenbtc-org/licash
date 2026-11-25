@@ -187,6 +187,17 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
+/// A step taken but not stored: nothing it says leaves, and the opening
+/// goes no further this time, carried on from what is stored.
+#[derive(Debug)]
+pub(super) struct Unsaved;
+
+impl std::fmt::Display for Unsaved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an opening's step not stored")
+    }
+}
+
 /// A [`Refusal`] of a quote the hub no longer makes (409): its fee rose
 /// as its contracts filled up, or the quote's block is too old. Asked
 /// again, it quotes anew.
@@ -240,6 +251,8 @@ pub(super) struct Driver<'a, T, C> {
     pub holder: Option<Holder>,
     /// The quote she opens on, sent with her Open the first time.
     pub quote: Option<Quote>,
+    /// Whether her chain took F whole from her this time.
+    pub took_f: std::sync::atomic::AtomicBool,
 }
 
 impl<T: Transport, C: Chain> Driver<'_, T, C> {
@@ -350,7 +363,9 @@ impl<T: Transport, C: Chain> Driver<'_, T, C> {
         for n in 1..=tries {
             match &driven {
                 Err(e)
-                    if e.downcast_ref::<Refusal>().is_none() && !self.holder().wholly_funded() =>
+                    if e.downcast_ref::<Refusal>().is_none()
+                        && e.downcast_ref::<Unsaved>().is_none()
+                        && !self.holder().wholly_funded() =>
                 {
                     let id = crate::hex_id(&self.id);
                     tracing::warn!(%id, n, "carrying an opening on: {e:#}");
@@ -372,9 +387,11 @@ impl<T: Transport, C: Chain> Driver<'_, T, C> {
         let holder = self.holder();
         if e.downcast_ref::<Refusal>().is_some() && holder.abandonable() {
             self.store.abandon(&self.id, &format!("{e:#}"))?;
-            if holder.phase() == Phase::Signing {
+            if matches!(holder.phase(), Phase::Consented | Phase::Signing) {
                 if let Some(f) = holder.funding() {
-                    // Not reserved unless she signed before stopping.
+                    // Not reserved unless she signed before stopping: at
+                    // Consented, her signature never left, the step it
+                    // made unstored.
                     let _ = self.wallet.abandon_silent(&f.tx.compute_txid());
                 }
             }
@@ -409,7 +426,20 @@ impl<T: Transport, C: Chain> Driver<'_, T, C> {
         let holder = self.holder();
         let funding = holder.funding().map(|f| f.tx.compute_txid());
         let state = holder.to_bytes();
-        self.store.save(&self.id, holder.phase(), funding, &state)?;
+        if let Err(e) = self.store.save(&self.id, holder.phase(), funding, &state) {
+            // Her signature, say, never sent unless stored: her machine as
+            // stored again, if it can be read.
+            let stored = self.store.state(&self.id).and_then(|(state, _)| {
+                Holder::load(&state, &self.wallet.contract_secrets().seed, &ctx)
+            });
+            match stored {
+                Ok(stored) => self.holder = Some(stored),
+                Err(e) => {
+                    tracing::warn!(id = %crate::hex_id(&self.id), "reloading an opening: {e:#}")
+                }
+            }
+            return Err(e.context(Unsaved));
+        }
         // Where an opening's time goes, step by step.
         let (id, phase) = (crate::hex_id(&self.id), holder.phase());
         tracing::info!(%id, ?phase, took = ?started.elapsed(), "an opening's step taken");
@@ -424,7 +454,11 @@ impl<T: Transport, C: Chain> Driver<'_, T, C> {
         };
         let txid = f.tx.compute_txid();
         match self.chain.broadcast(f.tx).await {
-            Ok(()) => tracing::info!(%id, %txid, "F broadcast"),
+            Ok(()) => {
+                self.took_f
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!(%id, %txid, "F broadcast")
+            }
             Err(e) => tracing::warn!(%id, %txid, "broadcasting F: {e}"),
         }
     }

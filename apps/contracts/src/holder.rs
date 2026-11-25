@@ -338,6 +338,7 @@ async fn open_once<T: Transport, C: Chain>(
         id,
         holder: Some(holder),
         quote: Some(offer.quote),
+        took_f: Default::default(),
     };
     let driven = driver.drive(outs).await;
     let driven = driver.carry_on(driven, resumes).await;
@@ -407,6 +408,11 @@ pub async fn resume<T: Transport, C: Chain>(
         if overdue(contract.phase, contract.created_at, now) {
             tracing::warn!(id = %crate::hex_id(&id), "an opening not opened in a day: given up");
             store.abandon(&id, "not opened in a day")?;
+            // Reserved if she signed her deposit into F, a step unstored:
+            // her signature never left.
+            if let Some(f) = contract.funding {
+                let _ = wallet.abandon_silent(&f);
+            }
             continue;
         }
         let (state, _) = store.state(&id)?;
@@ -433,8 +439,14 @@ pub async fn resume<T: Transport, C: Chain>(
             id,
             holder: Some(holder),
             quote: None,
+            took_f: Default::default(),
         };
-        let resumed = driver.resume().await;
+        // Her coin taken back from F, which she signed first: nothing more
+        // to tell its hub.
+        let resumed = match canceled(wallet, driver.holder()) {
+            Some(_) => Ok(()),
+            None => driver.resume().await,
+        };
         if let Err(e) = driver.settle(resumed) {
             tracing::warn!(id = %crate::hex_id(&id), "resuming an opening: {e:#}");
             // Her deposit signed into F: watched all the same, and her
@@ -1077,7 +1089,7 @@ async fn refresh<T: Transport, C: Chain>(driver: &Driver<'_, T, C>, chain: &C) -
         // Freed already, or spent: nothing to free.
         let _ = driver.wallet.abandon_silent(&txid);
         tracing::warn!(id = %crate::hex_id(&driver.id), %txid, ?fate, "F will not confirm: her coin freed");
-    } else if fate == Fate::Open && cancel(driver, chain, holder, tip).await? {
+    } else if fate == Fate::Open && cancel(driver, chain, holder, tip, block.is_some()).await? {
         // Canceled: F confirms no more, but a block taking it before.
     } else if fate == Fate::Open {
         // Her coin kept for F: a wallet rewinding past it, as a reorg
@@ -1090,40 +1102,70 @@ async fn refresh<T: Transport, C: Chain>(driver: &Driver<'_, T, C>, chain: &C) -
     Ok(())
 }
 
+/// Whether she canceled F, which she signed first: her deposit spent by
+/// her wallet otherwise, with the height of the block it is spent in, if
+/// any.
+fn canceled<T: Transport>(wallet: &Wallet<T>, holder: &Holder) -> Option<Option<u32>> {
+    let f = holder.funding()?;
+    holder.signed_at()?;
+    let deposit = f.tx.input[f.deposit].previous_output;
+    match wallet.silent_spender(&deposit) {
+        Ok(Some((by, at))) if by != f.tx.compute_txid() => Some(at),
+        _ => None,
+    }
+}
+
 /// Her coin spent back to her wallet, the cancel broadcast, if she signed
-/// her deposit into F first and the hub never answered it whole, nor is F
-/// in a block or a mempool her chain sees, [`F_UNSEEN`] blocks after she
-/// signed: whether she canceled, now or before. It pays at most F's rate,
-/// so that it never takes the place of an F a mempool holds, which may
-/// confirm still: it is left waiting there.
+/// her deposit into F first and F is in no block (`in_block`, however
+/// shallow) nor in a mempool her chain sees, [`F_UNSEEN`] blocks after she
+/// signed: whether she canceled, now or before. F answered whole is handed
+/// to the network first, and canceled only if refused (signed otherwise
+/// by the hub, say): she never checks its signatures. The cancel pays at
+/// most F's rate, so that it never takes the place of an F a mempool
+/// holds, which may confirm still: it is left waiting there. One her
+/// wallet cannot make (her coin no longer kept for F) is left undone.
 async fn cancel<T: Transport, C: Chain>(
     driver: &Driver<'_, T, C>,
     chain: &C,
     holder: &Holder,
     tip: u32,
+    in_block: bool,
 ) -> Result<bool> {
     let (Some(f), Some(at)) = (holder.funding(), holder.signed_at()) else {
         return Ok(false);
     };
-    if holder.wholly_funded() {
-        return Ok(false);
-    }
     let txid = f.tx.compute_txid();
     let id = crate::hex_id(&driver.id);
-    let canceled = matches!(
-        driver.wallet.silent_spender(&f.tx.input[f.deposit].previous_output),
-        Ok(Some((by, _))) if by != txid
-    );
-    if !canceled {
-        if tip < at.saturating_add(F_UNSEEN) {
-            return Ok(false);
-        }
-        match chain.in_mempool(&txid).await {
-            Ok(Some(true)) => return Ok(false),
-            Ok(_) => {}
-            Err(e) => {
-                tracing::debug!(%id, %txid, "is F in a mempool: {e}");
+    match canceled(driver.wallet, holder) {
+        // In a block: nothing more to do.
+        Some(Some(_)) => return Ok(true),
+        // Broadcast again below.
+        Some(None) => {}
+        None => {
+            if in_block || tip < at.saturating_add(F_UNSEEN) {
                 return Ok(false);
+            }
+            match chain.in_mempool(&txid).await {
+                Ok(Some(true)) => return Ok(false),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(%id, %txid, "is F in a mempool: {e}");
+                    return Ok(false);
+                }
+            }
+            // F whole, taken from her this time already, or now: it may
+            // confirm still.
+            if holder.wholly_funded() {
+                if driver.took_f.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Ok(false);
+                }
+                match chain.broadcast(f.tx).await {
+                    Ok(()) => {
+                        tracing::warn!(%id, %txid, "F seen nowhere since she signed it: broadcast again");
+                        return Ok(false);
+                    }
+                    Err(e) => tracing::warn!(%id, %txid, "F answered whole, refused: {e}"),
+                }
             }
         }
     }
@@ -1138,7 +1180,13 @@ async fn cancel<T: Transport, C: Chain>(
         Ok(Some(rate)) => rate.min(most),
         _ => most,
     };
-    let tx = driver.wallet.cancel_signed(f.tx, f.deposit, rate)?;
+    let tx = match driver.wallet.cancel_signed(f.tx, f.deposit, rate) {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::debug!(%id, %txid, "her coin not canceled: {e}");
+            return Ok(false);
+        }
+    };
     let by = tx.compute_txid();
     match chain.broadcast(&tx).await {
         Ok(()) => {

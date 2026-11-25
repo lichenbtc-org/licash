@@ -100,8 +100,8 @@ pub fn fee_rate_of(block: &Block, height: u32) -> Option<FeeRate> {
 /// Where `holder`'s F stands on `chain`, its inputs looked up in the
 /// blocks from `since` to the tip, only those whose filter (where the
 /// chain serves them) matches a coin they spend: none before she knows F.
-/// Once live, with the block F is in, its height and hash: while the
-/// chain keeps that block, F stays buried.
+/// With the block F is in, if any, its height and hash, however shallow:
+/// once live, while the chain keeps that block, F stays buried.
 pub async fn fate(
     holder: &Holder,
     chain: &impl Chain,
@@ -155,7 +155,7 @@ pub async fn fate(
         Ok(fate) => fate,
         Err(e) => match e {},
     };
-    Ok(fate.map(|fate| (fate, found.filter(|_| fate == Fate::Live))))
+    Ok(fate.map(|fate| (fate, found)))
 }
 
 /// Refused unless the block of `hash` at `height` is still the best
