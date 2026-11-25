@@ -225,7 +225,15 @@ async fn serve(
     let router =
         licash_bridge::router(bridge.clone()).layer(tower_http::trace::TraceLayer::new_for_http());
     let rounds = tokio::spawn(licash_bridge::rounds(bridge.clone(), every));
-    let nwc = tokio::spawn(licash_bridge::nwc::run(bridge));
+    // Relays come and go: served again a while after they fail.
+    let nwc = tokio::spawn(async move {
+        loop {
+            if let Err(e) = licash_bridge::nwc::run(bridge.clone()).await {
+                tracing::warn!("NWC stopped, starting again in 10 s: {e:#}");
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+    });
     let shutdown = async {
         let terminate = async {
             #[cfg(unix)]
@@ -242,18 +250,10 @@ async fn serve(
             _ = terminate => {}
         }
     };
-    tokio::select! {
-        served = axum::serve(listener, router).with_graceful_shutdown(shutdown) => {
-            served.context("serve")?;
-        }
-        ended = nwc => {
-            anyhow::bail!("NWC stopped: {}", match ended {
-                Ok(Err(e)) => format!("{e:#}"),
-                Ok(Ok(())) => "for no reason".into(),
-                Err(e) => e.to_string(),
-            });
-        }
-    }
+    let served = axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown)
+        .await;
+    nwc.abort();
     rounds.abort();
-    Ok(())
+    served.context("serve")
 }
