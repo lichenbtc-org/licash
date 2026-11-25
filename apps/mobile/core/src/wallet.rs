@@ -35,6 +35,7 @@ const DAY: i64 = 86_400;
 
 mod autobackup;
 mod backup;
+mod bridges;
 mod codes;
 mod cold;
 mod contacts;
@@ -52,6 +53,10 @@ mod shaping;
 mod stats;
 mod vias;
 
+pub use bridges::{
+    AppTerms, Bridge, BridgeAccount, BridgeApp, BridgeLine, BridgeTopUp, BudgetPeriod,
+    ConnectedApp, ExportedNotes, ImportSource, ImportedNotes, TopUpRules,
+};
 pub use contacts::Contact;
 pub use samples::BalanceSample;
 pub use stats::{BalancePoint, Flow, HubAmount, StatEvent, Stats, Unlink, Way};

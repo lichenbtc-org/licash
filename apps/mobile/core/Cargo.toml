@@ -46,6 +46,7 @@ tracing-subscriber.workspace = true
 uniffi = "0.32.2"
 
 [dev-dependencies]
+licash-bridge = { path = "../../bridge" }
 licash-contracts = { path = "../../contracts", default-features = false, features = ["testing"] }
 licash-chain-client.workspace = true
 licash-hub.workspace = true

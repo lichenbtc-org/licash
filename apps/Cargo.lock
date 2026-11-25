@@ -3649,6 +3649,7 @@ dependencies = [
  "hex",
  "licash",
  "licash-api",
+ "licash-bridge",
  "licash-chain-client",
  "licash-contracts",
  "licash-hub",
