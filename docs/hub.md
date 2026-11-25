@@ -420,18 +420,26 @@ take one. A wallet of its own,
 funded with what the hub may lock, bounds the collateral at stake.
 `/v1/info` names its fixed terms: the cap (131,071 sat), the price a wallet
 pays to open one (the holder's 20,000 sat reserve and the hub's opening fee,
-`--contracts-fee`, 3,000 sat by default, what it charges for what it brings)
-and the blocks to its close (1,000); the openings take
-`/v1/contracts`. With `--contracts-max-cap SAT`, wallets may also choose a
-contract's cap up to that and how long it lasts up to
-`--contracts-max-blocks` (`/v1/contracts/quote?cap=SAT&blocks=N`), its cap
+`--contracts-fee`, 10,000 sat by default, half a year's interest at 20% on
+the 100,000 sat reserve the hub locks in every contract) and the blocks to its
+close (1,000); the openings take `/v1/contracts`. By default wallets may also
+choose a contract's cap up to `--contracts-max-cap` (33,554,431 sat by
+default) and how long it lasts up to `--contracts-max-blocks` (a year of
+Bitcoin's blocks, 52,560, by default) (`/v1/contracts/quote?cap=SAT&blocks=N`);
+`--contracts-fixed-only` offers the fixed terms alone, at their price with no
+interest, as hubs did by default before. Its cap
 one of the sizes (`2^n - 1` sat, 131,071 to 2,147,483,647; the operator's
 largest rounded down to one) whatever the coin the wallet deposits (any
 coin paying the price, the hub funding the rest of the cap), at the reserve
 and opening fee plus
 `--contracts-rate` millionths of the part of the cap the hub funds a year
-(of its network's blocks, 52,560 or Mutinynet's 1,051,200; 10,000, 1% a
-year, by default). A wallet funds part of the cap itself
+(of its network's blocks, 52,560 or Mutinynet's 1,051,200; 200,000, 20% a
+year, by default: the hub's own bitcoin locked is what it charges for, not
+its reserve or fee). A hub with a range prices its fixed terms by that rate
+too. The app opens by default the smallest contract the deposit fills, the
+hub funding the rest of it, so a hub mostly lends room to receive, on
+average about a quarter over the deposit; a wallet opens unasked no contract
+whose fee and interest are more than half the coin paying it. A wallet funds part of the cap itself
 (`&funded=SAT`, every contract): its coin is spent whole in F, paying the
 price and, as that part, all the rest of it but less than dust (no change
 comes back), `--contracts-rate-funded` millionths of it a year (none by

@@ -100,6 +100,7 @@ async fn serve(
     };
     let openings = Openings::with_wallet(dir, chain, source.clone(), keyset, range);
     let openings = openings.await?;
+    openings.charge_opening(OPENING_FEE);
     witnessed(&openings, &hub).await?;
     let deposits = deposits_for(&hub, &source, dir, &openings)?;
     // An opening takes a deposit of the hub's for her reserve, which it
@@ -546,6 +547,12 @@ async fn a_wallet_quoted_before_the_hub_surcharged_opens_on_a_quote_asked_again(
     ensure!(holder::list(&mine.join("wallet.sqlite"))?.len() == 2);
     Ok(())
 }
+
+/// The opening fee of every hub here, before its surcharge: the fee these
+/// tests' coins are sized by, a fixed contract's price 23 000 sat, the
+/// default once. What a hub charges by default is pinned by its terms' own
+/// tests.
+const OPENING_FEE: u64 = 3_000;
 
 /// A coin an opening spends whole, no change coming back: a fixed contract's
 /// price, 23 000 sat, and what is left of it hers to fund, in notes.
@@ -2504,6 +2511,7 @@ async fn hub_answering_following(
     };
     let openings = Openings::with_wallet(dir, chain, source.clone(), keyset, range);
     let openings = openings.await?;
+    openings.charge_opening(OPENING_FEE);
     witnessed(&openings, &hub).await?;
     // Its ledger against holders' claims, as the hub service's.
     licash_hub_service::answer_from(&openings, hub.clone());
@@ -4915,6 +4923,7 @@ async fn restarted(s: &Stale) -> Result<Arc<Openings>> {
     let dir = s._dir.path().join("hub");
     let openings =
         Openings::with_wallet(&dir, source.clone(), source, keyset, Some(STALE_RANGE)).await?;
+    openings.charge_opening(OPENING_FEE);
     witnessed(&openings, &s.hub).await?;
     licash_hub_service::answer_from(&openings, s.hub.clone());
     Ok(openings)
@@ -5389,6 +5398,7 @@ async fn restored(rt: &Regtest, dir: &Path) -> Result<(Arc<Hub>, Arc<Openings>)>
     let keyset = hub.info().keysets[0].clone();
     let openings =
         Openings::with_wallet(dir, source.clone(), source, keyset, Some(STALE_RANGE)).await?;
+    openings.charge_opening(OPENING_FEE);
     witnessed(&openings, &hub).await?;
     licash_hub_service::answer_from(&openings, hub.clone());
     Ok((hub, openings))
@@ -6089,6 +6099,7 @@ async fn hub_taking_deposits(
     let deposits = deposit::Gateway::open(hub.clone(), source.clone(), regtest, config, &path)?;
     let deposits = Arc::new(deposits);
     let openings = openings.await?;
+    openings.charge_opening(OPENING_FEE);
     witnessed(&openings, &hub).await?;
     licash_hub_service::close_with_deposits(&openings, deposits.clone());
     // On its lock checkpoints, issuing her funded notes and answering
