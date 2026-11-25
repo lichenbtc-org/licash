@@ -403,18 +403,7 @@ impl Wallet {
     /// alone is reached over HTTPS, or HTTP for an onion service.
     pub fn add_hub(&self, url: String) -> Result<Hub, LicashError> {
         let _timed = crate::log::timed("add_hub");
-        let url = url.trim();
-        let host = url.split("://").nth(1).unwrap_or(url);
-        let host = host.split(['/', ':']).next().unwrap_or(host);
-        let onion = host.ends_with(".onion");
-        if onion && self.tor.is_none() {
-            return Err(LicashError::NeedsTor);
-        }
-        let url = match url.contains("://") {
-            true => url.to_owned(),
-            false if onion => format!("http://{url}"),
-            false => format!("https://{url}"),
-        };
+        let url = self.hub_url(&url)?;
         let url = url.as_str();
         let info = self.operation(self.wallet.add_hub(url))?;
         self.onions();
@@ -424,6 +413,17 @@ impl Wallet {
             .find(|(_, i)| i.address == info.address)
             .map(|(url, _)| url);
         Ok(hub(&kept.unwrap_or_else(|| url.to_owned()), &info))
+    }
+
+    /// What the hub at `url` says of itself now, nothing kept and the hub
+    /// not trusted: to tell before adding it whether it has room for a
+    /// contract ([`crate::contract_room`]), as it says this minute. Refused
+    /// as [`Wallet::add_hub`] refuses it.
+    pub fn hub_says(&self, url: String) -> Result<Hub, LicashError> {
+        let _timed = crate::log::timed("hub_says");
+        let url = self.hub_url(&url)?;
+        let info = self.operation(self.wallet.hub_info(&url))?;
+        Ok(hub(&url, &info))
     }
 
     /// [`Wallet::add_hub`] again, for what the hub at `url` serves now,
@@ -1043,6 +1043,23 @@ impl Wallet {
 }
 
 impl Wallet {
+    /// The URL a hub is reached at, as typed: a host alone over HTTPS, or
+    /// HTTP for an onion service, which needs Tor.
+    fn hub_url(&self, url: &str) -> Result<String, LicashError> {
+        let url = url.trim();
+        let host = url.split("://").nth(1).unwrap_or(url);
+        let host = host.split(['/', ':']).next().unwrap_or(host);
+        let onion = host.ends_with(".onion");
+        if onion && self.tor.is_none() {
+            return Err(LicashError::NeedsTor);
+        }
+        Ok(match url.contains("://") {
+            true => url.to_owned(),
+            false if onion => format!("http://{url}"),
+            false => format!("https://{url}"),
+        })
+    }
+
     /// `run` to its end, as an operation the owner asked for: in a lane
     /// of its own, its requests on connections and Tor circuits no other
     /// operation's share ([`Lane::Operation`]). What runs by itself, in
@@ -2141,6 +2158,8 @@ fn hub(url: &str, info: &licash_api::Info) -> Hub {
             blocks: c.blocks,
             mock: c.mock,
             range: c.range.map(Into::into),
+            funds: c.funds.map(u64::from),
+            full: c.full,
         }),
     }
 }
@@ -2370,6 +2389,54 @@ mod tests {
     use licash_wallet::{Deposit, DepositState};
 
     use super::{before_fee, seen_paid};
+
+    /// What the app goes by to gray a hub: open unless the hub says it
+    /// is full or funds none of its smallest contract, as hubs before any
+    /// said either read.
+    #[test]
+    fn a_hub_has_room_for_a_contract_unless_it_says_otherwise() {
+        use crate::{contract_room, ContractRange, ContractTerms, HubRoom};
+        let terms = ContractTerms {
+            cap: 131_071,
+            price: 23_000,
+            blocks: 1_000,
+            mock: false,
+            range: None,
+            funds: None,
+            full: false,
+        };
+        assert_eq!(contract_room(terms), HubRoom::Open);
+        let full = ContractTerms {
+            full: true,
+            ..terms
+        };
+        assert_eq!(contract_room(full), HubRoom::Full);
+        let funds = |funds| ContractTerms {
+            funds: Some(funds),
+            ..terms
+        };
+        assert_eq!(contract_room(funds(0)), HubRoom::Unfunded);
+        assert_eq!(contract_room(funds(131_071)), HubRoom::Open);
+        // More than fits a hub's 32 bits is still room, not none.
+        assert_eq!(contract_room(funds(u64::MAX)), HubRoom::Open);
+        // Against the smallest it lets a wallet choose, where it does.
+        let ranged = ContractTerms {
+            range: Some(ContractRange {
+                min_cap: 262_143,
+                max_cap: 1_048_575,
+                min_blocks: 432,
+                max_blocks: 52_560,
+                per_coin: 2,
+                reserve: 20_000,
+                fee: 3_000,
+                ppm_year: 10_000,
+                ppm_year_funded: 0,
+                year_blocks: 52_560,
+            }),
+            ..funds(131_071)
+        };
+        assert_eq!(contract_room(ranged), HubRoom::Unfunded);
+    }
 
     #[test]
     fn a_deposit_another_paid_moves_once_no_coin_shows_its_payment() {

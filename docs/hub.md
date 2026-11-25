@@ -447,6 +447,16 @@ balance, asked each minute with `getbalances`, less the hub's 100,000 sat
 reserve and 50,000 for fees): a larger cap is refused as unavailable. A
 login limited by `-rpcwhitelist` needs `getbalances` among its calls, or
 the hub advertises the range's largest cap whatever its wallet holds.
+For a wallet to choose a hub by before it pays a deposit, `/v1/info` also
+says, under `contracts`, `funds`: the most of a cap its wallet funds now,
+of the caps it offers and no more of its balance than those tell (absent
+until `getbalances` answered), and `full: true` while a new opening is
+refused (as many contracts live, or openings under way or unfunded, as it
+takes; absent otherwise). They are hints, up to a minute old: the offer is
+what binds. A hub saying neither, as one of an earlier version, reads as
+having room; the app grays a recommended or announced hub that is full or
+funds none of its smallest cap, and `licash-wallet contract-terms` prints
+`room none` with why (`room` and `funds` with `--json`).
 The collateral of a contract is its cap exactly, every size of all ones in
 as many bits. A contract
 opens on a block as deep in the hub's scan as its lock checkpoints, which

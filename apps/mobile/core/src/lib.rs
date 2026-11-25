@@ -215,6 +215,40 @@ pub struct ContractTerms {
     /// The caps and durations the wallet may choose instead, if the hub
     /// lets it.
     pub range: Option<ContractRange>,
+    /// The most of a contract's cap the hub funds now, in sat, as it last
+    /// said: none if it did not, as hubs before any did.
+    #[uniffi(default = None)]
+    pub funds: Option<u64>,
+    /// Whether it refuses new contracts now, as it last said.
+    #[uniffi(default = false)]
+    pub full: bool,
+}
+
+/// Whether a hub has room for a new contract, as it last said
+/// ([`contract_room`]): a hint to choose a hub by, not a promise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum HubRoom {
+    /// It opens them, as far as it says, or says nothing of it.
+    Open,
+    /// It refuses new contracts now: as many as it takes.
+    Full,
+    /// It funds none of even the smallest now: only one its holder funds
+    /// whole opens there.
+    Unfunded,
+}
+
+/// Whether the hub offering `terms` has room for a new contract now, as
+/// it last said: what a wallet goes by before a deposit is paid for one.
+/// Open unless it says otherwise.
+#[uniffi::export]
+pub fn contract_room(terms: ContractTerms) -> HubRoom {
+    let sat = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
+    let least = terms.range.map_or(terms.cap, |r| r.min_cap);
+    match licash_api::Room::of(terms.full, terms.funds.map(sat), sat(least)) {
+        licash_api::Room::Open => HubRoom::Open,
+        licash_api::Room::Full => HubRoom::Full,
+        licash_api::Room::Unfunded => HubRoom::Unfunded,
+    }
 }
 
 /// The caps and durations a hub lets a wallet choose for a contract, and

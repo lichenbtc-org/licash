@@ -336,6 +336,15 @@ pub fn terms(
     let terms = Terms::of(hub, &offered, cap, blocks, funded)?;
     let mut value = terms.json();
     let mut lines = terms.lines(wallet.network().blocks_a_day());
+    // Whether it has room for one, as it last said: known before a coin is sent.
+    let (room, why) = room(&offered);
+    value["room"] = json!(room);
+    if let Some(funds) = offered.funds {
+        value["funds"] = json!(funds);
+    }
+    if let Some(why) = why {
+        lines.push_str(&format!("\nroom         none: {why}"));
+    }
     if let Some(range) = offered.range {
         let sizes = range.sizes();
         value["sizes"] = json!(sizes);
@@ -360,6 +369,25 @@ pub fn terms(
     }
     show(json, value, lines);
     Ok(())
+}
+
+/// Whether the hub offering `offered` has room for a new contract, as it
+/// last said, in a word, and why not in a line: none while it has, or says
+/// nothing of it, as hubs before any did.
+fn room(offered: &licash_api::Contracts) -> (&'static str, Option<&'static str>) {
+    match offered.room() {
+        licash_api::Room::Open => ("open", None),
+        licash_api::Room::Full => (
+            "full",
+            Some("this hub can't open new contracts right now, try later or another hub"),
+        ),
+        licash_api::Room::Unfunded => (
+            "unfunded",
+            Some(
+                "this hub funds none of a contract right now, only one you fund whole opens there",
+            ),
+        ),
+    }
 }
 
 /// A contract's terms and what opening it costs, itemized: the hub's
@@ -955,6 +983,8 @@ mod tests {
             blocks: 1_000,
             mock: true,
             range,
+            funds: None,
+            full: false,
         }
     }
 
@@ -1012,6 +1042,31 @@ mod tests {
         let over = Terms::of("hub", &offered, None, None, offered.cap + 1);
         let e = over.err().expect("refused").to_string();
         assert!(e.contains("more than the contract's"), "{e}");
+    }
+
+    #[test]
+    fn a_hub_with_no_room_is_said_before_a_coin_is_sent() {
+        // Saying nothing of it, as hubs before any did, or with room: no line.
+        assert_eq!(room(&offered(None)), ("open", None));
+        let full = licash_api::Contracts {
+            full: true,
+            ..offered(Some(range()))
+        };
+        let (word, why) = room(&full);
+        assert_eq!(word, "full");
+        assert!(why.unwrap().contains("another hub"));
+        let short = licash_api::Contracts {
+            funds: Some(131_070),
+            ..offered(Some(range()))
+        };
+        let (word, why) = room(&short);
+        assert_eq!(word, "unfunded");
+        assert!(why.unwrap().contains("you fund whole"));
+        let funded = licash_api::Contracts {
+            funds: Some(131_071),
+            ..offered(Some(range()))
+        };
+        assert_eq!(room(&funded), ("open", None));
     }
 
     #[test]
