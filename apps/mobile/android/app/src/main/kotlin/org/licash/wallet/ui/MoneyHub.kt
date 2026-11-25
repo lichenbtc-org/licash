@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import org.licash.core.Activity
 import org.licash.core.Contract
 import org.licash.core.ContractQuote
 import org.licash.core.ContractState
@@ -53,6 +54,7 @@ internal fun HubPage(
     payOwn: (link: String, address: String) -> Unit,
     fail: (String) -> Unit,
     changed: () -> Unit,
+    open: (Activity) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val hub = ui.hubs.find { sameHub(it.url, holding.hub) }
@@ -392,9 +394,11 @@ internal fun HubPage(
             engine,
             holding,
             others,
-            moved = {
+            // Under way: its line of the history shows how it goes, to the end.
+            moved = { line ->
                 moving = false
                 changed()
+                open(line)
             },
             dismiss = { moving = false },
         )

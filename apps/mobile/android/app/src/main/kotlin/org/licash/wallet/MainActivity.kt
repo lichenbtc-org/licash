@@ -234,6 +234,7 @@ private fun App(engine: Engine, link: String?, linkShown: () -> Unit) {
                                 go = { screen = s.copy(at = it) },
                                 cashOut = { hub, amount -> screen = Screen.Send(null, hub, s, amount = amount) },
                                 payOwn = { link, own -> screen = Screen.Send(link, from = s, own = own) },
+                                open = { screen = Screen.Details(it, s) },
                             ) { screen = s.from }
                             is Screen.Details -> ActivityDetails(engine, ui, s.activity) { screen = s.from }
                         }

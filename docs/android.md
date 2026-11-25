@@ -99,7 +99,9 @@ so instead of how much is protected.
 Every tap answers. A button doing work shows it, with the seconds; a sheet
 that starts work stays open on it and gives the reason in place if it
 fails; a close of a protection goes on in the background if the sheet is
-left. A payment's outcome, a finished action and a switch are felt as a
+left. Moving notes to another hub (advanced mode, on a hub's page) opens
+the move's line of the history once it starts, so its progress shows until
+it arrives. A payment's outcome, a finished action and a switch are felt as a
 short haptic, which follows the system's touch feedback setting and asks no
 permission, and an outcome's title is announced by a screen reader. Screens
 fade and slide a little the way they go, and the steps of a payment fade;

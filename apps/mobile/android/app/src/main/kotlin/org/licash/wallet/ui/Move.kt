@@ -28,6 +28,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import org.licash.core.Activity
 import org.licash.core.Holding
 import org.licash.core.LicashException
 import org.licash.core.MoveQuote
@@ -45,7 +46,7 @@ import org.licash.wallet.sat
  * tried. It stays open while a move is under way.
  */
 @Composable
-fun MoveSheet(engine: Engine, from: Holding, hubs: List<Holding>, moved: () -> Unit, dismiss: () -> Unit) {
+fun MoveSheet(engine: Engine, from: Holding, hubs: List<Holding>, moved: (Activity) -> Unit, dismiss: () -> Unit) {
     val others = hubs.filter { it.hub != from.hub }
     var to by remember { mutableStateOf(others.firstOrNull()?.hub) }
     var text by remember { mutableStateOf("") }
@@ -120,7 +121,7 @@ fun MoveSheet(engine: Engine, from: Holding, hubs: List<Holding>, moved: () -> U
                 } else if (shown != null) {
                     // The chosen first, then the rest as preferred.
                     val order = listOf(shown[chosen]) + shown.filterIndexed { i, _ -> i != chosen }
-                    engine.moveNotes(order).onSuccess { moved() }.onFailure { e ->
+                    engine.moveNotes(order).onSuccess { moved(it) }.onFailure { e ->
                         error = explain(e)
                         // Its fee rose: offered again at the new price, to accept or not.
                         if (e is LicashException.FeeRose) {

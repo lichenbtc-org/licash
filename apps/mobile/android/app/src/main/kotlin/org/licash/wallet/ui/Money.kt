@@ -34,6 +34,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import org.licash.core.Activity
 import org.licash.core.Holding
 import org.licash.core.Notes
 import org.licash.wallet.Engine
@@ -62,6 +63,7 @@ fun Money(
     go: (String?) -> Unit,
     cashOut: (hub: String, amount: ULong?) -> Unit,
     payOwn: (link: String, address: String) -> Unit,
+    open: (Activity) -> Unit,
     back: () -> Unit,
 ) {
     var holdings by remember { mutableStateOf<List<Holding>?>(null) }
@@ -108,6 +110,7 @@ fun Money(
                 payOwn = payOwn,
                 fail = fail,
                 changed = { changed++ },
+                open = open,
             )
         }
         Spacer(Modifier.height(48.dp))
