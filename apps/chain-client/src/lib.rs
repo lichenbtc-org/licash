@@ -486,6 +486,38 @@ impl Source {
         }
     }
 
+    /// Whether the source holds `txid`: in its mempool, or, an Esplora's,
+    /// in its chain too.
+    pub async fn holds(&self, txid: &Txid) -> anyhow::Result<bool> {
+        match &self.kind {
+            Kind::Rpc { .. } => {
+                let entry: anyhow::Result<Value> = self
+                    .call("getmempoolentry", json!([txid.to_string()]))
+                    .await;
+                match entry {
+                    Ok(_) => Ok(true),
+                    // RPC_INVALID_ADDRESS_OR_KEY: not in its mempool.
+                    Err(e) if format!("{e:#}").contains("(-5)") => Ok(false),
+                    Err(e) => Err(e),
+                }
+            }
+            Kind::Esplora { base } => {
+                let url = format!("{base}/tx/{txid}/status");
+                let response = self
+                    .client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{self}: {}", e.without_url()))?;
+                match response.status() {
+                    reqwest::StatusCode::NOT_FOUND => Ok(false),
+                    status if status.is_success() => Ok(true),
+                    status => bail!("{self}: {url}: HTTP {status}"),
+                }
+            }
+        }
+    }
+
     /// Hand `txs` to the network as one package, a child after its
     /// parents: a parent paying less than the source's mempool takes alone
     /// relays with the child paying for both. Where the source takes no

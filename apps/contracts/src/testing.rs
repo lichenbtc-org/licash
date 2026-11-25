@@ -148,7 +148,11 @@ fn build(id: u32) -> Opened {
     );
     // true is the holder's effect; false is the hub's.
     let mut queue: VecDeque<_> = first.into_iter().map(|o| (true, o)).collect();
+    // Until she holds F whole, as the hub answers her signed consent.
     while let Some((alice, out)) = queue.pop_front() {
+        if holder.wholly_funded() {
+            break;
+        }
         let (side, more) = match out {
             Out::Send(bytes) if alice => (false, hub.step(Input::Message(bytes), &ctx).unwrap()),
             Out::Send(bytes) => (true, holder.step(Input::Message(bytes), &ctx).unwrap()),
@@ -219,12 +223,12 @@ fn build(id: u32) -> Opened {
                     (false, hub.step(Input::Signed(funding), &ctx).unwrap())
                 }
             }
-            Out::Broadcast(_) if !alice => break,
+            Out::Broadcast(_) if !alice => continue,
             other => panic!("unexpected fixture effect {other:?}"),
         };
         queue.extend(more.into_iter().map(|out| (side, out)));
     }
-    assert_eq!(holder.phase(), opening::Phase::Funded);
+    assert!(holder.wholly_funded());
     assert_eq!(hub.phase(), opening::HubPhase::Funded);
     Opened {
         seed,

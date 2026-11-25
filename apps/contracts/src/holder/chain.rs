@@ -19,6 +19,13 @@ pub trait Chain: Blocks {
     /// Hand `tx` to the network; one it has already is no error.
     fn broadcast(&self, tx: &Transaction) -> impl Future<Output = Result<(), String>> + Send;
 
+    /// Whether `txid` is in the network's mempool, as far as the chain
+    /// can tell: none where it cannot, as by default.
+    fn in_mempool(&self, txid: &Txid) -> impl Future<Output = Result<Option<bool>, String>> + Send {
+        let _ = txid;
+        async { Ok(None) }
+    }
+
     /// Hand `txs`, a child after its parents, to the network as one
     /// package where the chain takes packages: a parent paying less than
     /// the mempool takes alone relays with its child. By default, each in

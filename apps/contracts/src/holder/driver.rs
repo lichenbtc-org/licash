@@ -343,15 +343,14 @@ impl<T: Transport, C: Chain> Driver<'_, T, C> {
         Ok(())
     }
 
-    /// `driven`, or, where it failed short of F but for a refusal (an
+    /// `driven`, or, where it failed short of F whole but for a refusal (an
     /// instance's upload dropped over Tor, say), the opening resumed up to
     /// `tries` times, sending none the hub answered.
     pub async fn carry_on(&mut self, mut driven: Result<()>, tries: u32) -> Result<()> {
         for n in 1..=tries {
             match &driven {
                 Err(e)
-                    if e.downcast_ref::<Refusal>().is_none()
-                        && self.holder().phase() < Phase::Funded =>
+                    if e.downcast_ref::<Refusal>().is_none() && !self.holder().wholly_funded() =>
                 {
                     let id = crate::hex_id(&self.id);
                     tracing::warn!(%id, n, "carrying an opening on: {e:#}");

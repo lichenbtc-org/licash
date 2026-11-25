@@ -437,7 +437,11 @@ pub async fn resume<T: Transport, C: Chain>(
         let resumed = driver.resume().await;
         if let Err(e) = driver.settle(resumed) {
             tracing::warn!(id = %crate::hex_id(&id), "resuming an opening: {e:#}");
-            continue;
+            // Her deposit signed into F: watched all the same, and her
+            // coin taken back if the hub never answers F whole.
+            if driver.holder().phase() < Phase::Funded {
+                continue;
+            }
         }
         if let Err(e) = refresh(&driver, chain).await {
             tracing::warn!(id = %crate::hex_id(&id), "watching F: {e:#}");
@@ -1040,9 +1044,16 @@ fn smallest(coins: Vec<SilentCoin>, least: u64) -> Option<SilentCoin> {
         .min_by_key(|c| c.value)
 }
 
+/// How many blocks after she signed her deposit into F first, F in none
+/// and in no mempool her chain sees, she takes her coin back
+/// ([`refresh`]): the hub, which alone holds F whole, withholds it, or
+/// never heard.
+pub const F_UNSEEN: u32 = 6;
+
 /// Watch the F of the opening `driver` drives, once she signed it: its
 /// fate stored, her coin freed if F can never confirm, or once it lapsed
-/// unconfirmed.
+/// unconfirmed; or spent back to her, if she signed first and F is seen
+/// nowhere [`F_UNSEEN`] blocks on.
 async fn refresh<T: Transport, C: Chain>(driver: &Driver<'_, T, C>, chain: &C) -> Result<()> {
     let holder = driver.holder();
     if holder.phase() != Phase::Funded {
@@ -1066,6 +1077,8 @@ async fn refresh<T: Transport, C: Chain>(driver: &Driver<'_, T, C>, chain: &C) -
         // Freed already, or spent: nothing to free.
         let _ = driver.wallet.abandon_silent(&txid);
         tracing::warn!(id = %crate::hex_id(&driver.id), %txid, ?fate, "F will not confirm: her coin freed");
+    } else if fate == Fate::Open && cancel(driver, chain, holder, tip).await? {
+        // Canceled: F confirms no more, but a block taking it before.
     } else if fate == Fate::Open {
         // Her coin kept for F: a wallet rewinding past it, as a reorg
         // makes it, forgets what reserved it. Refused once a block
@@ -1075,6 +1088,65 @@ async fn refresh<T: Transport, C: Chain>(driver: &Driver<'_, T, C>, chain: &C) -
         }
     }
     Ok(())
+}
+
+/// Her coin spent back to her wallet, the cancel broadcast, if she signed
+/// her deposit into F first and the hub never answered it whole, nor is F
+/// in a block or a mempool her chain sees, [`F_UNSEEN`] blocks after she
+/// signed: whether she canceled, now or before. It pays at most F's rate,
+/// so that it never takes the place of an F a mempool holds, which may
+/// confirm still: it is left waiting there.
+async fn cancel<T: Transport, C: Chain>(
+    driver: &Driver<'_, T, C>,
+    chain: &C,
+    holder: &Holder,
+    tip: u32,
+) -> Result<bool> {
+    let (Some(f), Some(at)) = (holder.funding(), holder.signed_at()) else {
+        return Ok(false);
+    };
+    if holder.wholly_funded() {
+        return Ok(false);
+    }
+    let txid = f.tx.compute_txid();
+    let id = crate::hex_id(&driver.id);
+    let canceled = matches!(
+        driver.wallet.silent_spender(&f.tx.input[f.deposit].previous_output),
+        Ok(Some((by, _))) if by != txid
+    );
+    if !canceled {
+        if tip < at.saturating_add(F_UNSEEN) {
+            return Ok(false);
+        }
+        match chain.in_mempool(&txid).await {
+            Ok(Some(true)) => return Ok(false),
+            Ok(_) => {}
+            Err(e) => {
+                tracing::debug!(%id, %txid, "is F in a mempool: {e}");
+                return Ok(false);
+            }
+        }
+    }
+    let paid = (f.prevouts.iter().map(|o| o.value.to_sat()).sum::<u64>())
+        .saturating_sub(f.tx.output.iter().map(|o| o.value.to_sat()).sum());
+    // F's rate as she holds it, the hub's inputs unsigned: more than it
+    // pays, yet her cancel, smaller, pays less than F in all, as one
+    // taking its place must not.
+    let most =
+        bitcoin::FeeRate::from_sat_per_kwu((paid * 1_000 / f.tx.weight().to_wu().max(1)).max(250));
+    let rate = match chain.fee_rate(6).await {
+        Ok(Some(rate)) => rate.min(most),
+        _ => most,
+    };
+    let tx = driver.wallet.cancel_signed(f.tx, f.deposit, rate)?;
+    let by = tx.compute_txid();
+    match chain.broadcast(&tx).await {
+        Ok(()) => {
+            tracing::warn!(%id, %txid, cancel = %by, "F seen nowhere since she signed it: her coin spent back")
+        }
+        Err(e) => tracing::warn!(%id, %txid, cancel = %by, "broadcasting her cancel of F: {e}"),
+    }
+    Ok(true)
 }
 
 fn found(store: &Store, id: &[u8; 32]) -> Result<Contract> {
