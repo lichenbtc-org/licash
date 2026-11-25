@@ -2590,6 +2590,21 @@ impl Openings {
             }
             return self.give_up_unfunded(id, outpoint, by).await;
         }
+        // F whole, as the hub holds it once she signed first, in no
+        // mempool of its node: broadcast again, as after a restart of the
+        // node or an eviction.
+        let whole = f.tx.input.iter().all(|i| !i.witness.is_empty());
+        if untouched && whole && !hub.lapsed(tip) {
+            match self.source.broadcast(f.tx).await {
+                Ok(_) => {
+                    tracing::info!(id = %crate::hex_id(id), %txid, "F in no mempool: broadcast again");
+                    return Ok(Played::Idle);
+                }
+                Err(e) => {
+                    tracing::debug!(id = %crate::hex_id(id), %txid, "broadcasting F again: {e:#}")
+                }
+            }
+        }
         let due = tip >= since.saturating_add(UNFUNDED_FOR) || hub.lapsed(tip);
         if !due || !untouched {
             return Ok(Played::Idle);
@@ -2704,7 +2719,7 @@ impl Openings {
 
     /// Whether `coin` is unspent: by the blocks, and by the mempool too
     /// if `mempool`.
-    async fn unspent(&self, coin: OutPoint, mempool: bool) -> Result<bool> {
+    pub(super) async fn unspent(&self, coin: OutPoint, mempool: bool) -> Result<bool> {
         let out: Option<serde_json::Value> = self
             .wallet
             .rpc_optional(

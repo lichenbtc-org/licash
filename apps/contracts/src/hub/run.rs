@@ -345,6 +345,15 @@ impl Openings {
                         .filter(|(i, _)| !inputs.contains(i))
                         .map(|(_, (input, coin))| (input.previous_output, coin.clone()))
                         .collect();
+                    // Her deposit, which she signed into F, is still hers
+                    // to spend as the hub signs: else F never confirms,
+                    // and the hub's coins wait on it.
+                    for (deposit, _) in &theirs {
+                        let unspent = self.unspent(*deposit, true).await;
+                        if !unspent.map_err(Refused::unavailable)? {
+                            return Err(Refused::bad("her deposit is spent"));
+                        }
+                    }
                     // No contract is signed that its witnesses would not keep
                     // the answers of.
                     let witnesses = self.witnesses().map_err(Refused::unavailable)?;
