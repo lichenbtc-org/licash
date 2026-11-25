@@ -1132,6 +1132,44 @@ async fn a_coin_signed_into_anothers_transaction_is_reserved_for_it() {
     s.wallet.spend_silent(elsewhere(), None, rate()).unwrap();
 }
 
+/// The other party never completed the transaction the wallet's coin was
+/// signed into: the coin spent back to the wallet in its place, the same
+/// cancel each time asked, and found as its change once mined.
+#[tokio::test]
+async fn a_coin_signed_into_anothers_transaction_is_canceled_back_to_the_wallet() {
+    let s = setup().await;
+    s.wallet.watch_silent(HUB, 1).unwrap();
+    let paying = s.pay(&[s.address()], &[10_000]);
+    s.mine(vec![paying]);
+    s.scan().await.unwrap();
+    let coin = s.wallet.silent_coins().unwrap()[0].outpoint;
+    let (tx, prevouts) = shared(&s.chain.lock().unwrap(), coin, 55_000);
+
+    // Nothing to cancel before it is signed into it; never their coin.
+    let early = s.wallet.cancel_signed(&tx, 1, rate());
+    assert!(matches!(early, Err(Error::Invalid(_))), "{early:?}");
+    s.wallet.sign_input(&tx, &prevouts, 1).unwrap();
+    let theirs = s.wallet.cancel_signed(&tx, 0, rate());
+    assert!(matches!(theirs, Err(Error::Invalid(_))), "{theirs:?}");
+
+    let cancel = s.wallet.cancel_signed(&tx, 1, rate()).unwrap();
+    assert_eq!(cancel.input.len(), 1);
+    assert_eq!(cancel.input[0].previous_output, coin);
+    assert_eq!(cancel.output.len(), 1);
+    let id = cancel.compute_txid();
+    assert_eq!(s.wallet.silent_coins().unwrap()[0].spending, Some(id));
+    assert_eq!(s.wallet.cancel_signed(&tx, 1, rate()).unwrap(), cancel);
+    // Signed into it no more.
+    let again = s.wallet.sign_input(&tx, &prevouts, 1);
+    assert!(matches!(again, Err(Error::NoteTaken)), "{again:?}");
+
+    s.mine(vec![cancel]);
+    s.scan().await.unwrap();
+    let coins = s.wallet.silent_coins().unwrap();
+    assert_eq!(coins.len(), 1);
+    assert!(coins[0].change && coins[0].outpoint.txid == id);
+}
+
 #[tokio::test]
 async fn a_coin_set_aside_under_a_marker_is_taken_by_nothing_until_freed() {
     let s = setup().await;
