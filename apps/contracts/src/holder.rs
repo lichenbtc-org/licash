@@ -142,7 +142,8 @@ pub async fn open_anyway<T: Transport, C: Chain>(
 
 /// One opening as [`open_once`], or, refused as the hub quotes otherwise
 /// now (its fee surcharged since, say), given up and made once more on a
-/// quote asked anew: within her ceilings still.
+/// quote asked anew: within her ceilings still. Turned away busy at its
+/// start, made anew a while later, as [`driver::Busy`] waits.
 async fn open_at<T: Transport, C: Chain>(
     wallet: &Wallet<T>,
     chain: &C,
@@ -152,13 +153,23 @@ async fn open_at<T: Transport, C: Chain>(
     sane: bool,
     resumes: u32,
 ) -> Result<Contract> {
-    let opened = open_once(wallet, chain, wallet_file, hub, ask, sane, resumes).await;
-    match opened {
-        Err(e) if e.downcast_ref::<driver::Requote>().is_some() => {
-            tracing::info!(%hub, "its quote refused as the hub's no longer: asked again: {e:#}");
-            open_once(wallet, chain, wallet_file, hub, ask, sane, resumes).await
+    let (mut requoted, mut busy, mut again) = (false, driver::Busy::default(), 0);
+    loop {
+        match open_once(wallet, chain, wallet_file, hub, ask, sane, resumes).await {
+            Err(e) if !requoted && e.downcast_ref::<driver::Requote>().is_some() => {
+                tracing::info!(%hub, "its quote refused as the hub's no longer: asked again: {e:#}");
+                requoted = true;
+            }
+            Err(e)
+                if e.downcast_ref::<driver::Later>().is_some()
+                    && again < driver::OPENS_AGAIN
+                    && busy.wait().await =>
+            {
+                again += 1;
+                tracing::info!(%hub, again, "turned away busy: opening again: {e:#}");
+            }
+            opened => return opened,
         }
-        opened => opened,
     }
 }
 
@@ -905,8 +916,15 @@ pub async fn offer<T: Transport>(
     if !asked.is_empty() {
         url.push_str(&format!("?{}", asked.join("&")));
     }
-    let response = wallet.transport().request(&url, None).await;
-    let response = response.map_err(|e| anyhow!("{hub}: {e}"))?;
+    // Turned away busy, asked again a while: see [`driver::Busy`].
+    let mut busy = driver::Busy::default();
+    let response = loop {
+        let response = wallet.transport().request(&url, None).await;
+        let response = response.map_err(|e| anyhow!("{hub}: {e}"))?;
+        if response.status != 503 || !busy.wait().await {
+            break response;
+        }
+    };
     ensure!(
         response.status == 200,
         "{hub} offers no contracts{}: status {}: {}",

@@ -49,4 +49,5 @@ faults = ["node"]
 k256 = "0.13"
 licash-statement = { path = "../../crates/licash-statement", features = ["testing"] }
 tempfile = "3.27"
+tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }

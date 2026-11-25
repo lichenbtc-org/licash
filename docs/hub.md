@@ -397,7 +397,15 @@ Contract HTTP requests have separate admission budgets for new openings,
 progress and instance downloads; excess requests receive 503 before body
 buffering or node RPC. Four concurrent instance downloads remain supported.
 Admission lasts through response delivery, with a five-minute deadline for
-request handling. Onion services accept at most 128 streams and allow two minutes
+request handling. A holder turned away as unavailable asks again after a
+jittered wait that doubles from about 2 seconds to 30, for up to 3 minutes:
+in place for an opening under way (an instance upload cut short too, which
+a 25 MB body learns of as its connection closed rather than as the 503;
+not one whose answer alone was lost, which the opening's resumption sends
+again only if the hub did not answer it),
+and from a new quote at an opening's start, whose deposit the hub gave up
+with it, at most twice: each asks for another of the 8 deposits a coin may
+ask a hub for. Onion services accept at most 128 streams and allow two minutes
 to receive HTTP headers, without limiting a valid response's duration.
 
 With `--nostr-relay URL --announce-url URL` (and `--chain`), the hub
