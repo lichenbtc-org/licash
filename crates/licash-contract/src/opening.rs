@@ -1024,11 +1024,12 @@ impl Holder {
                         let funded = self.funded.as_ref().unwrap();
                         if !wholly_signed(funded) {
                             whole(&o.funding, &tx)?;
+                            // Hers, if not the very signature she holds: one
+                            // she sent before, left unstored, and signed
+                            // again since (each signs with fresh randomness).
                             let mine = at(&o.funding, self.deposit());
-                            ensure!(
-                                tx.input[mine].witness == funded.input[mine].witness,
-                                "her deposit signed otherwise"
-                            );
+                            check_key_spend(&tx, mine, &o.prevouts)
+                                .context("her deposit signed otherwise")?;
                             self.funded = Some(tx);
                         } else {
                             ensure!(tx.compute_txid() == funded.compute_txid(), "another F");
@@ -2421,6 +2422,27 @@ mod tests {
             .step(message(id, Kind::Funded, poisoned.encode()), &ctx)
             .is_err());
         assert!(!a.wholly_funded());
+        // Another signature of hers, as one she sent before, left
+        // unstored, and signed again since: hers, taken.
+        let mut resigned = poisoned.clone();
+        let hash = SighashCache::new(&resigned.funding)
+            .taproot_key_spend_signature_hash(0, &Prevouts::All(&prevouts), TapSighashType::Default)
+            .unwrap();
+        let tweaked = key.tap_tweak(SECP256K1, None);
+        let sig = SECP256K1.sign_schnorr_with_aux_rand(
+            &Message::from_digest(hash.to_byte_array()),
+            tweaked.as_keypair(),
+            &[9; 32],
+        );
+        resigned.funding.input[0].witness = Witness::from_slice(&[sig.as_ref()]);
+        assert_ne!(resigned.funding, a.funded.clone().unwrap());
+        let mut other = Holder::load(&a.to_bytes(), &[1; 32], &ctx).unwrap();
+        other
+            .step(message(id, Kind::Funded, resigned.encode()), &ctx)
+            .unwrap();
+        assert!(other.wholly_funded());
+        let other = Holder::load(&other.to_bytes(), &[1; 32], &ctx).unwrap();
+        assert_eq!(other.funded, Some(resigned.funding));
         a.step(Input::Message(sent(&funded, Kind::Funded)), &ctx)
             .unwrap();
         reload(&mut a, &mut h, &ctx);
