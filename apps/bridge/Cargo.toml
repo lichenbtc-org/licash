@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 licash.workspace = true
 licash-api.workspace = true
+licash-nostr.workspace = true
 licash-store.workspace = true
 licash-wallet.workspace = true
 licash-tor.workspace = true

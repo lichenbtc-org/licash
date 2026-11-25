@@ -77,6 +77,10 @@ enum Command {
         /// Open, the most accounts it registers in any hour.
         #[arg(long, default_value_t = 60)]
         registrations_per_hour: u64,
+        /// Open, announce the bridge at --public-url on its relays, for
+        /// wallets to find it (`licash-wallet discover --bridges`).
+        #[arg(long, requires_all = ["open", "public_url"])]
+        announce: bool,
         /// Seconds between rounds following payments and invoices.
         #[arg(long, default_value_t = 5)]
         interval: u64,
@@ -174,6 +178,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             public_url,
             max_accounts,
             registrations_per_hour,
+            announce,
             interval,
         } => {
             let wallet =
@@ -194,7 +199,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 registrations_per_hour: Some(registrations_per_hour),
             };
             let bridge = Arc::new(Bridge::open(wallet, config)?);
-            runtime.block_on(serve(bridge, listen, Duration::from_secs(interval.max(1))))
+            let route = match &cli.proxy {
+                Some(proxy) => licash_nostr::Route::socks(proxy)?,
+                None => licash_nostr::Route::Direct,
+            };
+            let announce = announce.then_some(route);
+            let every = Duration::from_secs(interval.max(1));
+            runtime.block_on(serve(bridge, listen, every, announce))
         }
         Command::Status => {
             let wallet = Wallet::open(&path, transport(cli.proxy.as_deref())?)?;
@@ -273,10 +284,32 @@ fn only_hub(wallet: &Wallet<Http>) -> anyhow::Result<String> {
     }
 }
 
+/// Announce `bridge` at its public URL on its relays, reached by `route`,
+/// for good.
+async fn announce(bridge: Arc<Bridge<Http>>, route: licash_nostr::Route) {
+    let config = bridge.config();
+    let Some(url) = config.public_url.clone() else {
+        return;
+    };
+    let announcement = licash_nostr::Announcement {
+        urls: vec![url],
+        network: bridge.wallet().network().name().to_owned(),
+        name: config.name.clone(),
+    };
+    // The key its info names: wallets take only what it announced.
+    let secret = bridge.keys().secret_key().to_secret_bytes();
+    let role = licash_nostr::Role::Bridge;
+    match licash_nostr::Announcer::new(&secret, role, &config.relays, &route).await {
+        Ok(announcer) => announcer.run(announcement).await,
+        Err(e) => tracing::error!("announcing on Nostr: {e:#}"),
+    }
+}
+
 async fn serve(
     bridge: Arc<Bridge<Http>>,
     listen: SocketAddr,
     every: Duration,
+    announcing: Option<licash_nostr::Route>,
 ) -> anyhow::Result<()> {
     let hub = bridge.config().hub.clone();
     bridge
@@ -291,6 +324,7 @@ async fn serve(
     let router =
         licash_bridge::router(bridge.clone()).layer(tower_http::trace::TraceLayer::new_for_http());
     let rounds = tokio::spawn(licash_bridge::rounds(bridge.clone(), every));
+    let announced = announcing.map(|route| tokio::spawn(announce(bridge.clone(), route)));
     // Relays come and go: served again a while after they fail.
     let nwc = tokio::spawn(async move {
         loop {
@@ -321,5 +355,8 @@ async fn serve(
         .await;
     nwc.abort();
     rounds.abort();
+    if let Some(announced) = announced {
+        announced.abort();
+    }
     served.context("serve")
 }

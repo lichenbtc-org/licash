@@ -3409,6 +3409,7 @@ dependencies = [
  "licash-api",
  "licash-hub",
  "licash-hub-service",
+ "licash-nostr",
  "licash-store",
  "licash-tor",
  "licash-transport",
