@@ -261,7 +261,13 @@ impl Wallet {
             cap,
             deposit: None,
         };
-        let coin = holder::paid::coin(&self.wallet, &hub, ask, 0);
+        // As large as a provider pays out at least, the rest hers.
+        let to = self.wallet.fallback_address()?.to_string();
+        let floor = match &from {
+            Some(from) => self.payout_least(&to, from)?,
+            None => self.payout_least(&to, &self.richest()?)?,
+        };
+        let coin = holder::paid::coin(&self.wallet, &hub, ask, floor.unwrap_or(0));
         let coin = self.operation(coin).map_err(unavailable)?;
         let payout = self.payout_quote(coin.to.clone(), Some(coin.value), from)?;
         Ok(PaidContractQuote {
@@ -298,12 +304,14 @@ impl Wallet {
             .contracting
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let coin = holder::paid::coin(&self.wallet, &hub, ask, 0);
+        // The coin quoted, of the contract quoted: the hub's terms the same.
+        let coin = holder::paid::coin_worth(&self.wallet, &hub, ask, quote.value);
         let coin = self.operation(coin).map_err(unavailable)?;
-        if (coin.value, coin.to.as_str()) != (quote.value, quote.payout.address.as_str()) {
+        let fitted = (u64::from(coin.fit.cap), u64::from(coin.fit.funded));
+        if fitted != (quote.cap, quote.funded) || coin.to != quote.payout.address {
             return Err(LicashError::invalid(format!(
-                "the contract now takes a coin of {} sat, not {}: ask again",
-                coin.value, quote.value
+                "a coin of {} sat now opens a contract of {} sat, not {}: ask again",
+                quote.value, fitted.0, quote.cap
             )));
         }
         let ticketed = self.ticketed(&quote.payout)?;

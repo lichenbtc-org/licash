@@ -298,6 +298,34 @@ impl Wallet {
         })
     }
 
+    /// The least a swap provider announced pays out to `address`, the
+    /// wallet's own, from `hub`, by their own terms: what a coin it pays
+    /// itself, to open a contract on, is raised to, as a provider refused one
+    /// of a contract's price and her part on Mutinynet, its smallest coin
+    /// risen with fees. None if none answering pays out from there.
+    pub(crate) fn payout_least(
+        &self,
+        address: &str,
+        hub: &str,
+    ) -> Result<Option<u64>, LicashError> {
+        let relays = hub_relays(&self.wallet)?;
+        if relays.is_empty() {
+            return Ok(None);
+        }
+        let network = self.wallet.network().name();
+        let refreshed = self.announced.refresh(&relays, &self.route, network);
+        (self.operation(refreshed))
+            .map_err(|e| LicashError::from_any(e, |reason| LicashError::Unavailable { reason }))?;
+        let infos = self.operation(self.announced.infos(&self.wallet, &relays))?;
+        let mut least = None;
+        for info in &infos {
+            if let Some(one) = (self.wallet).payout_least(info, hub, address, claim_rate())? {
+                least = Some(least.map_or(one, |l: u64| l.min(one)));
+            }
+        }
+        Ok(least)
+    }
+
     /// The hub trusted holding the most.
     pub(super) fn richest(&self) -> Result<String, LicashError> {
         let balance = self.wallet.balance()?.into_iter();

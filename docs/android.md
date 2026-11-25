@@ -401,7 +401,10 @@ With no coin
 on Bitcoin paying any, opened from a hub's page, the sheet offers the cover
 the same way for what is not protected there and a coin to cash out to the
 wallet first: its price and a 1,000 sat part, the hub funding the rest of
-the cap (the largest smaller cover a hub bounding it by the coin allows).
+the cap (the largest smaller cover a hub bounding it by the coin allows),
+the part larger if a provider pays out no coin that small (the least an
+announced one pays out, its minimum risen with fees). Paid as quoted: the
+coin quoted must still open the contract quoted, else it is quoted again.
 Once the coin arrives, Protect opens on it. Priced live as the
 hub prices it: its cost (the hub's opening fee and its yearly interest on each
 part, itemized on a tap) apart from her reserve, "refundable", each with an

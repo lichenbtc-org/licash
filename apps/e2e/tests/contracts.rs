@@ -59,6 +59,13 @@ async fn a_wallet_with_no_coin_pays_for_a_contract_with_notes() -> anyhow::Resul
     };
     let coin = paid::coin(&alice, hub1, ask, 0).await?;
     assert_eq!(coin.to, alice.fallback_address()?.to_string());
+    // Asked again for the coin quoted, as the app opens it: the same.
+    assert_eq!(paid::coin_worth(&alice, hub1, ask, coin.value).await?, coin);
+    // Raised to a provider's least: her part larger, of the same contract.
+    let raised = paid::coin(&alice, hub1, ask, coin.value + 5_000).await?;
+    assert!(raised.value >= coin.value + 5_000, "{raised:?}");
+    assert_eq!(raised.fit.cap, coin.fit.cap);
+    assert!(raised.fit.funded > coin.fit.funded, "{raised:?}");
     // Its provider found on the relay it announces itself on, as the app
     // finds it.
     let relays = [eco.relay().to_owned()];

@@ -84,6 +84,37 @@ pub async fn coin<T: Transport>(
     ask: Ask,
     floor: u64,
 ) -> Result<Coin> {
+    let planned = |pricing: &Pricing, dust: u64, notes: (&[u64], usize), least: u32| {
+        plan(pricing, ask.blocks, dust, notes, (least, floor))
+    };
+    sized(wallet, hub, ask, planned).await
+}
+
+/// The coin of [`coin`], worth `value` exactly, as quoted before: the
+/// contract it fits now ([`fit`]), refused if none of `ask`'s cap. Of the
+/// same terms, the same contract as quoted, whatever the least a provider
+/// pays out is now.
+pub async fn coin_worth<T: Transport>(
+    wallet: &Wallet<T>,
+    hub: &str,
+    ask: Ask,
+    value: u64,
+) -> Result<Coin> {
+    let fitted = |pricing: &Pricing, dust: u64, notes: (&[u64], usize), least: u32| {
+        fit(pricing, ask.blocks, value, dust, notes, least).map(|fitted| (value, fitted))
+    };
+    sized(wallet, hub, ask, fitted).await
+}
+
+/// The coin to pay for to open a contract at `hub` as `ask`ed, of the value
+/// and contract `size` chooses of its terms: of its pricing, dust, funding
+/// notes and least cap.
+async fn sized<T: Transport>(
+    wallet: &Wallet<T>,
+    hub: &str,
+    ask: Ask,
+    size: impl FnOnce(&Pricing, u64, (&[u64], usize), u32) -> Option<(u64, Fit)>,
+) -> Result<Coin> {
     ensure!(
         ask.deposit.is_none(),
         "a coin paid for is the deposit: none other to name"
@@ -115,7 +146,7 @@ pub async fn coin<T: Transport>(
     let dust = fixed.quote.graph.dust;
     let least = ask.cap.unwrap_or(0);
     let notes = (&denominations[..], notes);
-    let (value, fitted) = plan(&pricing, ask.blocks, dust, notes, (least, floor))
+    let (value, fitted) = size(&pricing, dust, notes, least)
         .context("no contract of this hub to pay for: none of the cap asked")?;
     let price = pricing.price(fitted.cap, ask.blocks, fitted.funded);
     ensure!(
