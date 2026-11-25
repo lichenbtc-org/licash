@@ -22,6 +22,10 @@ use licash_transport::Http;
 use licash_wallet::{Transport as _, Wallet};
 use lichen_btc::regtest::Regtest;
 
+/// Many holders at once ([`load`]).
+#[path = "contracts/load.rs"]
+mod load;
+
 /// Whether the wallet's file at `wallet` holds the holder's contracts: made
 /// with the first contract opened, and by no reading of them.
 fn holds_contracts(wallet: &std::path::Path) -> Result<bool> {
