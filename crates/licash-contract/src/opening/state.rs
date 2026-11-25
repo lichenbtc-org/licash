@@ -500,3 +500,66 @@ impl Hub {
         })
     }
 }
+
+/// Snapshots written by FORMAT 5, the format of every opening stored
+/// before her deposit was signed first: of the unit opening's hub and
+/// holder ([`super::tests`]), captured as that format wrote them. Each is
+/// read as it was then: live contracts are never written again.
+#[cfg(test)]
+mod format5 {
+    use super::*;
+
+    const HOLDER_CONSENTED: &[u8] = include_bytes!("../../tests/data/format5/holder-consented.bin");
+    const HOLDER_SIGNING: &[u8] = include_bytes!("../../tests/data/format5/holder-signing.bin");
+    const HOLDER_FUNDED: &[u8] = include_bytes!("../../tests/data/format5/holder-funded.bin");
+    const HUB_CONSENTED: &[u8] = include_bytes!("../../tests/data/format5/hub-consented.bin");
+    const HUB_SIGNED: &[u8] = include_bytes!("../../tests/data/format5/hub-signed.bin");
+    const HUB_FUNDED: &[u8] = include_bytes!("../../tests/data/format5/hub-funded.bin");
+
+    fn ctx() -> Context {
+        Context {
+            tip: 1,
+            trust: Trust::mock(),
+        }
+    }
+
+    fn holder(bytes: &[u8]) -> Holder {
+        Holder::load(bytes, &[1; 32], &ctx()).unwrap()
+    }
+
+    #[test]
+    fn a_funded_contract_is_read_and_played_by_either_side() {
+        let a = holder(HOLDER_FUNDED);
+        assert_eq!(a.phase(), Phase::Funded);
+        let h = Hub::load(HUB_FUNDED, &ctx()).unwrap();
+        assert_eq!(h.phase(), HubPhase::Funded);
+        assert_eq!(Hub::peek(HUB_FUNDED).unwrap().phase, HubPhase::Funded);
+        let (ao, ho) = (a.signed().unwrap(), h.signed().unwrap());
+        assert_eq!(ao.funding, ho.funding);
+        assert!(ho.default_close().is_ok());
+        assert!(!a.abandonable() && !h.abandonable());
+    }
+
+    /// The hub signed F: it is irrevocable, and her app finishes it,
+    /// signing her deposit and broadcasting F herself.
+    #[test]
+    fn an_opening_the_hub_signed_finishes_as_it_began() {
+        let h = Hub::load(HUB_SIGNED, &ctx()).unwrap();
+        assert_eq!(h.phase(), HubPhase::Signed);
+        assert!(!h.abandonable());
+        let a = holder(HOLDER_SIGNING);
+        assert_eq!(a.phase(), Phase::Signing);
+        let sign = a.pending().unwrap();
+        assert!(
+            matches!(&sign[..], [Out::Sign { inputs, .. }] if inputs.len() == 1),
+            "{sign:?}"
+        );
+    }
+
+    #[test]
+    fn an_opening_short_of_signatures_is_read() {
+        assert_eq!(holder(HOLDER_CONSENTED).phase(), Phase::Consented);
+        let h = Hub::load(HUB_CONSENTED, &ctx()).unwrap();
+        assert_eq!(h.phase(), HubPhase::Consented);
+    }
+}
