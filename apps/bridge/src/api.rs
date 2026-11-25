@@ -68,6 +68,7 @@ pub fn router<T: Transport + 'static>(bridge: Arc<Bridge<T>>) -> Router {
         .route(bridge::TOP_UP, post(top_up::<T>))
         .route(bridge::WITHDRAW, post(withdraw::<T>))
         .route(bridge::USERNAME, post(username::<T>))
+        .route(bridge::EXPORT, post(export::<T>))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(shared.clone())
         .merge(crate::lnurl::router(shared.bridge.clone()))
@@ -156,4 +157,19 @@ async fn username<T: Transport>(
 ) -> Answer<bridge::Account> {
     let (key, named): (_, bridge::Username) = s.open(bridge::USERNAME, body)?;
     json(s.bridge.set_username(&key, named.username.as_deref()))
+}
+
+async fn export<T: Transport>(
+    State(s): State<Arc<Shared<T>>>,
+    body: Result<Json<Signed>, JsonRejection>,
+) -> Answer<bridge::Exported> {
+    let (key, bridge::Empty {}) = s.open(bridge::EXPORT, body)?;
+    // Its notes are every account's: only its owner's, of a bridge for its
+    // owner alone. An open bridge's operator exports them on its command
+    // line.
+    if s.bridge.config().open {
+        return Err(Error::Restricted("an open bridge exports to its operator only".into()).into());
+    }
+    s.bridge.account(&key)?;
+    json(s.bridge.export(&key).await)
 }

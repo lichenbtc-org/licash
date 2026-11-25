@@ -84,6 +84,23 @@ enum Command {
         #[arg(long)]
         renew: bool,
     },
+    /// Freeze the bridge for good and seal its notes to KEY, a wallet's
+    /// key here (`licash-wallet bridge show` names it), for that wallet to
+    /// claim in a recovery should the hub stop cooperating: printed, or
+    /// written to --out. Every account's notes: an open bridge's operator
+    /// exports them to a wallet of its own. Stop `run` first.
+    Export {
+        to: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Pay out again after an export, once the wallet the notes went to
+    /// discarded them (`licash-wallet bridge discard`): a note claimed by
+    /// both is lost to both.
+    Unfreeze {
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 fn main() -> std::process::ExitCode {
@@ -188,6 +205,40 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     "Short     {} sat",
                     (status.owed / 1000).saturating_sub(status.held)
                 );
+            }
+            Ok(())
+        }
+        Command::Export { to, out } => {
+            let mut key = [0u8; 32];
+            hex::decode_to_slice(to.trim(), &mut key).context("KEY: a key in hex, of 32 bytes")?;
+            let wallet = Wallet::open(&path, transport(cli.proxy.as_deref())?)?;
+            let bridge = Bridge::open(wallet, Config::default())?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let exported = runtime.block_on(bridge.export(&key))?;
+            let text = hex::encode(&exported.export.0);
+            match out {
+                Some(out) => std::fs::write(&out, format!("{text}\n"))
+                    .with_context(|| format!("writing {}", out.display()))?,
+                None => println!("{text}"),
+            }
+            eprintln!(
+                "Frozen: {} notes worth {} sat exported. It pays nothing out until unfrozen.",
+                exported.notes, exported.amount
+            );
+            Ok(())
+        }
+        Command::Unfreeze { yes } => {
+            anyhow::ensure!(
+                yes,
+                "only once the wallet its notes went to discarded them: --yes says it did"
+            );
+            let wallet = Wallet::open(&path, transport(cli.proxy.as_deref())?)?;
+            let bridge = Bridge::open(wallet, Config::default())?;
+            match bridge.unfreeze()? {
+                true => println!("Unfrozen: it pays out again."),
+                false => println!("Not frozen."),
             }
             Ok(())
         }

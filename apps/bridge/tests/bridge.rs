@@ -894,3 +894,77 @@ async fn a_lightning_address_is_paid_and_zapped() {
     assert!(net.bridge.zap_receipts().unwrap().is_empty());
     assert_eq!(balance(&net, &owner), 24_000);
 }
+
+#[tokio::test]
+async fn an_owner_freezes_the_bridge_and_imports_its_notes_to_claim() {
+    let net = Net::new(false).await;
+    let wallet = net.user(9, 200).await;
+    wallet.add_bridge(BRIDGE, Some(&net.pairing)).await.unwrap();
+    wallet.top_up_bridge(BRIDGE, HUB, 30, None).await.unwrap();
+    net.settle(&wallet).await;
+    let held = net.bridge.status().unwrap().held;
+    assert!(held >= 29, "{held}");
+
+    // Not while a payment is under way, whose notes are its lock's; frozen
+    // from the first ask all the same.
+    let request = net.node.invoice(1_000, [12; 32], 18, Outcome::Hang);
+    let db = rusqlite::Connection::open(net.dir.path().join("bridge.sqlite")).unwrap();
+    db.execute(
+        "INSERT INTO bridge_payments (hash, account, connection, invoice, amount, reserved,
+            state, started_at, created_at)
+         VALUES (?1, 1, NULL, ?2, 1000, 0, 'pending', ?3, ?3)",
+        rusqlite::params![[12u8; 32], request, licash_store::now()],
+    )
+    .unwrap();
+    let early = wallet.export_bridge(BRIDGE).await;
+    assert!(
+        matches!(&early, Err(licash_wallet::Error::Unavailable { .. })),
+        "{early:?}"
+    );
+    assert!(net.bridge.status().unwrap().frozen);
+    net.bridge.round().await.unwrap();
+
+    let (imported, export) = wallet.export_bridge(BRIDGE).await.unwrap();
+    assert_eq!(imported.amount, held);
+    assert_eq!(imported.source, net.bridge.keys().public_key().to_hex());
+    assert_eq!(wallet.imported_notes().unwrap()[0].amount, held);
+    // Frozen: nothing paid out, no invoice made; the same export again.
+    let paid = wallet.withdraw_bridge(BRIDGE, HUB, 5).await;
+    assert!(
+        matches!(&paid, Err(licash_wallet::Error::Invalid(m)) if m.contains("exported")),
+        "{paid:?}"
+    );
+    assert!(wallet.top_up_bridge(BRIDGE, HUB, 5, None).await.is_err());
+    let again = wallet.export_bridge(BRIDGE).await.unwrap().0;
+    assert_eq!((again.added, again.known), (0, imported.added));
+    assert!(wallet.import_notes(&export).is_ok());
+
+    // Discarded by its owner, unfrozen by its operator: it pays again.
+    wallet.discard_imported(&imported.source).unwrap();
+    assert!(net.bridge.unfreeze().unwrap());
+    assert!(!net.bridge.unfreeze().unwrap());
+    wallet.withdraw_bridge(BRIDGE, HUB, 5).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_open_bridge_exports_to_its_operator_only() {
+    let net = Net::new(true).await;
+    let wallet = net.user(9, 50).await;
+    wallet.add_bridge(BRIDGE, None).await.unwrap();
+    let refused = wallet.export_bridge(BRIDGE).await;
+    assert!(
+        matches!(&refused, Err(licash_wallet::Error::Invalid(m)) if m.contains("operator")),
+        "{refused:?}"
+    );
+    assert!(!net.bridge.status().unwrap().frozen);
+    // Its operator's, on the command line: to a key of its choosing.
+    let key = wallet.bridge_key(&net.bridge.info().unwrap()).unwrap();
+    let mut to = [0u8; 32];
+    hex::decode_to_slice(&key, &mut to).unwrap();
+    let exported = net.bridge.export(&to).await.unwrap();
+    assert!(net.bridge.status().unwrap().frozen);
+    assert_eq!(
+        wallet.import_notes(&exported.export.0).unwrap().added as u64,
+        exported.notes
+    );
+}

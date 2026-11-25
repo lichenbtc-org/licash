@@ -154,6 +154,9 @@ pub struct Bridge<T> {
     keys: Keys,
     /// The payments being made or followed now, by hash.
     paying: Mutex<HashSet<[u8; 32]>>,
+    /// Held while its notes change hands other than by payments (unlinked)
+    /// or are exported: never both at once.
+    notes: tokio::sync::Mutex<()>,
 }
 
 /// A payment being made or followed, for as long as it is held.
@@ -229,6 +232,7 @@ impl<T: Transport> Bridge<T> {
             config,
             keys: Keys::new(secret),
             paying: Mutex::new(HashSet::new()),
+            notes: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -306,6 +310,64 @@ impl<T: Transport> Bridge<T> {
             Ok(())
         })?;
         Ok(Some(pairing))
+    }
+
+    /// Freeze it for good, then seal every note its wallet holds to `to`,
+    /// an x-only key, for the wallet of that key at this bridge to claim in
+    /// a recovery of its own should the hub stop cooperating. Frozen
+    /// first: it pays nothing out, takes no new invoice, nor unlinks, from
+    /// then on; the invoices it made are still taken. Refused while a
+    /// payment is under way, whose notes are its lock's: exported once
+    /// decided. The same again exports the same notes, and those received
+    /// meanwhile.
+    pub async fn export(&self, to: &[u8; 32]) -> Result<licash_api::bridge::Exported, Error> {
+        let at = now();
+        self.store.write(|tx| {
+            tx.execute(
+                "UPDATE bridge_meta SET frozen_at = COALESCE(frozen_at, ?1)",
+                [at],
+            )?;
+            Ok(())
+        })?;
+        let _notes = self.notes.lock().await;
+        let pending = self.store.read(|c| Ok(store::pending_payments(c)?.len()))?;
+        let paying = !self
+            .paying
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty();
+        if pending > 0 || paying {
+            return Err(Error::Unavailable(format!(
+                "frozen, but {pending} payments are under way: exported once they are decided"
+            )));
+        }
+        let source = self.keys.public_key().to_bytes();
+        let sealed = self
+            .wallet
+            .export_notes(&source, to)
+            .map_err(wallet_error)?;
+        tracing::warn!(
+            to = %hex::encode(to), notes = sealed.notes, amount = sealed.amount,
+            "frozen, its notes exported"
+        );
+        Ok(licash_api::bridge::Exported {
+            export: licash_api::Hex(sealed.sealed),
+            notes: sealed.notes as u64,
+            amount: sealed.amount,
+        })
+    }
+
+    /// Pay out again, if frozen: whether it was. Only once the wallet its
+    /// notes were exported to discarded them, as two claims of a note
+    /// void it in both.
+    pub fn unfreeze(&self) -> Result<bool, Error> {
+        self.store.write(|tx| {
+            let n = tx.execute(
+                "UPDATE bridge_meta SET frozen_at = NULL WHERE frozen_at IS NOT NULL",
+                [],
+            )?;
+            Ok(n == 1)
+        })
     }
 
     fn not_frozen(&self) -> Result<(), Error> {
@@ -682,6 +744,10 @@ impl<T: Transport> Bridge<T> {
             .ok_or_else(|| Error::Invalid("an amount out of range".into()))?;
         let at = now();
         let payment = self.store.write(|tx| {
+            // Here too: frozen meanwhile, its notes may be exported.
+            if store::meta(tx)?.frozen_at.is_some() {
+                return Err(Error::Frozen);
+            }
             if let Some(link) = link {
                 let link = store::link(tx, &link.key)?
                     .filter(|l| l.live(at))
@@ -877,6 +943,7 @@ impl<T: Transport> Bridge<T> {
         description_hash: Option<[u8; 32]>,
         zap: Option<String>,
     ) -> Result<Receipt, Error> {
+        self.not_frozen()?;
         if let Some(link) = link {
             if !link.receive {
                 return Err(Error::Restricted("this connection only pays".into()));
@@ -980,8 +1047,12 @@ impl<T: Transport> Bridge<T> {
             }
         }
         if received {
-            if let Err(e) = self.wallet.unlink().await {
-                tracing::warn!("unlinking the notes received: {e}");
+            // Its notes as exported, once frozen.
+            let _notes = self.notes.lock().await;
+            if self.store.read(store::meta)?.frozen_at.is_none() {
+                if let Err(e) = self.wallet.unlink().await {
+                    tracing::warn!("unlinking the notes received: {e}");
+                }
             }
         }
         Ok(decided)
