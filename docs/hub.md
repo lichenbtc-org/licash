@@ -157,7 +157,9 @@ made while it was stopped may be missing from the replica (upstream issue
 writes, is lost with it, as with any copy.
 
 Each paragraph below says what an older copy loses;
-for contracts, the worst is an opening signed after the copy. The hub's
+for contracts, the worst is an opening signed after the copy. A copy older
+than an answer of a one-time key is answered again from the hub's
+witnesses ([Contract witnesses](#contract-witnesses)), not decided anew. The hub's
 keys for each opening come from a secret drawn for it alone and kept only
 in `hub.sqlite`, not from `seed`: a hub restored without it neither answers
 its holder's request (her timeout pays her all she claims, with the hub's
@@ -170,7 +172,10 @@ Restoring on another host, while contracts may be in dispute:
 1. Fence the old host first: stop it for good, and revoke its Core and
    LND logins. Two hubs answering one claim may sign two different
    responses with one one-time key, which gives the holder the hub's
-   outputs.
+   outputs. Witnesses ([Contract witnesses](#contract-witnesses)) keep
+   them to the same response, but fencing stays mandatory: the old host
+   still spends the wallet and plays the ledger. Never start the hub from
+   a snapshot of a live VM, nor keep one running beside it.
 2. Restore the newest copy into `<data>`, with the same Core wallet.
 3. On other hardware, delete `hp-proofs/bench.json`: it is the old
    device's speed, matched by kind (`cuda` or `cpu`) alone, and the hub
@@ -670,7 +675,64 @@ mempool) it decides anew: nothing replaces the backup. A response in a block
 whose evidence is lost is not asserted on. Where it signs none the operator
 is alerted, and her timeout pays her what she claims, with the hub's reserve
 once a response is in a block: restoring the newer `hub.sqlite` is the only
-way back.
+way back without witnesses.
+
+### Contract witnesses
+
+A witness (`licash-witness`, a service of its own) keeps each one-time
+answer apart from `hub.sqlite`, so that neither a restore of it older than
+an answer nor a second copy of the hub can sign another. Before it signs a
+response or an assertion, the hub writes what it signs (its `b′`, the
+request's txid, `b` and `E`, and the evidence pinned; for an assertion, π1's
+digits and its proof) to every witness of its set, in a fixed order, and
+signs only what all of them keep alike: the first decision any of them
+kept, which a hub restored older is given back, and signs again the same.
+It enrolls each contract in every witness before it signs its F: a witness
+keeps no decision of a contract it never enrolled, and the hub opens none
+while any witness is unreachable or refuses. A witness unreachable, of
+another set, of a sequence lower than the hub last saw (restored older),
+or not sealed alike (made anew) stops all signing until it is mended, and
+the operator is alerted; two witnesses holding two decisions stop that
+contract for good. A witness holds no key of the hub's: each entry is
+signed with the hub's witness key (of `seed`, `licash-hub witness-key`)
+and checked by the witness; the hub reaches each over TLS to the
+certificate it pins.
+
+Set up, each witness on a host apart from the hub and from the others
+(another provider, another power and network), two at least on mainnet:
+
+```sh
+licash-hub witness-key                      # the hub's witness key
+licash-witness --data W init --hub-key KEY  # the first: prints set_id and pin
+licash-witness --data W2 init --hub-key KEY --set-id SET_ID
+licash-witness --data W run --listen 0.0.0.0:8339
+licash-hub run --contracts --contracts-witness-set SET_ID \
+    --contracts-witness https://w1.example:8339#PIN1 \
+    --contracts-witness https://w2.example:8339#PIN2 ...
+```
+
+A hub that never signed a contract seals its new set as it enrolls its
+first. One that signed contracts before it had witnesses imports them
+first, the hub stopped (signet and regtest only): `licash-hub
+contracts-witness-import --network signet --contracts-witness-set ...`
+enrolls every contract, keeps each answer it signed as it signed it and
+each it may have signed with what it no longer knows (begun, nothing
+pinned) never to be signed, then seals the set and binds `hub.sqlite` to
+it. Run it again if it fails before its seal. `--contracts-witnesses none`
+keeps the answers in `hub.sqlite` alone, as before witnesses: on regtest
+and signet only, and refused once `hub.sqlite` is bound to a set.
+
+A witness's database only grows. Back it up as the hub's (`licash-witness
+backup --to FILE` while it runs) for its own sake, but never restore it: a
+witness restored older is refused. A witness lost is made again from one
+that survives, `licash-witness --data NEW clone --from SURVIVOR.sqlite`
+(the survivor's database, or a backup of it taken after its last entry),
+under a TLS identity of its own whose pin replaces the lost one's in the
+hub's `--contracts-witness`. A survivor restored to an earlier point, or a
+witness made anew, is never a replacement: with every witness lost, the
+hub signs no answer of the contracts it enrolled. Two witnesses that
+disagree are never mended by cloning one over the other: the hub would
+sign whichever was cloned.
 
 A dispute's links are presigned at 1 sat/vB, each with a 330 sat anchor
 only its poster spends. The hub posts its response and its assertion with
@@ -921,6 +983,14 @@ Before starting it:
   lacking one responds to none of its contested claims.
 - Expect no migration: a database or file of an earlier layout is refused
   by name, never read nor replaced.
+- A hub of `--contracts` started without witnesses refuses to start:
+  name its witnesses ([Contract witnesses](#contract-witnesses)), and on
+  signet, with contracts signed before, import them first; or, on regtest
+  and signet, keep them in `hub.sqlite` alone with
+  `--contracts-witnesses none` (`LICASH_HUB_CONTRACTS_WITNESSES=none`).
+  Its contracts under way are answered only once it runs again, so do this
+  before their deadlines. Never start an earlier release on a `hub.sqlite`
+  bound to witnesses: it knows none, and signs as if it had none.
 
 ### From a ledger of schema 3
 
