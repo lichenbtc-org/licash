@@ -34,8 +34,10 @@ pub const CAP: u32 = 131_071;
 pub const RESERVE_ALICE: u64 = 20_000;
 
 /// The hub's fee for an opening, from her deposit, unless its operator
-/// sets another ([`Timing::with_opening_fee`]).
-pub const OPENING_FEE: u64 = 3_000;
+/// sets another ([`Timing::with_opening_fee`]): half a year's interest at
+/// 20% on its own 100 000 sat reserve, which it locks in every contract,
+/// whoever funds its cap.
+pub const OPENING_FEE: u64 = 10_000;
 
 /// The hub's reserve in F, from its wallet.
 const RESERVE_HUB: u64 = 100_000;
@@ -540,7 +542,8 @@ mod tests {
     /// The quote every app asking without terms of its own opens on:
     /// byte for byte as the hub quotes it, on each network. A hub letting
     /// holders choose prices the fixed terms by its rate as well, at 1% a
-    /// year 24 sat more; one that doesn't, at its fixed fee alone. Regtest's
+    /// year 24 sat more; one that doesn't, at its fixed fee alone (pinned at
+    /// 3 000 sat, the default once, its bytes unchanged since). Regtest's
     /// mock decides the lean filing, so it quotes the graph of its id (10);
     /// signet's program reads the exit on the hub's header chain and owes a claim
     /// of the same contract no evidence against another, and quotes 14 (its
@@ -569,7 +572,7 @@ mod tests {
         ];
         for (range, [regtest_digest, signet_digest], fee) in pinned {
             let quoted = |profile| {
-                let timing = Timing::of(profile, range).unwrap();
+                let timing = Timing::of(profile, range).unwrap().with_opening_fee(3_000);
                 let quote = timing.quote(keyset.clone(), checkpoint.clone());
                 assert_eq!(quote.fees.opening_fee_quote, fee);
                 assert_eq!((quote.cap, quote.graph.bits), (CAP, 17));
@@ -581,7 +584,9 @@ mod tests {
             assert_eq!((bounds.lock, bounds.response_window), (1_000, 2));
             let (signet, bounds) = quoted(ChainProfile::Core30Signet);
             assert_eq!(signet, signet_digest);
-            let at = Timing::of(ChainProfile::Core30Signet, range).unwrap();
+            let at = Timing::of(ChainProfile::Core30Signet, range)
+                .unwrap()
+                .with_opening_fee(3_000);
             let graph = at.quote(keyset.clone(), checkpoint.clone()).graph.id;
             assert_eq!(graph, licash::recovery::SIGNED_FROM);
             assert_eq!((bounds.lock, bounds.response_window), (1_000, 12));
@@ -656,13 +661,13 @@ mod tests {
             |cap, blocks| timing.quote_for(keyset.clone(), checkpoint.clone(), cap, blocks, 0);
 
         // 16 777 215 sat for half a year, 83 886 sat of interest over the
-        // fixed fee, of a 24-bit graph its headers reaching the close.
+        // opening fee, of a 24-bit graph its headers reaching the close.
         let chosen = quote(16_777_215, 26_280);
         assert_eq!(chosen.cap, 16_777_215);
         assert_eq!(chosen.graph.bits, 24);
         assert_eq!(chosen.chain.max_headers, 26_280 + HEADER_SLACK);
         assert_eq!(lock_of(&chosen), 26_280);
-        assert_eq!(chosen.fees.opening_fee_quote, 86_886);
+        assert_eq!(chosen.fees.opening_fee_quote, OPENING_FEE + 83_886);
         assert_eq!(chosen.graph.deposit_units, 0);
         // Half of it hers: interest on the hub's half only, her part in
         // the graph's deposit.
@@ -673,9 +678,12 @@ mod tests {
             26_280,
             8_388_607,
         );
-        assert_eq!(half.fees.opening_fee_quote, 3_000 + 41_943);
+        assert_eq!(half.fees.opening_fee_quote, OPENING_FEE + 41_943);
         assert_eq!(half.graph.deposit_units, 8_388_607);
-        assert_eq!(timing.price(16_777_215, 26_280, 8_388_607), 20_000 + 44_943);
+        assert_eq!(
+            timing.price(16_777_215, 26_280, 8_388_607),
+            20_000 + OPENING_FEE + 41_943
+        );
         assert_eq!(timing.bounds(&chosen).lock, 26_280);
         // But for those, as the fixed quote is.
         let mut same = chosen.clone();
@@ -832,7 +840,7 @@ mod tests {
         // No bound by her coin: announced as none, for wallets that read one.
         assert_eq!(
             (range.per_coin, range.reserve, range.fee, range.ppm_year),
-            (u32::MAX, 20_000, 3_000, 10_000)
+            (u32::MAX, 20_000, OPENING_FEE, 10_000)
         );
         assert!(timing.allows(CAP, LOCK).is_ok());
         assert!(timing.allows(67_108_863, 26_280).is_ok());
