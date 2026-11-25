@@ -304,7 +304,10 @@ contact's wallet, or by one whose shared code is a contact's, says "To" or
 
 A contract is three lines of the history: "Protection", its price paid on
 Bitcoin, its details splitting it into the cost and the reserve that comes
-back; "From Bitcoin, protected", the rest of the coin it took, issued back
+back, listed from the start of its opening ("Being set up" while it is
+opened, Home showing its steps instead, then confirming until its funding
+is in a block; failed with why if given up before its funding was signed,
+nothing taken, or if its funding can never confirm); "From Bitcoin, protected", the rest of the coin it took, issued back
 as notes once its funding confirmed (the earliest receipt at its hub of
 exactly that amount after it began, as nothing kept says which), rather
 than a payment received; and "Protection closed", what it paid back to the

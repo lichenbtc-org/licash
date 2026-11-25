@@ -88,6 +88,7 @@ class DetailsTest {
             status(line(Kind.MOVED), false, deposit(0u)),
             status(line(Kind.CONTRACT), false, Details.Contract("https://hub.example", "f")),
             status(line(Kind.CONTRACT, State.DONE), false, Details.Contract("https://hub.example", "f")),
+            status(line(Kind.CONTRACT), false, Details.Contract("https://hub.example", null)),
             status(line(Kind.INVOICE), false, Details.Invoice("https://hub.example", null, null, null)),
             status(line(Kind.SENT), false, null),
         )
@@ -126,6 +127,17 @@ class DetailsTest {
         // Her part of the coin a contract took, back as notes: not a payment from anyone.
         assertEquals("From Bitcoin, protected", title(line(Kind.FUNDED), coming = false))
         assertFalse(paid(line(Kind.FUNDED)))
+    }
+
+    @Test
+    fun a_protection_being_set_up_says_so_then_confirming_or_why_it_failed() {
+        val opening = Details.Contract("https://hub.example", funding = null)
+        assertEquals("Being set up", status(line(Kind.CONTRACT), false, opening))
+        val signed = Details.Contract("https://hub.example", funding = "f")
+        assertEquals("Confirming, about 10 min", status(line(Kind.CONTRACT), false, signed))
+        assertEquals("The hub refused. Nothing was taken.", status(line(Kind.CONTRACT, State.FAILED), false, opening))
+        // Its funding signed, or never to confirm: why alone.
+        assertEquals("The hub refused", status(line(Kind.CONTRACT, State.FAILED), false, signed))
     }
 
     @Test

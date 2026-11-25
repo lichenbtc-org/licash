@@ -4,6 +4,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 import org.licash.core.Activity
+import org.licash.core.Contract
+import org.licash.core.ContractState
 import org.licash.core.Details
 import org.licash.core.Hub
 import org.licash.core.Kind
@@ -96,6 +98,23 @@ class GlanceTest {
         assertNull(glance(Ui(history = listOf(moved), under = mapOf(moved.key to deposit(false)), chain = synced), now))
         val paid = Ui(history = listOf(moved), under = mapOf(moved.key to deposit(true)), chain = synced)
         assertEquals("Receiving 10,000 sat", glance(paid, now)?.text)
+    }
+
+    @Test
+    fun a_protection_being_opened_shows_its_steps_not_its_line() {
+        val c = Contract(
+            id = "c1", hub = "https://hub.example", state = ContractState.Opening, mock = false, cap = 4_096uL,
+            covers = 0uL, price = 1_000uL, funded = 0uL, fundedReceived = false, paidFrom = 50_000uL,
+            protectsUntil = 2_000u, closesAt = 2_100u, funding = null, createdAt = 0L, step = null, transfer = null,
+        )
+        val line = line(Kind.CONTRACT, id = "c1")
+        val opening = Ui(history = listOf(line), contracts = listOf(c), opening = c.hub, chain = synced)
+        assertEquals(Glance.Protecting("https://hub.example"), glance(opening, now))
+        // Its opening interrupted, the app restarted: its line, under way.
+        assertEquals("Setting up protection", (glance(opening.copy(opening = null), now) as Glance.One).text)
+        // Another line under way still shows as itself.
+        val sent = opening.copy(history = listOf(line, line(Kind.SENT, id = "s")))
+        assertEquals("Sending 10,000 sat", glance(sent, now)?.text)
     }
 
     @Test

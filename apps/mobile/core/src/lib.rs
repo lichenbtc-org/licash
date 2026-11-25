@@ -1150,8 +1150,12 @@ pub enum Details {
         claim_fee: u64,
         lock_fee: u64,
     },
-    /// A recovery contract opened at `hub`, by its `funding`'s id.
-    Contract { hub: String, funding: String },
+    /// A recovery contract opened at `hub`, by its `funding`'s id once
+    /// signed: none while it is being opened, or if given up before.
+    Contract {
+        hub: String,
+        funding: Option<String>,
+    },
     /// A coin on Bitcoin, output `vout` of `tx`: `change` of the wallet's
     /// own, and `moving`, the transaction spending it, if one is.
     Coin {

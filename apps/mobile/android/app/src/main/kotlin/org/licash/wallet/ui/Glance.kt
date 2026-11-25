@@ -1,6 +1,7 @@
 package org.licash.wallet.ui
 
 import org.licash.core.Activity
+import org.licash.core.ContractState
 import org.licash.core.Kind
 import org.licash.core.State
 import org.licash.wallet.STALE_SECS
@@ -44,8 +45,11 @@ sealed interface Glance {
  */
 fun glance(ui: Ui, now: Long): Glance? {
     val coming = ui.incoming.map { Glance.One(doing(it, coming = true), it, coming = true) }
+    val opened = ui.contracts.filter { it.state == ContractState.Opening }.map { it.id }.toSet()
     val under = ui.history
         .filter { it.state == State.PENDING && (it.at ?: now) > now - STALE_SECS && !unpaid(it, ui.under[it.key]) }
+        // While the app opens a contract, those being opened show as Protecting, its steps on a tap.
+        .filter { !(ui.opening != null && it.kind == Kind.CONTRACT && it.id in opened) }
         .map { Glance.One(doing(it, coming = false), it, coming = false) }
     val lines = coming + under
     val opening = ui.opening

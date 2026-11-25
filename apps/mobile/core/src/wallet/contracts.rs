@@ -542,22 +542,19 @@ impl Wallet {
         Ok(returned(&all, &recovered))
     }
 
-    /// The contracts signed, as lines of the history: what each cost,
-    /// under way until its funding is in a block.
+    /// Every contract, as a line of the history ([`activity`]).
     pub(super) fn contract_activities(&self) -> Result<Vec<Activity>, LicashError> {
         let all = holder::list(self.wallet.path()).map_err(failed)?;
-        Ok(all.iter().filter_map(activity).collect())
+        Ok(all.iter().map(activity).collect())
     }
 
     /// More of the line of the history of the contract `id`, if any.
     pub(super) fn contract_details(&self, id: &str) -> Result<Option<Details>, LicashError> {
         let all = holder::list(self.wallet.path()).map_err(failed)?;
         let found = all.into_iter().find(|c| hex(&c.id) == id);
-        Ok(found.and_then(|c| {
-            Some(Details::Contract {
-                hub: c.hub,
-                funding: c.funding?.to_string(),
-            })
+        Ok(found.map(|c| Details::Contract {
+            hub: c.hub,
+            funding: c.funding.map(|f| f.to_string()),
         }))
     }
 
@@ -695,22 +692,22 @@ fn hex(id: &[u8; 32]) -> String {
 /// Why a contract whose funding can never confirm failed.
 const DEAD: &str = "its funding can never confirm: its coin was spent otherwise";
 
-/// `c` as a line of the history, once its funding is broadcast: it pays
-/// its price then, done once in a block.
-fn activity(c: &holder::Contract) -> Option<Activity> {
-    if c.abandoned.is_some() || c.phase < Phase::Funded {
-        return None;
-    }
-    let state = match c.fate {
-        Some(Fate::Live) => State::Done,
-        Some(Fate::Dead) => State::Failed,
+/// `c` as a line of the history from the start of its opening: under way
+/// while opened, then until its funding is in a block, when it has paid
+/// its price; failed if given up short of signing it, saying why, or if
+/// its funding can never confirm.
+fn activity(c: &holder::Contract) -> Activity {
+    let state = match (&c.abandoned, c.fate) {
+        (Some(_), _) | (None, Some(Fate::Dead)) => State::Failed,
+        (None, Some(Fate::Live)) if c.phase == Phase::Funded => State::Done,
         _ => State::Pending,
     };
-    let detail = match state {
-        State::Failed => DEAD.into(),
+    let detail = match (&c.abandoned, state) {
+        (Some(why), _) => why.clone(),
+        (None, State::Failed) => DEAD.into(),
         _ => c.hub.clone(),
     };
-    Some(Activity {
+    Activity {
         id: hex(&c.id),
         kind: Kind::Contract,
         state,
@@ -721,7 +718,7 @@ fn activity(c: &holder::Contract) -> Option<Activity> {
         memo: None,
         from: None,
         code: None,
-    })
+    }
 }
 
 /// What an opening at `phase` waits on: what follows the last step done.
@@ -892,13 +889,29 @@ mod tests {
     }
 
     #[test]
-    fn contracts_are_in_the_history_once_funded_done_once_confirmed() {
-        let opening = contract(1, Phase::Consented, None);
-        assert_eq!(activity(&opening), None);
-        let mut refused = contract(2, Phase::Funded, None);
+    fn contracts_are_in_the_history_from_their_opening_done_once_confirmed() {
+        // Being opened: under way, at its hub, from its start.
+        let opening = activity(&contract(1, Phase::Consented, None));
+        assert_eq!(
+            (opening.kind, opening.state, opening.detail.as_str()),
+            (Kind::Contract, State::Pending, HUB)
+        );
+        assert_eq!(
+            opening.at,
+            Some(contract(1, Phase::Started, None).created_at)
+        );
+        // Given up short of signing: failed, saying why.
+        let mut refused = contract(2, Phase::Chosen, None);
         refused.abandoned = Some("refused".into());
-        assert_eq!(activity(&refused), None);
-        let line = |fate| activity(&contract(3, Phase::Funded, fate)).unwrap();
+        let refused = activity(&refused);
+        assert_eq!(
+            (refused.state, refused.detail.as_str()),
+            (State::Failed, "refused")
+        );
+        // Not done before its funding is signed, whatever its fate says.
+        let early = activity(&contract(4, Phase::Signing, Some(Fate::Live)));
+        assert_eq!(early.state, State::Pending);
+        let line = |fate| activity(&contract(3, Phase::Funded, fate));
         let confirming = line(None);
         assert_eq!(
             (confirming.kind, confirming.state, confirming.amount),

@@ -212,6 +212,9 @@ internal fun status(
         null -> "${activity.detail}. Nothing was taken."
         else -> "${activity.detail}. Your money comes back by itself."
     }
+    // Given up short of signing its funding: nothing paid.
+    activity.state == State.FAILED && details is Details.Contract && details.funding == null ->
+        "${activity.detail}. Nothing was taken."
     activity.state == State.FAILED -> activity.detail
     // A swap provider declined or failed it: its lock returns the sats once expired.
     activity.state == State.PENDING && details is Details.Lightning && details.provider != null &&
@@ -226,7 +229,11 @@ internal fun status(
         is Details.Moved -> moving(activity, details, blockSecs)
         is Details.Coin -> if (details.moving != null) "Being added to your balance" else "Yours, on Bitcoin"
         is Details.Invoice -> if (activity.state == State.DONE) "In your balance" else "Paid, arriving"
-        is Details.Contract -> if (activity.state == State.DONE) "Set up" else CONFIRMING
+        is Details.Contract -> when {
+            activity.state == State.DONE -> "Set up"
+            details.funding == null -> "Being set up"
+            else -> CONFIRMING
+        }
         else -> when {
             activity.state == State.PENDING -> "Under way"
             paid(activity) -> "Paid"
@@ -547,7 +554,7 @@ private fun Technical(activity: Activity, details: Details?, copy: (String, Stri
             is Details.Contract -> {
                 Fact("Contract", activity.id, copy)
                 Fact("Hub", details.hub, copy)
-                Fact("Funding", details.funding, copy)
+                details.funding?.let { Fact("Funding", it, copy) }
             }
             is Details.Swap -> {
                 Fact("Swap hash", activity.id, copy)
