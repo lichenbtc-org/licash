@@ -667,17 +667,25 @@ impl Openings {
     /// apps installed open on, and those holders may choose, if any.
     /// Its range's largest cap, as much as its wallet funds now; its
     /// prices as surcharged now, at the highest step once full or if its
-    /// load is unknown.
+    /// load is unknown. And whether a wallet finds room there now, to
+    /// choose a hub by before paying a deposit: what its wallet funds
+    /// (`funds`), of the caps it offers and no more of its balance than
+    /// those tell, and whether a new opening is refused now (`full`), as
+    /// [`run::admits`] and [`Openings::step_now`] refuse one.
     pub fn advertise(&self) -> licash_api::Contracts {
         let step = match self.load() {
-            Ok(load) => load.step.unwrap_or(terms::MAX_STEP),
+            Ok(load) => load.step,
             Err(e) => {
                 tracing::warn!("the contracts' load: {e:#}");
-                terms::MAX_STEP
+                None
             }
         };
-        let timing = self.timing().at_step(step);
-        let range = timing.range().map(|mut r| {
+        let full = step.is_none() || run::admits(&self.store()).is_err();
+        let timing = self.timing().at_step(step.unwrap_or(terms::MAX_STEP));
+        let offered = timing.range();
+        let most = offered.map_or(terms::CAP, |r| r.max_cap);
+        let known = self.funds().is_some();
+        let range = offered.map(|mut r| {
             r.max_cap = self.most_funded(r.max_cap).max(r.min_cap);
             r
         });
@@ -688,7 +696,14 @@ impl Openings {
             blocks: timing.lock(),
             mock: self.trust.mock,
             range,
+            funds: known.then(|| self.most_funded(most)),
+            full,
         }
+    }
+
+    /// What the node's wallet held when last asked, in sat: none before.
+    fn funds(&self) -> Option<u64> {
+        *self.funds.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Give up the openings short of the hub's signatures idle for
@@ -724,8 +739,7 @@ impl Openings {
     /// `most`, or less if the node's wallet, as it last said, funds no F
     /// of a cap so large: none if it funds none. As `most` if not known.
     fn most_funded(&self, most: u32) -> u32 {
-        let funds = *self.funds.lock().unwrap_or_else(PoisonError::into_inner);
-        match funds {
+        match self.funds() {
             Some(balance) => terms::fundable(balance).unwrap_or(0).min(most),
             None => most,
         }
@@ -1371,6 +1385,48 @@ mod tests {
         assert_eq!(openings.most_funded(terms::CAP), 0);
     }
 
+    /// What its wallet funds now is said beside its range, for a wallet to
+    /// tell a hub with no room before paying a deposit: unknown until
+    /// asked, none once short of the least, and never more of its balance
+    /// than the largest cap it offers tells.
+    #[test]
+    fn its_info_says_what_its_wallet_funds_now_and_no_more_than_it_offers() {
+        use licash_api::Room;
+        let dir = tempfile::tempdir().unwrap();
+        let mut openings = test_openings(dir.path());
+        // Fixed terms only: all of its one cap, or none.
+        assert_eq!(openings.advertise().funds, None);
+        assert_eq!(openings.advertise().room(), Room::Open);
+        *openings.funds.lock().unwrap() = Some(10_000_000);
+        assert_eq!(openings.advertise().funds, Some(terms::CAP));
+        *openings.funds.lock().unwrap() = Some(200_000);
+        assert_eq!(openings.advertise().funds, Some(0));
+        assert_eq!(openings.advertise().room(), Room::Unfunded);
+
+        let range = Range {
+            max_cap: 100_000_000,
+            max_blocks: 52_560,
+            ppm_year: 10_000,
+            ppm_year_funded: 0,
+        };
+        *openings.timing.get_mut().unwrap() =
+            Timing::of(ChainProfile::Core30DefaultRegtest, Some(range)).unwrap();
+        *openings.funds.lock().unwrap() = None;
+        let said = |o: &Openings| (o.advertise().funds, o.advertise().room());
+        assert_eq!(said(&openings), (None, Room::Open));
+        *openings.funds.lock().unwrap() = Some(200_000);
+        assert_eq!(said(&openings), (Some(0), Room::Unfunded));
+        // Its range still reads as one: wallets before this check it.
+        let advertised = openings.advertise().range.unwrap();
+        assert_eq!(advertised.max_cap, advertised.min_cap);
+        *openings.funds.lock().unwrap() = Some(1_000_000);
+        assert_eq!(said(&openings), (Some(524_287), Room::Open));
+        // Ten bitcoin: the most it offers, not what it holds.
+        *openings.funds.lock().unwrap() = Some(1_000_000_000);
+        assert_eq!(said(&openings), (Some(67_108_863), Room::Open));
+        assert!(!openings.advertise().full);
+    }
+
     /// Past half its most contracts live, the hub's info prices new ones
     /// higher at each eighth more; once all are, it opens none until one
     /// ends or is given up.
@@ -1394,6 +1450,12 @@ mod tests {
             }
             drop(store);
             prices.push(price(&openings));
+            // Full exactly when a new opening is refused.
+            assert_eq!(
+                openings.advertise().full,
+                openings.step_now().is_err(),
+                "{n}"
+            );
         }
         let fee = terms::OPENING_FEE;
         let at = |m: u64| terms::RESERVE_ALICE + fee * m;
@@ -1402,10 +1464,13 @@ mod tests {
         assert_eq!((load.live, load.max, load.step), (8, 8, None));
         let refused = openings.step_now().unwrap_err();
         assert_eq!(refused.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(openings.advertise().full);
+        assert_eq!(openings.advertise().room(), licash_api::Room::Full);
         // One ended, one under way given up: two free, at 8 times again.
         openings.store().end(&[0; 32], 100).unwrap();
         openings.store().abandon(&[1; 32], i64::MAX).unwrap();
         assert_eq!(openings.step_now().unwrap(), 3);
+        assert!(!openings.advertise().full);
         assert_eq!(price(&openings), at(8));
         // More allowed: cheaper at once.
         openings.limit_live(64);
@@ -1587,6 +1652,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let openings = test_openings(dir.path());
         for n in 0..MAX_UNDER_WAY as u8 {
+            assert!(!openings.advertise().full);
             let store = openings.store();
             assert!(run::admits(&store).is_ok());
             store
@@ -1595,6 +1661,8 @@ mod tests {
         }
         let why = run::admits(&openings.store()).unwrap_err().reason;
         assert!(why.contains("under way"), "{why}");
+        // Said in its info, for a wallet to choose another hub by.
+        assert!(openings.advertise().full);
     }
 
     #[test]

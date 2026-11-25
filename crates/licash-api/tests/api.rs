@@ -1280,6 +1280,70 @@ fn a_hubs_urls_are_left_out_when_none_and_are_not_its_identity() {
     assert_eq!(named.proved(signet), Ok(true));
 }
 
+/// What a hub says of its room for a new contract is new: one saying
+/// nothing of it, as every hub before, reads as having room, and a hub
+/// with room sends nothing a wallet before this has to make sense of.
+#[test]
+fn a_hubs_room_for_a_contract_is_unknown_and_open_unless_it_says() {
+    use licash_api::Room;
+    let before = r#"{"cap":131071,"price":23000,"reserve":20000,"blocks":1000,"mock":false}"#;
+    let read: Contracts = serde_json::from_str(before).unwrap();
+    assert_eq!((read.funds, read.full), (None, false));
+    assert_eq!(read.room(), Room::Open);
+    // Nothing of it sent while unknown and not full: as before.
+    assert_eq!(
+        serde_json::to_string(&read).unwrap(),
+        before,
+        "the fields of a hub before"
+    );
+
+    let full = Contracts { full: true, ..read };
+    assert_eq!(json(&full), full);
+    assert_eq!(full.room(), Room::Full);
+    // Full, whatever its wallet funds.
+    let both = Contracts {
+        funds: Some(131_071),
+        ..full
+    };
+    assert_eq!(both.room(), Room::Full);
+
+    // Its wallet funds none of its one cap: only a contract its holder
+    // funds whole opens there. All of it: room.
+    let short = Contracts {
+        funds: Some(0),
+        ..read
+    };
+    assert_eq!(json(&short), short);
+    assert_eq!(short.room(), Room::Unfunded);
+    let funded = Contracts {
+        funds: Some(131_071),
+        ..read
+    };
+    assert_eq!(funded.room(), Room::Open);
+
+    // With a range, against its smallest cap, not the fixed one.
+    let range = ContractRange {
+        min_cap: 262_143,
+        max_cap: 134_217_727,
+        min_blocks: 432,
+        max_blocks: 26_280,
+        per_coin: 2,
+        reserve: 20_000,
+        fee: 3_000,
+        ppm_year: 10_000,
+        ppm_year_funded: 0,
+        year_blocks: licash_api::YEAR_BLOCKS,
+    };
+    let ranged = |funds| Contracts {
+        range: Some(range),
+        funds: Some(funds),
+        ..read
+    };
+    assert_eq!(ranged(131_071).room(), Room::Unfunded);
+    assert_eq!(ranged(262_143).room(), Room::Open);
+    assert_eq!(Room::of(false, None, u32::MAX), Room::Open);
+}
+
 #[test]
 fn a_hubs_contract_range_is_left_out_when_none_and_prices_the_hubs_part_by_the_year() {
     // Without one: read, none.

@@ -1032,6 +1032,49 @@ pub struct Contracts {
     /// older hubs do.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<ContractRange>,
+    /// The most of a contract's cap the hub's wallet funds now, in sat, of
+    /// those it offers: none if not known, as from hubs before any said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub funds: Option<u32>,
+    /// Whether it refuses new openings now: as many live or under way as
+    /// it takes. Not said by hubs before any did: read as not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full: bool,
+}
+
+/// Whether a hub has room for a new contract now, as its info says: a
+/// hint to choose a hub by, a minute old or more, and no promise. Its
+/// offer is what binds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Room {
+    /// It opens them, as far as it says: also what a hub saying nothing
+    /// of it reads as.
+    Open,
+    /// It refuses new openings now ([`Contracts::full`]).
+    Full,
+    /// Its wallet funds none of even the smallest contract now: only one
+    /// its holder funds whole opens there.
+    Unfunded,
+}
+
+impl Room {
+    /// Of a hub saying it is `full` or not, funding `funds` sat at most
+    /// if it says, the smallest contract it opens of `least` sat.
+    pub fn of(full: bool, funds: Option<u32>, least: u32) -> Self {
+        match funds {
+            _ if full => Self::Full,
+            Some(funds) if funds < least => Self::Unfunded,
+            _ => Self::Open,
+        }
+    }
+}
+
+impl Contracts {
+    /// Whether the hub has room for a new contract now, as it says.
+    pub fn room(&self) -> Room {
+        let least = self.range.map_or(self.cap, |r| r.min_cap);
+        Room::of(self.full, self.funds, least)
+    }
 }
 
 /// Blocks in a year of Bitcoin's, 144 a day: what a contract's price counts

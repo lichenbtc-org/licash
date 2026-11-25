@@ -532,8 +532,9 @@ impl Phone {
 
     /// Make a wallet on regtest, its light client reaching Bitcoin Core
     /// only, chosen behind "Use a test network", then turn on advanced
-    /// mode in Settings, for the views the tests read. Home then asks for
-    /// a hub. The tour comes first: a page of it, then skipped.
+    /// mode in Settings, for the views the tests read. It is then set up
+    /// a screen at a time: its backup, put off, then a hub asked for. The
+    /// tour comes first: a page of it, then skipped.
     pub async fn onboard(&self) -> anyhow::Result<()> {
         self.tagged("tour-title", "Bitcoin is gold in a vault", 60)
             .await?;
@@ -548,8 +549,11 @@ impl Phone {
         // Regtest's node is 127.0.0.1:18444, Core's reversed to the phone.
         self.tap_id("network regtest").await?;
         self.tap_id("create").await?;
-        // The light client of the network first chosen stops first.
-        self.by_id("choose-hub", 180).await?;
+        // The light client of the network first chosen stops first. A
+        // wallet made here is asked to back up before anything else.
+        self.by_id("setup-backup", 180).await?;
+        self.tap_id("backup-later").await?;
+        self.by_id("choose-hub", 30).await?;
         self.tap("Settings").await?;
         self.by_id("hubs", 30).await?;
         if !self.has("advanced").await? {
@@ -560,18 +564,28 @@ impl Phone {
         self.back_to("choose-hub").await
     }
 
-    /// Connect to the hub at `url`, by its address, from Home with no hub
-    /// yet: Home then shows what it holds.
+    /// Connect to the hub at `url`, by its address, where a wallet with no
+    /// hub yet is asked for one: Home then shows what it holds.
     pub async fn connect(&self, url: &str) -> anyhow::Result<()> {
         self.fill_id("hub-address", url).await?;
         self.tap_id("add-address").await?;
         self.home(60).await
     }
 
-    /// Wait up to `secs` for Home, with a hub: to receive and to send.
+    /// Wait up to `secs` for Home, with a hub: to receive and to send. A
+    /// wallet holding nothing yet is shown its first funding in Home's
+    /// place: left, for Home, whose card leads back to it.
     pub async fn home(&self, secs: u64) -> anyhow::Result<()> {
-        self.by_id("receive", secs).await?;
-        Ok(())
+        until("Home", secs, || async {
+            if self.has("receive").await? {
+                return Ok(Some(()));
+            }
+            if self.has("funding-hide").await? {
+                self.tap_id("funding-hide").await?;
+            }
+            Ok(None)
+        })
+        .await
     }
 
     /// Go back a screen, to the one showing a view tagged `id`.
@@ -584,8 +598,6 @@ impl Phone {
     /// The payment code Receive shows, for any amount, back on Home after.
     pub async fn code(&self) -> anyhow::Result<String> {
         self.tap_id("receive").await?;
-        // Home's guide to a first funding has a QR code too: gone first.
-        self.gone("funding", 10).await?;
         self.wait("QR code", 30).await?;
         let code = self.qr(30).await?;
         self.tap("Back").await?;
@@ -597,7 +609,6 @@ impl Phone {
     /// tab shows it, back on Home after.
     pub async fn bitcoin_code(&self) -> anyhow::Result<String> {
         self.tap_id("receive").await?;
-        self.gone("funding", 10).await?;
         self.tap_id("segment Bitcoin").await?;
         self.tagged("way", "Bitcoin address", 30).await?;
         // The code shown before it gives way once the address is made.
@@ -615,7 +626,6 @@ impl Phone {
     /// after.
     pub async fn silent_address(&self) -> anyhow::Result<String> {
         self.tap_id("receive").await?;
-        self.gone("funding", 10).await?;
         self.tap_id("other-ways").await?;
         self.tap_id("way-silent").await?;
         let silent = self.by_id("silent", 30).await?.text;

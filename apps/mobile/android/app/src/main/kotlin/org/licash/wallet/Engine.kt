@@ -173,6 +173,15 @@ data class Ui(
     val cold: ColdStorage? = null,
     /** Automatic backups, if a folder is chosen. */
     val backup: AutoBackup? = null,
+    /**
+     * Since when the wallet is set up, step by step, to a first vault
+     * (seconds since 1970): from its making, or asked for again in
+     * Settings, until that vault protects or the guide is left. None, as
+     * for a wallet of an earlier version, guides only one holding nothing.
+     */
+    val guideSince: Long? = null,
+    /** Why the last protection asked for was not set up, until another is asked for. In memory only. */
+    val openFailed: String? = null,
 )
 
 /** A line of the history's own key: lines of different kinds can share an id. */
@@ -248,7 +257,9 @@ class Engine(context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
     private val lightLock = Mutex()
-    private val state = MutableStateFlow(Ui(developer = prefs.developer, network = prefs.network, caughtUp = prefs.caughtUp))
+    private val state = MutableStateFlow(
+        Ui(developer = prefs.developer, network = prefs.network, caughtUp = prefs.caughtUp, guideSince = prefs.guideSince),
+    )
     val ui: StateFlow<Ui> = state.asStateFlow()
     private val notices = MutableSharedFlow<Event>(extraBufferCapacity = 16)
     val events: SharedFlow<Event> = notices
@@ -1046,6 +1057,12 @@ class Engine(context: Context) {
         state.update { it.copy(offer = offer, offerDeclined = offerDeclined(offer, prefs.offerDeclined)) }
     }
 
+    /** Set the wallet up step by step from `since` on ([Ui.guideSince]), or no longer: kept. */
+    fun guide(since: Long?) {
+        prefs.guideSince = since
+        state.update { it.copy(guideSince = since) }
+    }
+
     /** Not to offer `q` again unasked: its coin's offers are declined. */
     fun declineOffer(q: ContractQuote) {
         prefs.offerDeclined = offeredCoin(q) ?: return
@@ -1293,8 +1310,10 @@ class Engine(context: Context) {
             val pinned = Mobile.pinHeight(chainName(prefs.network)).toUInt()
             val birthday = if (light != null && light.synced()) light.height().toUInt() else pinned
             wallet = configured(Wallet.create(walletDir, prefs.network, birthday, tor()))
-            // Made here: its words never seen yet, Home suggests saving them.
+            // Made here: its words never seen yet, saving them is suggested.
             prefs.wordsDue = true
+            // And set up step by step, to its first vault.
+            guide(System.currentTimeMillis() / 1000)
             AppLog.info("wallet made at block $birthday")
         }
         // Running since the app started, of this network: shown at once,
@@ -1454,8 +1473,10 @@ class Engine(context: Context) {
             }
             wallet = configured(w)
             hubsLearned = false
-            // Restored from its words or a backup of them: saved already.
+            // Restored from its words or a backup of them: saved already, and in use
+            // before, so not set up step by step, whatever a wallet deleted here left.
             prefs.wordsDue = false
+            guide(null)
             AppLog.info("wallet restored, of ${chainName(prefs.network)}")
         }
         lightLock.withLock { startLight() }
@@ -1905,7 +1926,7 @@ class Engine(context: Context) {
         var started = false
         state.update {
             started = it.opening == null
-            if (started) it.copy(opening = hub, offer = null) else it
+            if (started) it.copy(opening = hub, offer = null, openFailed = null) else it
         }
         if (!started) return
         AppLog.info("opening a contract at $hub${chosen?.let { " of ${it.cap} sat over ${it.blocks} blocks" } ?: ""}")
@@ -1925,7 +1946,9 @@ class Engine(context: Context) {
                 notices.tryEmit(Event("Protection set up at ${host(hub)}: on once confirmed"))
             } catch (e: Exception) {
                 AppLog.warn("opening a contract at $hub", e)
-                notices.tryEmit(Event("Protection not set up. ${explain(e)}"))
+                val why = openFailure(explain(e))
+                state.update { it.copy(openFailed = why) }
+                notices.tryEmit(Event("Protection not set up. $why"))
             } finally {
                 // What is left on Bitcoin is offered for afresh.
                 offeredFor = null
@@ -2010,6 +2033,12 @@ class Engine(context: Context) {
         AppLog.info("forcing contract $id closed given up")
         refresh()
     }
+
+    /**
+     * What the hub at `url` says of itself now, not added nor kept:
+     * whether it has room for a vault, asked before it is chosen.
+     */
+    suspend fun hubSays(url: String): Result<Hub> = io { local { it.hubSays(url) } }
 
     /**
      * The hubs announced on the relays its hubs name and on the default
@@ -2178,6 +2207,7 @@ class Engine(context: Context) {
             prefs.askedAt = null
             prefs.caughtUp = false
             prefs.wordsDue = false
+            prefs.guideSince = null
             seen = null
             looking = false
             WatchJob.cancel(app)

@@ -582,6 +582,14 @@ async fn a_wallet_opens_contracts_at_a_hub_and_sees_them_confirm() -> Result<()>
     let info = wallet.add_hub(&url).await?;
     let offered = info.contracts.context("no contracts in the hub's info")?;
     ensure!(offered.mock && offered.cap == 131_071 && offered.price == 23_000);
+    // With none open and its wallet funded, its info says it has room
+    // for one: what a wallet chooses a hub by before paying a deposit.
+    ensure!(
+        !offered.full && offered.room() == licash_api::Room::Open,
+        "no room said: full {}, funds {:?}",
+        offered.full,
+        offered.funds
+    );
     ensure!(holder::list(&mine.join("wallet.sqlite"))?.is_empty());
     ensure!(
         !holds_contracts(&mine.join("wallet.sqlite"))?,

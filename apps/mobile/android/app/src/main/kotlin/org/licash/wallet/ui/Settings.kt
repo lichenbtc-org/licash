@@ -87,17 +87,17 @@ private const val ADVANCED_MEANS =
  * opens a page of its own.
  */
 @Composable
-fun Settings(engine: Engine, ui: Ui, balance: () -> Unit, back: () -> Unit) {
+fun Settings(engine: Engine, ui: Ui, balance: () -> Unit, guide: () -> Unit, back: () -> Unit) {
     var page by rememberSaveable { mutableStateOf<Page?>(null) }
     // The tour again, as shown before the wallet was made.
     var touring by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = page != null || touring) { if (touring) touring = false else page = null }
     if (touring) {
         Tour {
-            // The rest of the onboarding again: Home guides to a vault, for a wallet holding already too.
+            // The rest of the onboarding again: a vault set up step by step, for a wallet holding already too.
             if (ui.wallet && ui.hubs.isNotEmpty()) {
                 BigButton("Guide me to a vault", Modifier.fillMaxWidth().testTag("guide-start")) {
-                    engine.prefs.guideSince = System.currentTimeMillis() / 1000
+                    guide()
                     touring = false
                     back()
                 }

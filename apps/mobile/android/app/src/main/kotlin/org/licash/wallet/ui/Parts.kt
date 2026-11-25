@@ -1,6 +1,9 @@
 package org.licash.wallet.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -16,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -51,15 +55,20 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -505,12 +514,14 @@ fun Segmented(options: List<String>, chosen: Int, modifier: Modifier = Modifier,
                     .selectable(selected = on, role = Role.Tab) { choose(i) },
                 contentAlignment = Alignment.Center,
             ) {
+                // Clear of its ends, however narrow: a long name ends in an ellipsis, not at the edge.
                 Text(
                     option,
-                    modifier = Modifier.testTag("segment $option"),
+                    modifier = Modifier.padding(horizontal = 10.dp).testTag("segment $option"),
                     style = MaterialTheme.typography.labelLarge,
                     color = if (on) colors.onSurface else colors.onSurfaceVariant,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
@@ -520,10 +531,19 @@ fun Segmented(options: List<String>, chosen: Int, modifier: Modifier = Modifier,
 /** Where a step of something under way stands. */
 enum class Mark { DONE, NOW, NEXT, FAILED }
 
+/** A step's mark: the circle each is drawn in, and what is above it in its row. */
+private val MARK = 16.dp
+private val MARK_TOP = 14.dp
+
 /**
  * A step of a timeline: a mark, joined to the next step's by a line unless
- * `last`, its title, what it says of it, and something to do, if any.
+ * `last`, its title, what it says of it, and something to do, if any: a
+ * word to tap (`action`), or `content` under it, as a button of its own.
  * `tag` names it, for the tests.
+ *
+ * Every mark is a circle of the same size at the same place in its row,
+ * and the line runs from the edge of one to the edge of the next, so the
+ * steps of a timeline are to follow one another with nothing between.
  */
 @Composable
 fun Step(
@@ -533,26 +553,50 @@ fun Step(
     last: Boolean = false,
     action: Pair<String, () -> Unit>? = null,
     tag: String = "step $title",
+    content: (@Composable () -> Unit)? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
+    // Done while in sight: its check comes in a little small, and settles. Not one done already when shown.
+    val pop = remember { Animatable(1f) }
+    var was by remember { mutableStateOf(mark) }
+    LaunchedEffect(mark) {
+        val reached = mark == Mark.DONE && was != Mark.DONE
+        was = mark
+        if (reached) {
+            pop.snapTo(0.5f)
+            pop.animateTo(1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy))
+        }
+    }
     Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min).testTag(tag)) {
-        Column(
-            Modifier.width(28.dp).fillMaxHeight(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Spacer(Modifier.height(12.dp))
-            Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
-                when (mark) {
-                    Mark.DONE -> Icon(Icons.Filled.CheckCircle, "Done", tint = scheme.primary)
-                    Mark.FAILED -> Icon(Icons.Filled.Warning, "Failed", tint = scheme.error)
-                    Mark.NOW -> CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                    Mark.NEXT -> Box(Modifier.size(14.dp).border(2.dp, scheme.outline, CircleShape))
+        val line = if (mark == Mark.DONE) scheme.primary else scheme.outlineVariant
+        Box(
+            Modifier.width(28.dp).fillMaxHeight().drawBehind {
+                // Down to the next step's mark, in the row under this one: nothing clips it.
+                if (!last) {
+                    val x = size.width / 2
+                    drawLine(
+                        line,
+                        Offset(x, (MARK_TOP + MARK).toPx()),
+                        Offset(x, size.height + MARK_TOP.toPx()),
+                        strokeWidth = 2.dp.toPx(),
+                    )
                 }
-            }
-            if (!last) {
-                Spacer(Modifier.height(4.dp))
-                val line = if (mark == Mark.DONE) scheme.primary else scheme.outlineVariant
-                Box(Modifier.width(2.dp).weight(1f).background(line))
+            },
+            contentAlignment = Alignment.TopCenter,
+        ) {
+            Box(Modifier.padding(top = MARK_TOP).size(MARK), contentAlignment = Alignment.Center) {
+                // The icons' circles are five sixths of their size.
+                val glyph = Modifier.requiredSize(MARK * 1.2f)
+                when (mark) {
+                    Mark.DONE -> Icon(Icons.Filled.CheckCircle, "Done", glyph.scale(pop.value), tint = scheme.primary)
+                    Mark.FAILED -> Icon(Icons.Filled.Warning, "Failed", glyph, tint = scheme.error)
+                    Mark.NOW -> CircularProgressIndicator(
+                        Modifier.size(MARK),
+                        strokeWidth = 2.dp,
+                        trackColor = scheme.outlineVariant,
+                    )
+                    Mark.NEXT -> Box(Modifier.size(MARK).border(2.dp, scheme.outline, CircleShape))
+                }
             }
         }
         Spacer(Modifier.width(12.dp))
@@ -571,6 +615,10 @@ fun Step(
             }
             action?.let { (label, act) ->
                 TextButton(onClick = act, modifier = Modifier.height(36.dp)) { Text(label) }
+            }
+            content?.let {
+                Spacer(Modifier.height(8.dp))
+                it()
             }
         }
     }

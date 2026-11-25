@@ -108,9 +108,9 @@ enum Command {
         #[arg(long)]
         qr: bool,
     },
-    /// A payment code to show as text or a QR code, `licash:...`: payers
-    /// pay it in notes at a hub it names that they trust, else once a swap
-    /// brought their notes there.
+    /// A payment code to show as text or a QR code, `licash:...`, what the
+    /// app calls a Licash address: payers pay it in notes at a hub it
+    /// names that they trust, else once a swap brought their notes there.
     Code {
         /// A hub it is paid at, preferred first; repeat it for more, the
         /// first three named [default: those whose contracts have the most

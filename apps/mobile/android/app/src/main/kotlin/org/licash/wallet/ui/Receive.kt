@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.licash.core.Code
+import org.licash.core.Contract
 import org.licash.core.DonationAddress
 import org.licash.core.ExtraCode
 import org.licash.core.Hub
@@ -68,8 +69,8 @@ internal enum class Way(val label: String, val says: String, val tag: String) {
     /** A Lightning invoice a hub makes, or a provider where none does, for an amount: any wallet pays it. */
     LIGHTNING("Lightning invoice", "Any Lightning wallet, for an amount", "way-lightning"),
 
-    /** The wallet's code, paid in notes. */
-    CODE("Licash code", "Licash wallets, cheaper and more private", "way-code"),
+    /** The wallet's code, called its address, as what one is paid at is: paid in notes. */
+    CODE("Licash address", "Licash wallets, cheaper and more private", "way-code"),
 
     /** The code on Bitcoin: an address any wallet pays, handed out once asked for, and the silent payment address. */
     BITCOIN("Bitcoin address", "Any Bitcoin wallet, on Bitcoin", "way-bitcoin"),
@@ -83,6 +84,15 @@ internal enum class Way(val label: String, val says: String, val tag: String) {
     /** The Lightning Address of an account at a bridge: any wallet pays it, again, into that account. */
     ADDRESS("Lightning Address", "Any Lightning wallet, again and again, into your bridge account", "way-address"),
 }
+
+/**
+ * Whether what is received `way` is held on a hub's word alone: paid into
+ * a hub, as its notes, with no vault protecting or being set up
+ * ([hasVault]). Not what is paid on Bitcoin, hers, nor into a bridge
+ * account, which says of itself whose word it is held on.
+ */
+internal fun unprotectedWay(way: Way, contracts: List<Contract>): Boolean =
+    (way == Way.CODE || way == Way.LIGHTNING || way == Way.DONATIONS) && !hasVault(contracts)
 
 /** The ways Receive shows a tab of, in its order: the rest are under More. */
 internal val TABS = listOf(Way.CODE to "Licash", Way.LIGHTNING to "Lightning", Way.BITCOIN to "Bitcoin")
@@ -468,6 +478,8 @@ fun Receive(engine: Engine, back: () -> Unit) {
         ) {
             Spacer(Modifier.height(16.dp))
             received?.let {
+                Cheer(size = 72.dp)
+                Spacer(Modifier.height(8.dp))
                 Text(
                     it,
                     modifier = Modifier.testTag("received"),
@@ -587,6 +599,16 @@ fun Receive(engine: Engine, back: () -> Unit) {
                     textAlign = TextAlign.Center,
                 )
             }
+            // Paid into a hub, with no vault: said each time, not on what is paid on Bitcoin or into a bridge.
+            if (!editing && unprotectedWay(way, ui.contracts)) {
+                Text(
+                    RECEIVED_UNPROTECTED,
+                    modifier = Modifier.padding(top = 8.dp).testTag("receive-unprotected"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    textAlign = TextAlign.Center,
+                )
+            }
             if (!editing) {
                 TextButton(onClick = { choosing = true }, modifier = Modifier.testTag("other-ways")) {
                     Text("More")
@@ -646,7 +668,7 @@ private fun MemoField(memo: String, by: String, onMemo: (String) -> Unit, done: 
 
 /** What a separate code is, said where one is made. */
 internal const val SEPARATE_WORDS =
-    "A code of its own to be paid at: no one can tell it's yours, or link it to your other identities. " +
+    "An address of its own to be paid at: no one can tell it's yours, or link it to your other identities. " +
         "Payments to it move to your balance, less a hub fee."
 
 /** The wallet's own code, as an identity: the one its contacts know. */

@@ -233,7 +233,7 @@ fun Send(
                         }
                         scanned is Scanned.Code -> when {
                             scanned.notes -> Step.Paying(text, scanned.amount)
-                            else -> Step.Failed("This code names no hub you use, and no Bitcoin address to pay.", "Can't pay this")
+                            else -> Step.Failed("This address names no hub you use, and no Bitcoin address to pay.", "Can't pay this")
                         }
                         scanned is Scanned.Visit -> Step.Visit(text, scanned.amount)
                         scanned is Scanned.Bitcoin -> when (val asked = scanned.amount) {
@@ -484,7 +484,7 @@ fun Send(
                             is Step.NoNote -> Ask(
                                 "Send without the note?",
                                 "${name(s.hub)} can't carry a note with a payment. They would get the payment, but not your note" +
-                                    (if (shareCode) " or your code." else "."),
+                                    (if (shareCode) " or your address." else "."),
                                 "Send without the note",
                                 {
                                     note = ""

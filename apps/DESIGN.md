@@ -57,6 +57,12 @@ a person sees. The apps differ in medium, not in manners.
     set up, a close in the background) shows where it stands on the page
     it belongs to. An outcome is seen and felt: a short haptic for done
     and another for failed, and a tick for a switch; not for every tap.
+    Progress the owner waited for (a step of setting up, money in) is
+    also drawn: a check in a ring (`Cheer`), once, small, beside the
+    words that say it.
+11. **A first run is pages, not sheets.** Setting a wallet up is one
+    screen for each step with nothing else on it, so that nothing behind
+    it looks like more to do. Sheets are for what is read and left.
 
 ## Words
 
@@ -71,7 +77,10 @@ a person sees. The apps differ in medium, not in manners.
 | Fee, Total | Base + ppm, margin |
 | On Bitcoin, over Lightning, in Licash | On-chain, L1, LN |
 | Couldn't pay, Can't send on Bitcoin | Error, failed (alone) |
-| Vault, only as the picture: the tour, the first funding, a step card | Vault for a protection's rows and states |
+| Vault, only as the picture: the tour, setting a wallet up, a step card | Vault for a protection's rows and states |
+| Protected amount, for how much a protection covers | Size, cap |
+| One block is enough | Confirmations (how deep is under Details) |
+| Address, Licash address, for what a wallet is paid at | Code, payment code (the CLI and the protocol keep `code`) |
 | Tokens, ecash tokens, in the tour | Claims |
 
 Core error reasons pass through `explain()` and `plain()` (Android,

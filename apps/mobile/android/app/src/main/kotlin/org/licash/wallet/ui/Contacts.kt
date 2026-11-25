@@ -66,7 +66,7 @@ internal fun Contacts(engine: Engine, pay: (Contact) -> Unit) {
     }
     forgetting?.let { c ->
         Sheet("Forget ${c.name}?", { forgetting = null }) {
-            Say("Their code is forgotten: to pay them again, scan it again.")
+            Say("Their address is forgotten: to pay them again, scan it again.")
             BigButton("Forget", Modifier.fillMaxWidth().testTag("forget-contact"), danger = true) {
                 forgetting = null
                 scope.launch {

@@ -8,6 +8,7 @@ import org.licash.core.ContractTerms
 import org.licash.core.Fees
 import org.licash.core.FeesRaised
 import org.licash.core.Hub
+import org.licash.core.HubRoom
 import org.licash.core.HubsFound
 import org.licash.core.LightningTerms
 import org.licash.core.Range
@@ -28,6 +29,22 @@ class HubsTest {
         val range = ContractRange(131_071uL, 16_777_215uL, 432u, 52_560u, 2u, 20_000uL, 3_000uL, 10_000u, 0u, 52_560u)
         assertEquals("1% a year", interestOf(range))
         assertEquals("1% a year, 0.5% on yours", interestOf(range.copy(ppmYearFunded = 5_000u)))
+    }
+
+    @Test
+    fun a_hub_saying_it_has_no_room_for_a_vault_is_not_started_at() {
+        // Room, or nothing said of it, as hubs before any did: none to tell.
+        assertNull(noRoom(opens = true, room = HubRoom.OPEN))
+        assertEquals("No room for new vaults right now.", noRoom(opens = true, room = HubRoom.FULL))
+        assertEquals("It can't fund new vaults right now.", noRoom(opens = true, room = HubRoom.UNFUNDED))
+        assertEquals("It opens no vaults.", noRoom(opens = false, room = null))
+        val (a, b, c) = listOf("a", "b", "c").map { Known("https://$it.example", it) }
+        // The first not known to have none, unasked ones too; none if all are known to.
+        assertEquals(a, pick(listOf(a, b, c), emptyMap()))
+        assertEquals(b, pick(listOf(a, b, c), mapOf(a.url to "full")))
+        assertEquals(c, pick(listOf(a, b, c), mapOf(a.url to "full", b.url to "full")))
+        assertNull(pick(listOf(a), mapOf(a.url to "full")))
+        assertNull(pick(emptyList(), emptyMap()))
     }
 
     private fun found(silent: UInt, onion: UInt) = HubsFound(hubs = emptyList(), silent = silent, silentOnion = onion)

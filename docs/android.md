@@ -8,37 +8,74 @@ under a Jetpack Compose UI.
 
 ### First run
 
-With no wallet, the app opens on a six-slide tour, skippable, that tells
+With no wallet, the app opens on a five-slide tour, skippable, that tells
 Licash with gold: bitcoin is gold in a vault, too slow, costly and public
 to pay a baker with, so people pay with ecash tokens a hub (a vault
 company) issues, alone only its promise; Licash tokens come with the
-user's own vault (a contract) of real bitcoin, redeemed for sure; the hub
-adds its own bitcoin to it, room for tokens she is paid; and with enough
-tokens she recovers up to its balance, fewer being fine and more being
-credit. Its last slide creates or restores the wallet
-(and picks a test network). It never shows for a wallet already there.
-Settings replays it as "How Licash works", ending on "Guide me to a vault":
-Home then shows the funding guide below even for a wallet in use, until a
-vault asked for since protects or "Hide guide" is tapped. The pictures are drawn in
-Compose, the same shapes in the dark and light themes.
+user's own vault (a contract) of real bitcoin, redeemed for sure; and that
+vault is her insurance: she chooses how much it protects, locks bitcoin in
+it, her hub can add its own, and her tokens are protected up to that
+amount (said as what it protects, so what is beyond it is plainly not).
+Its last slide creates or restores the wallet (and picks a test network,
+"Use mainnet" going back). It never shows for a wallet already there.
+Settings replays it as "How Licash works", ending on "Guide me to a vault",
+which sets a vault up as below even for a wallet in use, until a vault
+asked for since protects or "Hide guide" is tapped. The pictures are drawn
+in Compose, the same shapes in the dark and light themes.
 
-The first hub: on a network with a recommended hub (Mutinynet only, for
-now), "Use this hub" adds the first one that answers; "Choose another", or
-a failure, lists the hubs announced on Nostr and takes one by its address,
-and none found says "No hubs available". Then, until the wallet holds or
-ever paid with notes, Home guides the first funding: what the vault is
-mostly for (pay, both, or receive, sizing it at the coin, half again, or
-three times it), the least to send, the address to send bitcoin to as a QR
-code with a copy button, and where it stands (Waiting, Seen, In a block,
-Opening vault, Ready). Nothing opens without a tap: once the coin is in a
-block, "Open your vault" shows the offer, sized by the choice, saved for
-the next offers too (a wallet of an earlier version keeps "both").
+A new wallet is then set up a screen at a time, with nothing else on the
+screen (`ui/Setup.kt`), in Home's place:
+
+1. **Back up.** For a wallet made here, before anything is in it: its
+   recovery words bring back its keys and what it holds on Bitcoin, but
+   not its balance, which hubs hold; the automatic backup does, encrypted
+   with the words, to a folder a sync app copies off the phone. Restoring
+   takes both. "Later" puts it off; Home still suggests the words once
+   the wallet holds something.
+2. **Choose a hub.** On a network with recommended hubs (Mutinynet only,
+   for now), each is asked what it says of itself: the first with room
+   for a vault is "Recommended" and added in a tap, one saying it has
+   none (`full`, or its wallet funding none: see [the hub](hub.md)) is
+   grayed, with why, and still usable ("Use it anyway": a vault funded
+   whole by its holder opens there). A hub saying nothing of it, as hubs
+   of earlier versions, reads as having room. "Choose another", or a
+   failure, lists the hubs announced on Nostr, those with no room grayed
+   too, and takes one by its address; the back gesture returns to those
+   recommended. None found says "No hubs available".
+3. **Fund.** "Send at least 50,000 sat. It opens your vault and covers its
+   reserve and fees.": one figure at every hub, the address as a QR code
+   with a copy button, and where it stands (Waiting, Seen, In a block,
+   Opening vault, Ready), the marks joined by a line. One block is all a
+   deposit is said to need, and "In a block" is done once reached; how
+   deep it is is under "Details". Nothing opens without a tap: "Open your
+   vault" is under "In a block", disabled until then.
+4. **Open your vault.** The offer on a page of its own, its protected
+   amount under More. A hub refusing for want of room says "This hub
+   can't open new vaults right now" and offers another hub.
+5. **Opening.** What it waits on, how much of its download is done, its
+   protected amount, what goes into the balance and its hub, kept in
+   sight until it protects.
+6. **Ready.** Said once, with a check drawn and a haptic.
+
+"Not now" (and the back gesture) leaves for Home, whose step card ("Set up
+your vault", where it stands) leads back. A wallet in use is never set up
+unasked: one with a hub that holds or ever paid with notes goes to Home as
+before, and so does every wallet of an earlier version past its first
+funding. Send is grayed while there is nothing to send (no balance and no
+vault) and, tapped, leads to the funding with why. Receive says, under
+what is paid into a hub with no vault, "No vault yet: what you receive is
+held by your hub, not protected.", each time.
+
+Progress is felt and seen: a haptic and a check drawn when the wallet is
+made, its words shown, a hub chosen, a deposit seen, the vault opening and
+ready; money in, on any screen, is said from the top with a check and a
+haptic.
 
 ### Home
 
 Home is the balance, a gauge of how much of it is protected, one line while
 something is going on, at most one suggested next step, Receive and Send.
-The step is, the most pressing first: the first funding above; the offer
+The step is, the most pressing first: setting up the first vault, above; the offer
 for bitcoin that arrived; bitcoin too little for a vault, to add; saving
 the recovery words of a wallet made here, once it holds something (a
 wallet restored, or of an earlier version, is never asked); renewing a
@@ -238,7 +275,8 @@ instead, its node holding the payment until the provider locks its notes
 to the app at a hub it trusts, which the app claims as it claims a hub's:
 nothing is trusted to the provider, but it sees the amount, the memo and
 which payments go to one wallet. Receive says the provider's fee taken.
-Receive has a tab each for the Licash code (its hubs, and its silent
+Receive has a tab each for the Licash address (the wallet's payment code,
+as the app calls it everywhere: its hubs, and its silent
 payment address), Lightning (asking an amount first) and Bitcoin (the bare
 address any wallet pays, handed out only once asked for); the code alone,
 the silent payment address alone and which identity the code is of are
@@ -295,7 +333,7 @@ in the background: the periodic job runs while any is on its way. The
 wallet file records where each stands; a `deliveries.json` left by an
 earlier version is no longer read.
 
-Paying a code, a note may be typed for the payee, and "Share my code"
+Paying a code, a note may be typed for the payee, and "Share my address"
 (off by default) tells them who paid, proved to them alone: both sealed
 for the payee, the hub and relays reading neither. A hub that would not
 keep a note with a payment refuses it, nothing paid, and the app offers
@@ -329,7 +367,7 @@ still holds it and must hand it over), and paid on to the wallet's own
 code after a delay of between 1 and 30 minutes, a different one for each
 payment, less the hub's fee: an amount below that fee waits for more. The
 history shows each payment at the code, named "To" it, its fee
-that of moving it to the balance. "Share my code" may share a separate
+that of moving it to the balance. "Share my address" may share a separate
 code instead ("Share as"). Each code is kept in a wallet file of its own
 beside the wallet's (`wallet.sqlite.codes/`), deleted with it, outside
 the state bundle and the automatic backup: a wallet restored from either

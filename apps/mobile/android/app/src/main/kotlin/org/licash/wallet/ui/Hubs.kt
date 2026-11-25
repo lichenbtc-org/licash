@@ -1,5 +1,6 @@
 package org.licash.wallet.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -26,6 +27,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
@@ -37,9 +39,11 @@ import org.licash.core.ContractRange
 import org.licash.core.FeesRaised
 import org.licash.core.FoundHub
 import org.licash.core.Hub
+import org.licash.core.HubRoom
 import org.licash.core.HubsFound
 import org.licash.core.Network
 import org.licash.core.NoteOptimization
+import org.licash.core.contractRoom
 import org.licash.wallet.Engine
 import org.licash.wallet.Ui
 import org.licash.wallet.explain
@@ -323,10 +327,12 @@ internal fun FoundHubs(engine: Engine, ui: Ui, auto: Boolean) {
     // Those added since looking drop out.
     val shown = found?.hubs?.filter { f -> ui.hubs.none { sameHub(it.url, f.hub.url) } }
     shown?.forEach { f ->
+        // One saying it has no room for a vault: grayed, and why, but hers to add.
+        val why = noRoom(f.hub)
         Entry(
             f.name ?: name(f.hub.url),
-            modifier = Modifier.testTag("add-found"),
-            sub = about(f.hub),
+            modifier = Modifier.testTag("add-found").alpha(if (why == null) 1f else 0.6f),
+            sub = why ?: about(f.hub),
             onClick = { adding = f },
         )
         Divider()
@@ -356,6 +362,7 @@ internal fun FoundHubs(engine: Engine, ui: Ui, auto: Boolean) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Line("Paying", paying(f.hub))
+            noRoom(f.hub)?.let { Problem(it) }
             Say("Up to what you protect, your balance here can be taken back on Bitcoin without the hub. Above it, it rests on the hub's word.")
             // Stays here while it is added, which asks the hub a few times:
             // closed once it is, or why not said under the button.
@@ -399,9 +406,10 @@ internal const val NONE_AVAILABLE = "Ask a hub's operator for its address and en
 internal data class Known(val url: String, val name: String)
 
 /**
- * The hubs recommended on `network`, to start with in a tap: the first
- * that answers is used. None where none is known; then hubs are looked
- * for on Nostr instead.
+ * The hubs recommended on `network`, to start with in a tap, the most
+ * recommended first: the first with room for a vault that answers is
+ * used. None where none is known; then hubs are looked for on Nostr
+ * instead.
  */
 internal fun recommendedHubs(network: Network): List<Known> = when (network) {
     Network.MUTINYNET -> listOf(Known("https://hub.licash-mutinynet.sgn.space", "sgn.space"))
@@ -409,65 +417,135 @@ internal fun recommendedHubs(network: Network): List<Known> = when (network) {
 }
 
 /**
- * No hub yet: the one recommended for the wallet's network, in a tap; else,
- * or once asked for another, those announced on Nostr; else one by the
- * address its operator gave. What a hub is, once asked.
+ * Why not to start at a hub with `room` for a new vault as it says
+ * ([contractRoom]), in a line: none if it has room, or says nothing of it,
+ * as hubs before any did. `room` null: it opens none at all.
+ */
+internal fun noRoom(opens: Boolean, room: HubRoom?): String? = when {
+    !opens -> "It opens no vaults."
+    room == HubRoom.FULL -> "No room for new vaults right now."
+    room == HubRoom.UNFUNDED -> "It can't fund new vaults right now."
+    else -> null
+}
+
+/** [noRoom] of what `hub` says of itself. */
+internal fun noRoom(hub: Hub): String? = noRoom(hub.contracts != null, hub.contracts?.let(::contractRoom))
+
+/**
+ * The hub to start at of `hubs`, in the order recommended: the first not
+ * known to have no room (`full`, by URL, why not), unasked ones too. None
+ * if all are known to have none.
+ */
+internal fun pick(hubs: List<Known>, full: Map<String, String>): Known? = hubs.firstOrNull { it.url !in full }
+
+/**
+ * Choosing a hub: with none yet, those recommended for the wallet's
+ * network, the first with room for a vault to start at in a tap, those
+ * saying they have none grayed, with why; else, or once asked for
+ * another, those announced on Nostr; else one by the address its operator
+ * gave. What a hub is, once asked. Each recommended is asked what it says
+ * of itself before it is used: a deposit is not sent to one with no room.
+ * Back, from the others, returns to those recommended.
  */
 @Composable
 internal fun FirstHub(engine: Engine, ui: Ui) {
-    val recommended = recommendedHubs(ui.network)
+    // With a hub already, another is looked for: none is recommended twice.
+    val first = ui.hubs.isEmpty()
+    val recommended = if (first) recommendedHubs(ui.network) else emptyList()
     val scope = rememberCoroutineScope()
     val feel = rememberFeel()
     var others by rememberSaveable { mutableStateOf(false) }
     var adding by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.align(Alignment.CenterHorizontally), verticalAlignment = Alignment.CenterVertically) {
-            Text("Choose a hub", modifier = Modifier.testTag("choose-hub"), style = MaterialTheme.typography.headlineSmall)
-            Info("Hubs", HUB_MEANS)
+    // Those that said they have no room, by URL: why.
+    var full by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    suspend fun ask(known: Known): String? {
+        val why = engine.hubSays(known.url).getOrNull()?.let(::noRoom)
+        full = if (why == null) full - known.url else full + (known.url to why)
+        return why
+    }
+    LaunchedEffect(recommended) { recommended.forEach { ask(it) } }
+    // Start at `from`, then the next recommended with room: the first that answers. `anyway`, though it has none.
+    fun use(from: Known, anyway: Boolean = false) {
+        adding = true
+        error = null
+        scope.launch {
+            var last: Throwable? = null
+            val tried = listOf(from) + recommended.filter { it != from }
+            for (known in tried) {
+                // Asked now, not as it said a while ago.
+                val refused = !(anyway && known == from) && ask(known) != null
+                if (refused) continue
+                val added = engine.addHub(known.url, known.name)
+                if (added.isSuccess) {
+                    feel.confirm()
+                    adding = false
+                    return@launch
+                }
+                last = added.exceptionOrNull()
+            }
+            feel.reject()
+            // Not reached: the others to choose from instead. Else all are full, and say so.
+            last?.let {
+                error = "${name(from.url)} did not answer: ${explain(it)}"
+                others = true
+            }
+            adding = false
         }
-        if (recommended.isNotEmpty() && !others) {
-            val first = recommended.first()
-            Column(
-                Modifier.fillMaxWidth().padding(top = 16.dp).clip(RoundedCornerShape(16.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainer).padding(16.dp),
-            ) {
-                Text("Recommended", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                Text(first.name, modifier = Modifier.testTag("recommended-hub"), style = MaterialTheme.typography.titleLarge)
-                Text(
-                    "Holds your balance and moves it for you.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(16.dp))
-                BigButton(
-                    if (adding) "Connecting…" else "Use this hub",
-                    Modifier.fillMaxWidth().testTag("use-recommended"),
-                    busy = adding,
-                    enabled = !adding,
+    }
+    val listed = recommended.isNotEmpty() && !others
+    BackHandler(enabled = first && others && recommended.isNotEmpty() && !adding) { others = false }
+    Column(Modifier.fillMaxWidth()) {
+        if (first) {
+            Row(Modifier.align(Alignment.CenterHorizontally), verticalAlignment = Alignment.CenterVertically) {
+                Text("Choose a hub", modifier = Modifier.testTag("choose-hub"), style = MaterialTheme.typography.headlineSmall)
+                Info("Hubs", HUB_MEANS)
+            }
+        }
+        if (listed) {
+            val picked = pick(recommended, full)
+            for (known in recommended) {
+                val why = full[known.url]
+                Column(
+                    Modifier.fillMaxWidth().padding(top = 16.dp).clip(RoundedCornerShape(16.dp))
+                        .background(MaterialTheme.colorScheme.surfaceContainer).padding(16.dp)
+                        .alpha(if (why == null) 1f else 0.6f),
                 ) {
-                    adding = true
-                    error = null
-                    scope.launch {
-                        // The first that answers.
-                        var last: Throwable? = null
-                        for (known in recommended) {
-                            val added = engine.addHub(known.url, known.name)
-                            if (added.isSuccess) {
-                                feel.confirm()
-                                adding = false
-                                return@launch
-                            }
-                            last = added.exceptionOrNull()
+                    if (known == picked) {
+                        Text("Recommended", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    }
+                    Text(
+                        known.name,
+                        modifier = Modifier.testTag(if (known == picked) "recommended-hub" else "other-hub"),
+                        style = MaterialTheme.typography.titleLarge,
+                    )
+                    Text(
+                        why ?: "Holds your balance and moves it for you.",
+                        modifier = Modifier.testTag(if (why == null) "hub-says" else "hub-full"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    when {
+                        known == picked -> {
+                            Spacer(Modifier.height(16.dp))
+                            BigButton(
+                                if (adding) "Connecting…" else "Use this hub",
+                                Modifier.fillMaxWidth().testTag("use-recommended"),
+                                busy = adding,
+                                enabled = !adding,
+                            ) { use(known) }
+                            Waited(rememberWait(adding))
                         }
-                        feel.reject()
-                        error = last?.let(::explain)
-                        // Not reached: the others to choose from instead.
-                        others = true
-                        adding = false
+                        why != null -> TextButton(
+                            onClick = { use(known, anyway = true) },
+                            modifier = Modifier.testTag("use-anyway"),
+                            enabled = !adding,
+                        ) { Text("Use it anyway") }
+                        else -> TextButton(onClick = { use(known) }, modifier = Modifier.testTag("use-other"), enabled = !adding) {
+                            Text("Use this one")
+                        }
                     }
                 }
-                Waited(rememberWait(adding))
             }
             TextButton(
                 onClick = { others = true },
@@ -475,7 +553,7 @@ internal fun FirstHub(engine: Engine, ui: Ui) {
                 enabled = !adding,
             ) { Text("Choose another") }
         } else {
-            error?.let { Problem("${name(recommended.first().url)} did not answer: $it") }
+            error?.let { Problem(it) }
             Group("") { FoundHubs(engine, ui, auto = true) }
             Group("Or its address") { AddHub(engine, "Connect") }
         }
