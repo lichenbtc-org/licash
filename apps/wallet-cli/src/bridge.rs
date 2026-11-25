@@ -122,6 +122,26 @@ pub enum BridgeCommand {
         #[arg(long)]
         hub: Option<String>,
     },
+    /// Freeze the bridge for good and import its notes, for a recovery
+    /// contract with its hub to claim should the hub stop cooperating.
+    /// It pays nothing out from then on. --out keeps the export too.
+    Export {
+        #[arg(long)]
+        bridge: Option<String>,
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// Freezing it is for good, until its operator unfreezes it.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Import the notes of a frozen bridge from FILE, as `licash-bridge
+    /// export` wrote them to this wallet's key there.
+    Import { file: std::path::PathBuf },
+    /// The notes imported, by bridge, and those a recovery claims.
+    Imported,
+    /// Forget the notes imported from the bridge of Nostr key SOURCE, for
+    /// it to be unfrozen: refused while a recovery claims them.
+    Discard { source: String },
     /// Forget the bridge: its account stays there, found again by adding it.
     Remove { url: String },
 }
@@ -351,6 +371,59 @@ pub async fn run(wallet: &Wallet<Http>, command: BridgeCommand, json: bool) -> a
                 }
             }
         }
+        BridgeCommand::Export { bridge, out, yes } => {
+            if !yes {
+                bail!("the bridge pays nothing out once exported, until its operator unfreezes it: --yes says so");
+            }
+            let url = which(wallet, bridge)?;
+            let (imported, export) = wallet.export_bridge(&url).await?;
+            if let Some(out) = out {
+                std::fs::write(&out, format!("{}\n", hex::encode(&export)))?;
+            }
+            show(json, imported_json(&imported), imported_text(&imported));
+        }
+        BridgeCommand::Import { file } => {
+            let text = std::fs::read_to_string(&file)?;
+            let export = hex::decode(text.trim())
+                .map_err(|_| anyhow::anyhow!("{}: not an export of notes", file.display()))?;
+            let imported = wallet.import_notes(&export)?;
+            show(json, imported_json(&imported), imported_text(&imported));
+        }
+        BridgeCommand::Imported => {
+            let sources = wallet.imported_notes()?;
+            let rows: Vec<_> = (sources.iter())
+                .map(|s| {
+                    json!({
+                        "source": s.source,
+                        "notes": s.notes,
+                        "amount": s.amount,
+                        "claimed": s.claimed,
+                        "void": s.void,
+                    })
+                })
+                .collect();
+            let text = match sources.is_empty() {
+                true => "no notes imported".to_owned(),
+                false => (sources.iter())
+                    .map(|s| {
+                        format!(
+                            "{}  {} notes, {} sat, {} claimed, {} dropped",
+                            s.source, s.notes, s.amount, s.claimed, s.void
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            };
+            show(json, json!(rows), text);
+        }
+        BridgeCommand::Discard { source } => {
+            let gone = wallet.discard_imported(&source)?;
+            show(
+                json,
+                json!({ "discarded": gone }),
+                format!("{gone} notes imported forgotten: the bridge may be unfrozen"),
+            );
+        }
         BridgeCommand::Remove { url } => wallet.remove_bridge(&url)?,
     }
     Ok(())
@@ -548,4 +621,32 @@ fn top_up_text(topped: &BridgeTopUp) -> String {
         msat(topped.invoice.credits),
         topped.lock.id
     )
+}
+
+fn imported_json(imported: &licash_wallet::Imported) -> serde_json::Value {
+    json!({
+        "source": imported.source,
+        "added": imported.added,
+        "amount": imported.amount,
+        "known": imported.known,
+        "unknown": imported.unknown,
+    })
+}
+
+fn imported_text(imported: &licash_wallet::Imported) -> String {
+    let mut text = format!(
+        "{} notes worth {} sat imported, for a recovery contract with their hub to claim \
+         within what the wallet's own notes leave of its cap",
+        imported.added, imported.amount
+    );
+    if imported.known > 0 {
+        text += &format!("; {} imported before", imported.known);
+    }
+    if imported.unknown > 0 {
+        text += &format!(
+            "; {} of a keyset this wallet never held, left out",
+            imported.unknown
+        );
+    }
+    text
 }

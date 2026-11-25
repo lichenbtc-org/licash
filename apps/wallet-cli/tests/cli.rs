@@ -2382,8 +2382,39 @@ fn owners_top_up_a_bridge_and_connect_apps_on_the_command_line() {
     let host = url.strip_prefix("http://").unwrap();
     let named = json(&alice, &["bridge", "address", "Alice"]);
     assert_eq!(named["lightning_address"], format!("alice@{host}"));
-    failed(wallet(&alice, &["bridge", "address", "no way"], None), 1, "a-z");
+    failed(
+        wallet(&alice, &["bridge", "address", "no way"], None),
+        1,
+        "a-z",
+    );
     let key = connected["connection"]["key"].as_str().unwrap();
     let revoked = json(&alice, &["bridge", "revoke", key]);
     assert_eq!(revoked["revoked"], true);
+
+    // Frozen for good, its notes hers to claim should the hub stop.
+    failed(wallet(&alice, &["bridge", "export"], None), 1, "--yes");
+    let out = dir.path().join("export.hex");
+    let out = out.to_str().unwrap();
+    let exported = json(&alice, &["bridge", "export", "--yes", "--out", out]);
+    // What it held then: the 29 credited, and the top-up of `bridge run`
+    // once its round took it.
+    assert!(exported["amount"].as_u64().unwrap() >= 29, "{exported}");
+    assert!(bridged.bridge.status().unwrap().frozen);
+    assert_eq!(
+        json(&alice, &["bridge", "import", out])["known"],
+        exported["added"]
+    );
+    let imported = json(&alice, &["bridge", "imported"]);
+    assert_eq!(imported[0]["amount"], exported["amount"]);
+    let source = imported[0]["source"].as_str().unwrap().to_owned();
+    failed(
+        wallet(&alice, &["bridge", "withdraw", "5"], None),
+        1,
+        "exported",
+    );
+    assert_eq!(
+        json(&alice, &["bridge", "discard", &source])["discarded"],
+        exported["added"]
+    );
+    assert_eq!(json(&alice, &["bridge", "imported"]), serde_json::json!([]));
 }
