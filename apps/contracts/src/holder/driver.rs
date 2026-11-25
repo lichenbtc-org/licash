@@ -64,6 +64,26 @@ pub fn stepping(id: &[u8; 32]) -> Option<std::time::Duration> {
     all.get(id).map(Instant::elapsed)
 }
 
+/// The opening this process drives that went on last: of those whose
+/// holder works out a step now, the latest begun, else the one whose
+/// traffic with its hub began last. None before one asked its hub anything.
+pub fn latest_opening() -> Option<[u8; 32]> {
+    let stepping = STEPPING.lock().unwrap_or_else(PoisonError::into_inner);
+    let traffic = TRAFFIC.lock().unwrap_or_else(PoisonError::into_inner);
+    latest_of(&stepping, &traffic)
+}
+
+fn latest_of(
+    stepping: &HashMap<[u8; 32], Instant>,
+    traffic: &HashMap<[u8; 32], Traffic>,
+) -> Option<[u8; 32]> {
+    let stepped = stepping.iter().max_by_key(|(_, at)| **at);
+    let talked = || traffic.iter().max_by_key(|(_, t)| t.since);
+    stepped
+        .map(|(id, _)| *id)
+        .or_else(|| talked().map(|(id, _)| *id))
+}
+
 /// Marks opening `id` as stepping until dropped.
 struct Stepping([u8; 32]);
 
@@ -490,5 +510,26 @@ mod tests {
         assert_eq!(stepping(&[8; 32]), None);
         drop(marked);
         assert_eq!(stepping(&id), None);
+    }
+
+    #[test]
+    fn the_latest_opening_is_one_stepping_else_the_last_to_talk_to_its_hub() {
+        let start = Instant::now();
+        let at = |s| start + std::time::Duration::from_secs(s);
+        let talked = |s| Traffic {
+            bytes: 1,
+            since: at(s),
+            expected: None,
+        };
+        let mut stepping = HashMap::new();
+        let mut traffic = HashMap::new();
+        assert_eq!(latest_of(&stepping, &traffic), None);
+        traffic.insert([1; 32], talked(1));
+        traffic.insert([2; 32], talked(5));
+        assert_eq!(latest_of(&stepping, &traffic), Some([2; 32]));
+        stepping.insert([1; 32], at(9));
+        assert_eq!(latest_of(&stepping, &traffic), Some([1; 32]));
+        stepping.insert([3; 32], at(10));
+        assert_eq!(latest_of(&stepping, &traffic), Some([3; 32]));
     }
 }

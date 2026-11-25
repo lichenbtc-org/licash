@@ -6,7 +6,9 @@
 //! `recovery-statement` and `import-proof`: one its hub answered, proved
 //! on another machine.
 
+use std::io::IsTerminal as _;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use licash_contracts::holder::activation;
@@ -138,10 +140,14 @@ pub async fn open(
         cap: asked.cap,
         deposit: asked.coin,
     };
-    let contract = match asked.any_fees {
-        true => holder::open_anyway(wallet, &chain, path, hub, ask).await,
-        false => holder::open_with(wallet, &chain, path, hub, ask).await,
-    }?;
+    let opening = async {
+        match asked.any_fees {
+            true => holder::open_anyway(wallet, &chain, path, hub, ask).await,
+            false => holder::open_with(wallet, &chain, path, hub, ask).await,
+        }
+    };
+    let progress = !json && std::io::stderr().is_terminal();
+    let contract = told(opening, progress).await?;
     // Its terms as they came of her coin: the cap and her part.
     let chosen = offered.range.map(|_| contract.cap);
     let funded = u32::try_from(contract.funded).unwrap_or(u32::MAX);
@@ -152,6 +158,84 @@ pub async fn open(
     let line = format!("{}\n{}", terms.lines(day), contract_line(&contract));
     show(json, value, line);
     Ok(())
+}
+
+/// `opening` awaited, saying how it goes on stderr each second if
+/// `progress`, on one line overwritten: preparing, then uploading.
+async fn told<T>(opening: impl std::future::Future<Output = T>, progress: bool) -> T {
+    use std::io::Write as _;
+    if !progress {
+        return opening.await;
+    }
+    tokio::pin!(opening);
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    // Where the upload of the opening shown began: its speed from then.
+    let mut upload: Option<([u8; 32], Instant, u64)> = None;
+    let mut said = false;
+    let done = loop {
+        tokio::select! {
+            done = &mut opening => break done,
+            _ = tick.tick() => {
+                let Some(id) = holder::latest_opening() else { continue };
+                let traffic = holder::traffic(&id);
+                if let Some(t) = traffic.filter(|t| t.expected.is_some()) {
+                    if upload.is_none_or(|(of, ..)| of != id) {
+                        upload = Some((id, Instant::now(), t.bytes));
+                    }
+                }
+                let since = upload
+                    .filter(|(of, ..)| *of == id)
+                    .map(|(_, at, bytes)| (at.elapsed(), bytes));
+                if let Some(line) = progress_line(holder::stepping(&id), traffic, since) {
+                    eprint!("\r\x1b[K{line}");
+                    let _ = std::io::stderr().flush();
+                    said = true;
+                }
+            }
+        }
+    };
+    if said {
+        eprint!("\r\x1b[K");
+        let _ = std::io::stderr().flush();
+    }
+    done
+}
+
+/// How an opening goes, in a line: its holder preparing a step, for how
+/// long; else what it exchanged with its hub, and once its upload began
+/// (`upload`: how long ago, and what it had exchanged then), how much of
+/// it is sent, at what speed, and about how long the rest takes.
+fn progress_line(
+    stepping: Option<Duration>,
+    traffic: Option<holder::Traffic>,
+    upload: Option<(Duration, u64)>,
+) -> Option<String> {
+    let clock = |s: u64| format!("{}:{:02}", s / 60, s % 60);
+    let mb = |b: u64| format!("{:.1} MB", b as f64 / 1e6);
+    if let Some(took) = stepping {
+        return Some(format!("preparing, {}", clock(took.as_secs())));
+    }
+    let t = traffic?;
+    let Some(expected) = t.expected else {
+        return Some(format!("opening: {} exchanged with the hub", mb(t.bytes)));
+    };
+    let mut parts = vec![format!(
+        "uploading: {} of about {}",
+        mb(t.bytes),
+        mb(expected.max(t.bytes))
+    )];
+    let (seconds, sent) = upload.map_or((0, 0), |(took, before)| {
+        (took.as_secs(), t.bytes.saturating_sub(before))
+    });
+    if seconds > 0 && sent > 0 {
+        let rate = sent / seconds;
+        parts.push(format!("{} kbps", rate * 8 / 1000));
+        if rate > 0 && expected > t.bytes {
+            let left = (expected - t.bytes) / rate;
+            parts.push(format!("about {} left", clock(left)));
+        }
+    }
+    Some(parts.join(", "))
 }
 
 /// Pay for a contract at `hub` as `asked`, its deposit a coin paid to the
@@ -1026,6 +1110,37 @@ mod tests {
         assert_eq!(
             (json["corrected"].as_u64(), json["received"].as_u64()),
             (Some(38_912), Some(37_849))
+        );
+    }
+
+    #[test]
+    fn an_opening_says_it_prepares_then_what_it_uploaded_and_how_fast() {
+        let at = |bytes, expected| holder::Traffic {
+            bytes,
+            since: Instant::now(),
+            expected,
+        };
+        assert_eq!(progress_line(None, None, None), None);
+        let preparing = progress_line(Some(Duration::from_secs(125)), Some(at(9, None)), None);
+        assert_eq!(preparing.unwrap(), "preparing, 2:05");
+        assert_eq!(
+            progress_line(None, Some(at(40_000, None)), None).unwrap(),
+            "opening: 0.0 MB exchanged with the hub"
+        );
+        // Its upload just began: no speed yet.
+        let began = progress_line(None, Some(at(1_000_000, Some(251_000_000))), None);
+        assert_eq!(began.unwrap(), "uploading: 1.0 MB of about 251.0 MB");
+        // 50 MB in 100 s since 1 MB: 500 kB/s, 4,000 kbps, 400 s left.
+        let going = Some(at(51_000_000, Some(251_000_000)));
+        assert_eq!(
+            progress_line(None, going, Some((Duration::from_secs(100), 1_000_000))).unwrap(),
+            "uploading: 51.0 MB of about 251.0 MB, 4000 kbps, about 6:40 left"
+        );
+        // More sent than expected: about all of it, nothing left to say.
+        let past = Some(at(260_000_000, Some(251_000_000)));
+        assert_eq!(
+            progress_line(None, past, Some((Duration::from_secs(10), 250_000_000))).unwrap(),
+            "uploading: 260.0 MB of about 260.0 MB, 8000 kbps"
         );
     }
 }

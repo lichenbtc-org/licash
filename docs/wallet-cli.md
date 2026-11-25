@@ -333,7 +333,11 @@ what a contract costs before opening it, itemized: the hub's opening fee, its
 yearly interest on its part and on yours, your reserve (returned as it
 closes, as notes) and your part for the `--funded` you name, with the sizes
 and durations the hub allows; `open-contract` prints the same, of the
-contract that opened. Several contracts, at one hub or several, each take
+contract that opened. While it opens, on an interactive terminal and
+without `--json`, a line on stderr says how it goes each second: the
+wallet preparing a step, then, once its upload starts, the megabytes sent
+of about how many, the speed in kbps and about how long the rest takes.
+Several contracts, at one hub or several, each take
 their own coin. No contract opens at a hub charging more than is sane (over
 10 sat or 1% on a payment, lock or refund, over 1 sat for each note made, or
 over 20% of a chosen cap a year) unless `--any-fees` asks all the same.
