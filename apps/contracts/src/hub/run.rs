@@ -544,9 +544,34 @@ async fn heavy<T: Send + 'static>(
     done.await.map_err(Refused::unavailable)
 }
 
+/// The fewest bytes left free on the hub's disk for it to take a new
+/// opening: each keeps the instances she uploaded, 25 MB each on signet,
+/// for as long as its contract lives.
+pub(super) const MIN_FREE: u64 = 5 << 30;
+
+/// The least share of its disk left free, in percent, for the hub to take
+/// a new opening.
+pub(super) const MIN_FREE_PERCENT: u64 = 5;
+
+/// Whether `free` bytes of a disk of `total` leave room for a new opening:
+/// at least [`MIN_FREE`] and [`MIN_FREE_PERCENT`] of it.
+pub(super) fn roomy(free: u64, total: u64) -> bool {
+    free >= MIN_FREE && u128::from(free) * 100 >= u128::from(total) * u128::from(MIN_FREE_PERCENT)
+}
+
 /// Refused if `store` holds as many openings under way as the hub takes,
-/// or signed and not funded.
+/// or signed and not funded, or if its disk is nearly full.
 pub(super) fn admits(store: &Store) -> Result<(), Refused> {
+    if let Some((free, total)) = store.room().map_err(Refused::unavailable)? {
+        if !roomy(free, total) {
+            tracing::error!(
+                free,
+                total,
+                "the hub's disk is nearly full: no new contract opened"
+            );
+            return Err(Refused::unavailable("the hub's disk is nearly full: later"));
+        }
+    }
     if store.under_way().map_err(Refused::unavailable)? >= MAX_UNDER_WAY {
         return Err(Refused::unavailable("too many openings under way: later"));
     }
@@ -564,6 +589,29 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn a_new_opening_needs_both_bytes_and_a_share_of_the_disk_free() {
+        let gib = 1u64 << 30;
+        // A small disk: its bytes count.
+        assert!(roomy(MIN_FREE, 20 * gib));
+        assert!(!roomy(MIN_FREE - 1, 20 * gib));
+        // A large one: its share does.
+        assert!(roomy(50 * gib, 1_000 * gib));
+        assert!(!roomy(50 * gib - 1, 1_000 * gib));
+        assert!(!roomy(0, 0));
+    }
+
+    #[test]
+    fn a_store_on_disk_tells_its_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&crate::testing::hub_data(dir.path())).unwrap();
+        let room = store.room().unwrap();
+        #[cfg(unix)]
+        assert!(room.is_some_and(|(free, total)| free > 0 && free <= total));
+        #[cfg(not(unix))]
+        assert_eq!(room, None);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn heavy_work_runs_one_at_a_time_even_once_no_one_waits_for_it() {

@@ -520,6 +520,16 @@ builds one instance, at a time, the others waiting their turn: each opening
 takes about 30 CPU seconds over a few threads, and the hub holds about
 700 MB once it has opened a few: allow it 2 GB of memory.
 
+The hub never removes an instance itself. It quotes and opens no new
+contract (503, logged as an error) while the filesystem of `<data>` has
+less than 5 GiB or 5% free; contracts already open are unaffected. Watch
+its free space, and grow it before it runs out. The instances of an
+opening given up before the hub signed F (abandoned in the dashboard's
+openings), and of a contract ended (logged as `contract ended` with its
+id), are no longer needed: once a backup holds them, their
+`opening-instances/<id>/` directories may be deleted to free space.
+Never delete those of a contract that is still open.
+
 With `--contracts-payout-wallet URL` (a wallet's JSON-RPC, as
 `--contracts-wallet` takes one), each contract opened from then on pays the
 hub's share to a new address of that wallet instead of the one that funds
