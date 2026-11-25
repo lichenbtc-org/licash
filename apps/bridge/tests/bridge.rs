@@ -77,6 +77,7 @@ async fn call(app: &Router, path: &str, body: Option<Vec<u8>>) -> Response {
 }
 
 struct Net {
+    app: Router,
     node: Arc<Fake>,
     gateway: Arc<Gateway>,
     bridge: Arc<Bridge<Local>>,
@@ -146,7 +147,7 @@ impl Net {
 
         let path = dir.path().join("bridge.sqlite");
         let regtest = ChainProfile::Core30DefaultRegtest;
-        let wallet = Wallet::create(&path, &[7; 32], regtest, Local(app)).unwrap();
+        let wallet = Wallet::create(&path, &[7; 32], regtest, Local(app.clone())).unwrap();
         wallet.add_hub(HUB).await.unwrap();
         let pairing = Bridge::init(&wallet).unwrap();
         let config = Config {
@@ -166,6 +167,7 @@ impl Net {
             })
         };
         Self {
+            app,
             node,
             gateway,
             bridge,
@@ -196,6 +198,93 @@ impl Net {
         }
         owner
     }
+}
+
+const BRIDGE: &str = "http://bridge.test";
+
+/// The hub's router and the bridge's, each at its own host.
+#[derive(Clone)]
+struct Both {
+    hub: Router,
+    bridge: Router,
+    /// What the bridge answers top-ups instead, if set: as a bridge
+    /// replaying an earlier invoice would.
+    top_up: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+}
+
+impl Transport for Both {
+    fn request(
+        &self,
+        url: &str,
+        body: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = Result<Response, String>> + Send {
+        if url.ends_with(bridge::TOP_UP) {
+            if let Some(body) = self.top_up.lock().unwrap().clone() {
+                return futures_ready(Response { status: 200, body });
+            }
+        }
+        let (app, path) = match url.strip_prefix(BRIDGE) {
+            Some(path) => (self.bridge.clone(), path.to_owned()),
+            None => (
+                self.hub.clone(),
+                url.strip_prefix(HUB).unwrap_or(url).to_owned(),
+            ),
+        };
+        Box::pin(async move { Ok(call(&app, &path, body).await) })
+    }
+}
+
+fn futures_ready(
+    response: Response,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Response, String>> + Send>> {
+    Box::pin(std::future::ready(Ok(response)))
+}
+
+impl Net {
+    /// A wallet of `seed` at the hub, reaching the bridge too, holding
+    /// `amount` sat if any.
+    async fn user(&self, seed: u8, amount: u64) -> Wallet<Both> {
+        let path = self
+            .dir
+            .path()
+            .join(format!("user-{seed}-{}.sqlite", rand_name()));
+        let both = Both {
+            hub: self.app.clone(),
+            bridge: licash_bridge::router(self.bridge.clone()),
+            top_up: Arc::default(),
+        };
+        let regtest = ChainProfile::Core30DefaultRegtest;
+        let wallet = Wallet::create(&path, &[seed; 32], regtest, both).unwrap();
+        wallet.add_hub(HUB).await.unwrap();
+        if amount > 0 {
+            let invoice = wallet.invoice(HUB, amount).await.unwrap();
+            let mut hash = [0; 32];
+            hex::decode_to_slice(&invoice.hash, &mut hash).unwrap();
+            let cltv = self.node.held_cltv(hash).unwrap() as u32;
+            self.node.pay_held(hash, self.chain.height() + cltv);
+            self.gateway.round().await;
+            let invoice = wallet.follow_invoice(&invoice.hash).await.unwrap();
+            assert_eq!(invoice.state, licash_wallet::InvoiceState::Received);
+        }
+        wallet
+    }
+
+    /// Rounds of the gateway, the bridge and `wallet`, until what is under
+    /// way is decided.
+    async fn settle<T: Transport>(&self, wallet: &Wallet<T>) {
+        for _ in 0..10 {
+            self.gateway.round().await;
+            self.bridge.round().await.unwrap();
+            let _ = wallet.resume().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+fn rand_name() -> String {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    N.fetch_add(1, Ordering::SeqCst).to_string()
 }
 
 fn secret(n: u8) -> [u8; 32] {
@@ -551,4 +640,117 @@ async fn the_management_api_answers_signed_requests_once() {
     )
     .await;
     assert_eq!(r.status, 409);
+}
+
+#[tokio::test]
+async fn a_wallet_pairs_tops_up_by_its_rules_and_withdraws() {
+    let net = Net::new(false).await;
+    let wallet = net.user(9, 200).await;
+    let refused = wallet.add_bridge(BRIDGE, None).await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(wallet.bridges().unwrap().is_empty());
+    let (added, account) = wallet.add_bridge(BRIDGE, Some(&net.pairing)).await.unwrap();
+    assert_eq!((added.url.as_str(), account.balance), (BRIDGE, 0));
+    assert_eq!(added.rules, None);
+
+    let topped = wallet.top_up_bridge(BRIDGE, HUB, 30, None).await.unwrap();
+    assert_eq!(topped.invoice.credits, 29_000);
+    net.settle(&wallet).await;
+    assert_eq!(wallet.bridge_account(BRIDGE).await.unwrap().balance, 29_000);
+
+    // Below 40: up to 60, but 50 a day, 30 of it topped up already.
+    let rules = licash_wallet::BridgeRules {
+        below: 40,
+        up_to: 60,
+        daily: 50,
+        max_fee: Some(5),
+    };
+    let wrong = licash_wallet::BridgeRules { below: 70, ..rules };
+    assert!(wallet.set_bridge_rules(BRIDGE, Some(wrong)).is_err());
+    wallet.set_bridge_rules(BRIDGE, Some(rules)).unwrap();
+    assert_eq!(wallet.bridge(BRIDGE).unwrap().rules, Some(rules));
+    let done = wallet.top_up_bridges(HUB).await.unwrap();
+    assert_eq!(done.len(), 1);
+    let topped = done[0].1.as_ref().unwrap();
+    assert_eq!(topped.invoice.amount, 20_000);
+    // Not credited yet: none again.
+    assert!(wallet.top_up_bridges(HUB).await.unwrap().is_empty());
+    net.settle(&wallet).await;
+    assert_eq!(wallet.bridge_account(BRIDGE).await.unwrap().balance, 48_000);
+    // Above the rules: none; below them, the day's limit reached: none.
+    assert!(wallet.top_up_bridges(HUB).await.unwrap().is_empty());
+    let higher = licash_wallet::BridgeRules {
+        below: 100,
+        up_to: 200,
+        ..rules
+    };
+    wallet.set_bridge_rules(BRIDGE, Some(higher)).unwrap();
+    assert!(wallet.top_up_bridges(HUB).await.unwrap().is_empty());
+
+    // The same seed, restored: the same account, no pairing needed.
+    let restored = net.user(9, 0).await;
+    let (_, again) = restored.add_bridge(BRIDGE, None).await.unwrap();
+    assert_eq!(again.balance, 48_000);
+
+    // Back to the wallet, the hub's 1 sat fee on receiving paid on top.
+    let (invoice, payment) = wallet.withdraw_bridge(BRIDGE, HUB, 10).await.unwrap();
+    net.settle(&wallet).await;
+    let account = wallet.bridge_account(BRIDGE).await.unwrap();
+    assert!(
+        account.balance < 48_000 - 10_000,
+        "{payment:?} {}",
+        account.balance
+    );
+    let received = wallet.follow_invoice(&invoice.hash).await.unwrap();
+    assert_eq!(received.state, licash_wallet::InvoiceState::Received);
+
+    let connected = wallet
+        .bridge_connect(BRIDGE, &connect(&[Permission::Pay], None))
+        .await
+        .unwrap();
+    let revoked = wallet
+        .bridge_revoke(BRIDGE, &connected.connection.key)
+        .await
+        .unwrap();
+    assert!(revoked.revoked);
+    wallet.remove_bridge(BRIDGE).unwrap();
+    assert!(wallet.bridges().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn top_ups_count_against_the_daily_limit_whatever_the_bridge_answers() {
+    let net = Net::new(false).await;
+    let wallet = net.user(9, 60).await;
+    wallet.add_bridge(BRIDGE, Some(&net.pairing)).await.unwrap();
+    // Refused before anything was locked: never counted.
+    let short = wallet.top_up_bridge(BRIDGE, HUB, 90, None).await;
+    assert!(short.is_err(), "{short:?}");
+    let topped = wallet.top_up_bridge(BRIDGE, HUB, 30, None).await.unwrap();
+    net.settle(&wallet).await;
+    assert_eq!(wallet.bridge_account(BRIDGE).await.unwrap().balance, 29_000);
+
+    // The bridge answering the invoice it was paid already: refused, and
+    // still counted.
+    let replayed = serde_json::to_vec(&topped.invoice).unwrap();
+    *wallet_top_up(&wallet).lock().unwrap() = Some(replayed);
+    let again = wallet.top_up_bridge(BRIDGE, HUB, 30, None).await;
+    assert!(
+        matches!(&again, Err(licash_wallet::Error::Invalid(m)) if m.contains("earlier")),
+        "{again:?}"
+    );
+    *wallet_top_up(&wallet).lock().unwrap() = None;
+    let rules = licash_wallet::BridgeRules {
+        below: 40,
+        up_to: 50,
+        daily: 40,
+        max_fee: None,
+    };
+    wallet.set_bridge_rules(BRIDGE, Some(rules)).unwrap();
+    let done = wallet.top_up_bridges(HUB).await.unwrap();
+    // 21 short of 50, but 40 a day, 30 of it topped up.
+    assert_eq!(done[0].1.as_ref().unwrap().invoice.amount, 10_000);
+}
+
+fn wallet_top_up(wallet: &Wallet<Both>) -> Arc<std::sync::Mutex<Option<Vec<u8>>>> {
+    wallet.transport().top_up.clone()
 }

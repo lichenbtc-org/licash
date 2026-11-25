@@ -32,6 +32,7 @@
 //! back up its file.
 
 mod backup;
+mod bridges;
 mod claims;
 mod closes;
 mod code;
@@ -80,6 +81,7 @@ use rand_core::{OsRng, RngCore};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{de::DeserializeOwned, Serialize};
 
+pub use bridges::{AddedBridge, BridgeRules, BridgeTopUp};
 pub use claims::{ClaimNote, ClaimSlot, FundedNote, LockClaim, OwedLock, SlotPays};
 pub use closes::ClosePayment;
 pub use code::{
