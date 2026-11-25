@@ -27,7 +27,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.licash.core.Network
 import org.licash.wallet.Engine
 import org.licash.wallet.Ui
@@ -47,6 +49,7 @@ fun Onboarding(engine: Engine, ui: Ui) {
         return
     }
     val scope = rememberCoroutineScope()
+    val feel = rememberFeel()
     var testing by rememberSaveable { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -82,7 +85,8 @@ fun Onboarding(engine: Engine, ui: Ui) {
             busy = true
             error = null
             scope.launch {
-                engine.create().onFailure { error = explain(it) }
+                // Felt once made: this screen is gone by then, and its work with it, but for this.
+                withContext(NonCancellable) { engine.create().onSuccess { feel.confirm() } }.onFailure { error = explain(it) }
                 busy = false
             }
         }
@@ -101,7 +105,7 @@ fun Onboarding(engine: Engine, ui: Ui) {
                     },
                     modifier = Modifier.testTag("test-network"),
                     enabled = !busy,
-                ) { Text(if (shown) "Use Bitcoin" else "Use a test network") }
+                ) { Text(if (shown) "Use mainnet" else "Use a test network") }
             }
         }
         Spacer(Modifier.height(16.dp))

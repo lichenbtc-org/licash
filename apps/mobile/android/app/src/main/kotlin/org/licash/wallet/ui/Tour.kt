@@ -40,10 +40,11 @@ internal data class Slide(val title: String, val line: String)
  * How Licash works, told with gold: Bitcoin is gold in a vault; paying
  * with it is slow, costly and public; so people pay with ecash tokens a hub
  * issues, like a vault company, only its promise; Licash's come with the
- * payer's own vault of real bitcoin, redeemed for sure; the hub adds its
- * own to it, room for tokens she is paid; and up to the vault's balance
- * her tokens are recovered, beyond it credit. No figures and no dates: the
- * pictures carry it.
+ * payer's own vault of real bitcoin, redeemed for sure; and that vault is
+ * her insurance, as large as she chooses, the hub adding its own to it:
+ * her tokens are protected up to it, said as what it does, so that what
+ * is beyond it is plainly not. No figures and no dates: the pictures
+ * carry it.
  */
 internal val SLIDES = listOf(
     Slide("Bitcoin is gold in a vault", "Real and safe, but heavy to move."),
@@ -57,12 +58,9 @@ internal val SLIDES = listOf(
         "Real bitcoin is locked in it for you alone, so your tokens can be redeemed for sure, even if the hub disappears.",
     ),
     Slide(
-        "Room to be paid",
-        "Spend your tokens and your gold goes with them. So the hub adds its own bitcoin: tokens you receive are backed too.",
-    ),
-    Slide(
-        "Your vault is your safety net",
-        "With enough tokens, you recover up to its balance. Fewer is fine: you redeem what you hold. More is credit from the hub.",
+        "Your vault is your insurance",
+        "You choose how much it protects. You lock bitcoin in it, and your hub can add its own. " +
+            "Your tokens are protected up to that amount.",
     ),
 )
 

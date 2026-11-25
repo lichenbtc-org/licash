@@ -19,13 +19,16 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -39,6 +42,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -55,7 +60,8 @@ import org.licash.wallet.AppLog
 
 /**
  * The back camera, until it sees a QR code: its text, once. Pinching or the
- * slider zooms; the light shows if the camera has one.
+ * slider, named, zooms; the light, a switch apart from it, shows if the
+ * camera has one.
  */
 @Composable
 fun Scanner(modifier: Modifier = Modifier, onText: (String) -> Unit) {
@@ -70,7 +76,7 @@ fun Scanner(modifier: Modifier = Modifier, onText: (String) -> Unit) {
     LaunchedEffect(Unit) { if (!granted) ask.launch(Manifest.permission.CAMERA) }
     if (!granted) {
         Box(modifier, contentAlignment = Alignment.Center) {
-            Text("Allow the camera to scan codes, or paste one.", style = MaterialTheme.typography.bodyMedium)
+            Text("Allow the camera to scan QR codes, or paste instead.", style = MaterialTheme.typography.bodyMedium)
         }
         return
     }
@@ -145,7 +151,7 @@ fun Scanner(modifier: Modifier = Modifier, onText: (String) -> Unit) {
                         camera = provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
                     }.onFailure {
                         AppLog.warn("starting the camera", it)
-                        broken = "The camera is not available: paste a code instead."
+                        broken = "The camera is not available: paste instead."
                     }
                 }, ContextCompat.getMainExecutor(ctx))
                 view
@@ -156,15 +162,28 @@ fun Scanner(modifier: Modifier = Modifier, onText: (String) -> Unit) {
                 .background(Color.Black.copy(alpha = 0.35f)).padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // Named, so the slider is not read as the light's beside it.
+            Text("Zoom", modifier = Modifier.padding(end = 8.dp), style = MaterialTheme.typography.labelLarge, color = Color.White)
             Slider(
                 value = zoom,
                 onValueChange = { zoom = it; camera?.cameraControl?.setLinearZoom(it) },
-                modifier = Modifier.weight(1f).testTag("zoom"),
+                modifier = Modifier.weight(1f).testTag("zoom").semantics { contentDescription = "Zoom" },
             )
             if (camera?.cameraInfo?.hasFlashUnit() == true) {
-                TextButton(onClick = { light = !light; camera?.cameraControl?.enableTorch(light) }) {
-                    Text(if (light) "Light off" else "Light", color = Color.White)
-                }
+                // Apart from the slider: a switch of its own, filled while on.
+                Spacer(Modifier.width(16.dp))
+                FilterChip(
+                    selected = light,
+                    onClick = { light = !light; camera?.cameraControl?.enableTorch(light) },
+                    label = { Text("Light") },
+                    modifier = Modifier.testTag("light"),
+                    colors = FilterChipDefaults.filterChipColors(labelColor = Color.White),
+                    border = FilterChipDefaults.filterChipBorder(
+                        enabled = true,
+                        selected = light,
+                        borderColor = Color.White.copy(alpha = 0.6f),
+                    ),
+                )
             }
         }
     }

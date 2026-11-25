@@ -74,7 +74,7 @@ internal fun autoBackupState(backup: AutoBackup?): String = when {
 
 /** Automatic backups: a folder chosen, written to whenever the wallet changes. */
 @Composable
-private fun AutoBackupSheet(engine: Engine, ui: Ui, dismiss: () -> Unit) {
+internal fun AutoBackupSheet(engine: Engine, ui: Ui, dismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }

@@ -19,6 +19,22 @@ class FormatTest {
     }
 
     @Test
+    fun a_hub_with_no_room_for_a_vault_is_said_as_that() {
+        for (refusal in listOf(
+            "The hub's wallet funds 0 sat of a contract at most now",
+            "hub.example: the hub's wallet funds 100,000 sat of a contract at most now",
+            "The hub has 64 contracts live, its most: later",
+            "Too many openings under way: later",
+            "too many openings signed and not funded: later",
+        )) {
+            assertEquals(refusal, HUB_NO_ROOM, openFailure(refusal))
+        }
+        assertTrue(HUB_NO_ROOM.contains("another hub"))
+        // Anything else as it was said.
+        assertEquals("The price is above the most you set", openFailure("The price is above the most you set"))
+    }
+
+    @Test
     fun a_hub_charging_more_than_agreed_is_named_and_where_to_approve_it() {
         val said = explain(org.licash.core.LicashException.FeesRaised("https://hub.example:8443"))
         assertEquals(

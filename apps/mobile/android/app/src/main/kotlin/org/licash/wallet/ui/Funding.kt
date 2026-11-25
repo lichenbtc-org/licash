@@ -1,45 +1,11 @@
 package org.licash.wallet.ui
 
-import android.content.ClipData
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.ClipEntry
-import androidx.compose.ui.platform.LocalClipboard
-import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.launch
-import org.licash.core.ContractQuote
+import org.licash.core.Contract
 import org.licash.core.ContractState
 import org.licash.core.Kind
-import org.licash.core.contractFit
-import org.licash.core.contractPrice
-import org.licash.core.contractSizes
-import org.licash.wallet.Engine
 import org.licash.wallet.Ui
-import org.licash.wallet.behind
 import org.licash.wallet.sat
+import org.licash.wallet.total
 
 /** Where a first funding stands, in the order it goes. */
 internal enum class FundingStage(val title: String) {
@@ -51,7 +17,7 @@ internal enum class FundingStage(val title: String) {
 }
 
 /**
- * Whether Home guides the first funding: a hub chosen, and nothing
+ * Whether the first funding is guided unasked: a hub chosen, and nothing
  * protected, held in notes or paid in or out with them yet. A wallet that
  * ever did more is never guided again.
  */
@@ -71,150 +37,103 @@ internal fun guideAsked(ui: Ui, since: Long?): Boolean =
             (it.state == ContractState.Protecting || it.state == ContractState.Ending || it.state == ContractState.Closed)
     }
 
-/** Where the first funding of `ui` stands. Ready is past it: no longer guided. */
-internal fun stage(ui: Ui): FundingStage = when {
-    ui.opening != null -> FundingStage.OPENING
-    ui.balance.onchain > ui.balance.kept -> FundingStage.IN_BLOCK
-    ui.incoming.isNotEmpty() -> FundingStage.SEEN
-    else -> FundingStage.WAITING
+/**
+ * The vault the guide asked for at `since` led to, if any yet: the newest
+ * of those made since that is being set up or protects. None never asked.
+ */
+internal fun guidedVault(ui: Ui, since: Long?): Contract? = since?.let { from ->
+    ui.contracts.filter { it.createdAt >= from }.sortedByDescending { it.createdAt }.firstOrNull {
+        it.state == ContractState.Opening || it.state == ContractState.Confirming || it.state == ContractState.Protecting
+    }
+}
+
+/**
+ * Where the first funding of `ui` stands, guided since `since` if ever:
+ * its vault being set up or protecting, once there is one, whatever is on
+ * Bitcoin then; before, what was paid there.
+ */
+internal fun stage(ui: Ui, since: Long? = ui.guideSince): FundingStage {
+    val vault = guidedVault(ui, since)
+    return when {
+        vault?.state == ContractState.Protecting -> FundingStage.READY
+        ui.opening != null || vault != null -> FundingStage.OPENING
+        ui.balance.onchain > ui.balance.kept -> FundingStage.IN_BLOCK
+        ui.incoming.isNotEmpty() -> FundingStage.SEEN
+        else -> FundingStage.WAITING
+    }
+}
+
+/**
+ * The mark of `step` once the funding is at `at`: done before it, to come
+ * after it, and under way at it, but where nothing more is waited for: in
+ * a block is enough, and ready is the end.
+ */
+internal fun markOf(step: FundingStage, at: FundingStage): Mark = when {
+    step.ordinal < at.ordinal -> Mark.DONE
+    step != at -> Mark.NEXT
+    step == FundingStage.IN_BLOCK || step == FundingStage.READY -> Mark.DONE
+    else -> Mark.NOW
 }
 
 /** What `stage` says under its title, once at it: `coming`, the sat on their way. */
 internal fun stageSays(stage: FundingStage, coming: ULong): String = when (stage) {
     FundingStage.WAITING -> "Send bitcoin to this address, from any wallet or exchange."
-    FundingStage.SEEN -> "${sat(coming)} on its way. It needs a block, about 10 minutes."
+    FundingStage.SEEN -> "${sat(coming)} on its way. One block is enough, about 10 minutes."
     FundingStage.IN_BLOCK -> "Your bitcoin is here. Open your vault to pay with it."
     FundingStage.OPENING -> "This takes a few minutes. You can leave the app."
     FundingStage.READY -> "Protected. Pay and receive in a tap."
 }
 
 /**
- * The least coin a contract of `cap` takes whole with [FIXED_PART] of it
- * hers, as `price` and `fit` say ([contractPrice], [contractFit]): none if
- * a contract of that cap does not take it.
+ * What a first deposit is asked to be, at least, in sat: one figure, the
+ * same at every hub, above what the smallest vault costs with its reserve
+ * at any of them but one nearly full. Not a quote: the vault's own page
+ * says what it costs, before it is paid.
  */
-internal fun leastFor(
-    cap: ULong,
-    price: (cap: ULong, funded: ULong) -> ULong,
-    fit: (coin: ULong, least: ULong) -> ULong?,
-): ULong? {
-    val coin = price(cap, FIXED_PART) + FIXED_PART
-    return coin.takeIf { fit(it, cap) == cap }
-}
+internal const val FIRST_DEPOSIT = 50_000uL
 
-/** The size of a vault with room to be paid mostly: four times the smallest, or the largest. */
-internal fun receivingCap(sizes: List<ULong>): ULong? = sizes.getOrNull(2) ?: sizes.lastOrNull()
+/** How much to send, said over the address. */
+internal val HOW_MUCH = "Send at least ${sat(FIRST_DEPOSIT)}. It opens your vault and covers its reserve and fees."
 
-/** What to send for `intent`, the least for any vault `least`, and for one mostly to be paid `receiving`. */
-internal fun howMuch(intent: Intent, least: ULong?, receiving: Pair<ULong, ULong>?): String? = when {
-    intent == Intent.RECEIVE && receiving != null ->
-        "Send at least ${sat(receiving.first)} for room to receive about ${sat(receiving.second)}."
-    least != null -> "Send at least ${sat(least)}. Send what you plan to spend."
-    else -> null
-}
+/** Said of bitcoin in a block that no vault is offered for. */
+internal const val NO_VAULT_YET = "No vault fits it yet. Send more, or see it under your balance."
+
+/** Home's card back to the guide, the funding at `at`. */
+internal fun setupWords(at: FundingStage): StepWords = StepWords(
+    "Set up your vault",
+    when (at) {
+        FundingStage.WAITING -> "Send bitcoin to open it. It protects what you hold."
+        FundingStage.SEEN -> "Your bitcoin is on its way."
+        FundingStage.IN_BLOCK -> "Your bitcoin arrived. Open your vault."
+        FundingStage.OPENING -> "Opening. This takes a few minutes."
+        FundingStage.READY -> "Your vault is ready."
+    },
+    "Continue",
+)
 
 /**
- * Home's guide to a first vault: what it is mostly for, the address to send
- * bitcoin to and a copy of it, then where it stands, step by step, and once
- * it is in a block the vault to open, on a tap: nothing opens unasked.
+ * Whether the wallet is set up step by step, on screens of their own
+ * ([Setup]): with no hub yet; with one and nothing held or done yet
+ * ([guiding]); or guided since `since`, until its vault protects and that
+ * was said once. A wallet in use that never asked is not.
  */
-@Composable
-internal fun FirstFunding(engine: Engine, ui: Ui, hide: (() -> Unit)? = null) {
-    val clipboard = LocalClipboard.current
-    val scope = rememberCoroutineScope()
-    val at = stage(ui)
-    var address by remember { mutableStateOf<String?>(null) }
-    var intent by remember { mutableStateOf(intentOf(engine.prefs.intent)) }
-    var quote by remember { mutableStateOf<ContractQuote?>(null) }
-    var copied by remember { mutableStateOf(false) }
-    var choosing by remember { mutableStateOf(false) }
-    val hub = ui.hubs.firstOrNull { it.contracts?.range != null }
-    LaunchedEffect(Unit) { engine.bitcoinAddress().onSuccess { address = it } }
-    LaunchedEffect(hub?.url) { hub?.let { engine.contractQuote(it.url).onSuccess { q -> quote = q } } }
-    val amounts = quote?.let { q ->
-        val range = q.range ?: return@let null
-        val blocks = q.suggestedBlocks
-        val price = { cap: ULong, funded: ULong -> contractPrice(range, cap, blocks, funded) }
-        val fit = { coin: ULong, least: ULong ->
-            contractFit(range, blocks, coin, least, q.dust, q.denominations, q.fundedNotes)?.cap
-        }
-        val sizes = contractSizes(range)
-        val least = sizes.firstOrNull()?.let { leastFor(it, price, fit) }
-        val receiving = receivingCap(sizes)?.let { cap -> leastFor(cap, price, fit)?.let { it to cap } }
-        least to receiving
-    }
-    Column(
-        Modifier.fillMaxWidth().padding(top = 16.dp).clip(RoundedCornerShape(20.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainer).padding(16.dp)
-            .testTag("funding"),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text(
-            if (at == FundingStage.WAITING) "Fill your vault" else at.title,
-            style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.testTag("funding-title"),
-        )
-        Text(
-            stageSays(at, ui.incoming.sumOf { it.amount }),
-            modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-        )
-        when (at) {
-            FundingStage.WAITING -> {
-                Segmented(Intent.entries.map { it.label }, intent.ordinal, Modifier.fillMaxWidth()) {
-                    intent = Intent.entries[it]
-                    engine.prefs.intent = intent.name
-                }
-                Text(
-                    listOfNotNull(intent.says, howMuch(intent, amounts?.first, amounts?.second)).joinToString(" "),
-                    modifier = Modifier.padding(top = 8.dp, bottom = 12.dp).testTag("funding-how-much"),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                )
-                address?.let { shown ->
-                    QrCode("bitcoin:$shown".uppercase(), size = 220.dp, description = "Bitcoin address as a QR code")
-                    SelectionContainer {
-                        Text(
-                            shown,
-                            modifier = Modifier.padding(vertical = 12.dp).testTag("funding-address"),
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                            textAlign = TextAlign.Center,
-                        )
-                    }
-                    BigButton(if (copied) "Copied" else "Copy address", Modifier.fillMaxWidth().testTag("copy-address"), quiet = true) {
-                        scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("Bitcoin address", shown))) }
-                        copied = true
-                    }
-                }
-            }
-            FundingStage.IN_BLOCK -> ui.offer?.let { q ->
-                BigButton("Open your vault", Modifier.fillMaxWidth().testTag("open-vault")) { choosing = true }
-                if (choosing) OfferSheet(engine, q, !behind(ui)) { choosing = false }
-            }
-            else -> {}
-        }
-        Spacer(Modifier.height(12.dp))
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.Top) {
-            for (step in FundingStage.entries) {
-                Step(
-                    mark = when {
-                        step.ordinal < at.ordinal -> Mark.DONE
-                        step == at -> Mark.NOW
-                        else -> Mark.NEXT
-                    },
-                    title = step.title,
-                    last = step == FundingStage.READY,
-                    tag = "funding-step",
-                )
-            }
-        }
-        // Asked for again: hidden as it was asked for.
-        hide?.let {
-            TextButton(onClick = it, modifier = Modifier.testTag("funding-hide")) { Text("Hide guide") }
-        }
-    }
+internal fun setupDue(ui: Ui, since: Long? = ui.guideSince): Boolean =
+    ui.hubs.isEmpty() || guiding(ui) || guideAsked(ui, since) || (since != null && stage(ui, since) == FundingStage.READY)
+
+/**
+ * Whether there is anything to send with: a balance, or a vault open or
+ * being opened, which one is on its way to. Else Send only says what is
+ * missing.
+ */
+internal fun canSend(ui: Ui): Boolean = ui.balance.total > 0uL || hasVault(ui.contracts)
+
+/** Whether a vault of `contracts` protects, or is being set up to. */
+internal fun hasVault(contracts: List<Contract>): Boolean = contracts.any {
+    it.state == ContractState.Opening || it.state == ContractState.Confirming || it.state == ContractState.Protecting
 }
+
+/** Said under what is paid into a hub with no vault there ([hasVault]): each time, as it is true each time. */
+internal const val RECEIVED_UNPROTECTED = "No vault yet: what you receive is held by your hub, not protected."
+
+/** Said where Send was asked for with nothing to send. */
+internal const val NOTHING_TO_SEND = "Nothing to send yet. Fund your vault first."

@@ -85,6 +85,24 @@ fun explain(e: Throwable): String = when (e) {
 }
 
 /**
+ * Why a protection was not set up, `reason` as [explain] says it: a hub
+ * with no room for one, at its limit or its own bitcoin short, said as
+ * that, and what to do about it.
+ */
+internal fun openFailure(reason: String): String =
+    if (NO_ROOM.any { it.containsMatchIn(reason) }) HUB_NO_ROOM else reason
+
+/** Said of a hub that opens no vault now. */
+internal const val HUB_NO_ROOM = "This hub can't open new vaults right now. Try later, or use another hub."
+
+/** The hub's refusals for want of room: its wallet short, its contracts as many as it takes, its openings too many. */
+private val NO_ROOM = listOf(
+    Regex("the hub's wallet funds [\\d,]+ sat of a contract at most now", RegexOption.IGNORE_CASE),
+    Regex("the hub has [\\d,]+ contracts live, its most", RegexOption.IGNORE_CASE),
+    Regex("too many openings (under way|signed and not funded)", RegexOption.IGNORE_CASE),
+)
+
+/**
  * A reason the core gives, in the app's words: a sentence, its amounts
  * grouped, and no one to pay out or move said without naming providers.
  */

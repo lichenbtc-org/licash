@@ -14,6 +14,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -35,6 +36,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,7 +47,10 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import org.licash.core.Activity
 import org.licash.core.blockSeconds
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.licash.wallet.ui.ActivityDetails
+import org.licash.wallet.ui.FundingStage
 import org.licash.wallet.ui.History
 import org.licash.wallet.ui.Home
 import org.licash.wallet.ui.LocalBlockSeconds
@@ -53,10 +58,21 @@ import org.licash.wallet.ui.LicashTheme
 import org.licash.wallet.ui.Money
 import org.licash.wallet.ui.Onboarding
 import org.licash.wallet.ui.Receive
+import org.licash.wallet.ui.ReceivedBanner
 import org.licash.wallet.ui.Send
 import org.licash.wallet.ui.Settings
+import org.licash.wallet.ui.Setup
+import org.licash.wallet.ui.SetupNav
 import org.licash.wallet.ui.StatsScreen
 import org.licash.wallet.ui.Wordmark
+import org.licash.wallet.ui.rememberFeel
+import org.licash.wallet.ui.setupDue
+import org.licash.wallet.ui.settingUp
+import org.licash.wallet.ui.stage
+import org.licash.wallet.ui.startsAtHome
+
+/** How long money in is said from the top, in ms. */
+private const val RECEIVED_MS = 3200L
 
 private sealed interface Screen {
     data object Home : Screen
@@ -148,7 +164,39 @@ private fun App(engine: Engine, link: String?, linkShown: () -> Unit) {
     val ui by engine.ui.collectAsStateWithLifecycle()
     var screen by remember { mutableStateOf<Screen>(Screen.Home) }
     val snackbar = remember { SnackbarHostState() }
-    LaunchedEffect(Unit) { engine.events.collect { snackbar.showSnackbar(it.text) } }
+    // Where setting the wallet up is, in Home's place while due and not left: as the wallet read at the start says.
+    val nav = rememberSaveable(ui.loaded, saver = SetupNav.Saver) { SetupNav(left = ui.loaded && startsAtHome(ui)) }
+    // Money in is felt, and said from the top with a check, a few seconds: the rest in a line at the bottom.
+    val feel = rememberFeel()
+    var arrived by remember { mutableStateOf("") }
+    var arrivals by remember { mutableStateOf(0) }
+    var arriving by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        engine.events.collect {
+            if (it.received != null) {
+                feel.confirm()
+                arrived = it.text
+                arrivals++
+            } else {
+                launch { snackbar.showSnackbar(it.text) }
+            }
+        }
+    }
+    LaunchedEffect(arrivals) {
+        if (arrivals == 0) return@LaunchedEffect
+        arriving = true
+        delay(RECEIVED_MS)
+        arriving = false
+    }
+    // The vault guided to protects: said, in Home's place, though left for it.
+    val ready = ui.guideSince != null && stage(ui) == FundingStage.READY
+    LaunchedEffect(ready, nav) { if (ready) nav.left = false }
+    // Back to setting up, `why` if sent: guided from now, if it was not.
+    val setup = { why: String? ->
+        val since = !setupDue(ui)
+        if (since) engine.guide(System.currentTimeMillis() / 1000)
+        nav.enter(why, passing = since)
+    }
     // Asked once there is a wallet, before its first catching up, to tell of
     // it and of payments out of sight: Android asks at most twice, then no
     // more once refused.
@@ -163,7 +211,12 @@ private fun App(engine: Engine, link: String?, linkShown: () -> Unit) {
             PackageManager.PERMISSION_GRANTED
         if ((ui.wallet || watching) && missing) ask.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
-    LaunchedEffect(ui.wallet) { if (!ui.wallet) screen = Screen.Home }
+    LaunchedEffect(ui.wallet) {
+        if (!ui.wallet) {
+            screen = Screen.Home
+            nav.reset()
+        }
+    }
     LaunchedEffect(link, ui.wallet) {
         if (link != null && ui.wallet) {
             screen = Screen.Send(link)
@@ -197,16 +250,31 @@ private fun App(engine: Engine, link: String?, linkShown: () -> Unit) {
                         label = "screen",
                     ) { s ->
                         when (s) {
-                            Screen.Home -> Home(
-                                engine,
-                                ui,
-                                receive = { screen = Screen.Receive },
-                                send = { screen = Screen.Send(null) },
-                                settings = { screen = Screen.Settings },
-                                money = { screen = Screen.Money(at = it) },
-                                history = { screen = Screen.History },
-                                open = { screen = Screen.Details(it, Screen.Home) },
-                            )
+                            // A wallet not set up yet is, a screen at a time, before its Home.
+                            Screen.Home -> Crossfade(settingUp(ui, nav.left), label = "setup") { guided ->
+                                if (guided) {
+                                    Setup(
+                                        engine,
+                                        ui,
+                                        nav,
+                                        settings = { screen = Screen.Settings },
+                                        money = { screen = Screen.Money(at = it) },
+                                        open = { screen = Screen.Details(it, Screen.Home) },
+                                    )
+                                } else {
+                                    Home(
+                                        engine,
+                                        ui,
+                                        receive = { screen = Screen.Receive },
+                                        send = { screen = Screen.Send(null) },
+                                        settings = { screen = Screen.Settings },
+                                        money = { screen = Screen.Money(at = it) },
+                                        history = { screen = Screen.History },
+                                        open = { screen = Screen.Details(it, Screen.Home) },
+                                        setup = setup,
+                                    )
+                                }
+                            }
                             Screen.History -> History(
                                 engine,
                                 ui,
@@ -224,9 +292,15 @@ private fun App(engine: Engine, link: String?, linkShown: () -> Unit) {
                                 s.amount,
                                 toReceive = { screen = Screen.Receive },
                             ) { screen = s.from }
-                            Screen.Settings -> Settings(engine, ui, balance = { screen = Screen.Money(Screen.Settings) }) {
-                                screen = Screen.Home
-                            }
+                            Screen.Settings -> Settings(
+                                engine,
+                                ui,
+                                balance = { screen = Screen.Money(Screen.Settings) },
+                                guide = {
+                                    engine.guide(System.currentTimeMillis() / 1000)
+                                    nav.enter()
+                                },
+                            ) { screen = Screen.Home }
                             is Screen.Money -> Money(
                                 engine,
                                 ui,
@@ -240,6 +314,12 @@ private fun App(engine: Engine, link: String?, linkShown: () -> Unit) {
                         }
                     }
                 }
+                // Not over Receive, which says it itself.
+                ReceivedBanner(
+                    arriving && ui.wallet && screen != Screen.Receive,
+                    arrived,
+                    Modifier.align(Alignment.TopCenter),
+                )
             }
         }
     }

@@ -119,7 +119,7 @@ private val Crust = Color(0xFF8A5A2B)
 private enum class Bar { GOLD, HUB }
 
 /**
- * The six pictures, `t` from 0 to 1 as one comes in: what is drawn last
+ * The five pictures, `t` from 0 to 1 as one comes in: what is drawn last
  * shows last.
  */
 private class Pictures(val d: DrawScope, val p: Palette, val t: Float) {
@@ -128,7 +128,6 @@ private class Pictures(val d: DrawScope, val p: Palette, val t: Float) {
         1 -> paying()
         2 -> issued()
         3 -> own()
-        4 -> room()
         else -> net()
     }
 
@@ -328,15 +327,7 @@ private class Pictures(val d: DrawScope, val p: Palette, val t: Float) {
         key(alpha = held)
     }
 
-    /** The hub's gold added to her vault: room for tokens paid to her, which come in. */
-    private fun room() {
-        vault(List(3) { Bar.GOLD } + List(3) { Bar.HUB })
-        for (y in listOf(570f, 498f, 426f)) token(74f, y, p.mine)
-        val paid = part(5, 7)
-        for ((i, y) in listOf(354f, 282f, 210f).withIndex()) token(74f, y, p.hub, alpha = (paid * 3 - i).coerceIn(0f, 1f))
-    }
-
-    /** What the vault recovers: tokens up to its balance; beyond, credit. */
+    /** What the vault protects, her gold and the hub's in it: tokens up to its balance; those beyond, not. */
     private fun net() {
         vault(List(3) { Bar.GOLD } + List(3) { Bar.HUB })
         val covered = part(5, 7)

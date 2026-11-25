@@ -45,8 +45,14 @@ class FundingTest {
         }
     }
 
+    private fun contract(createdAt: Long, state: ContractState) = Contract(
+        id = "c$createdAt", hub = "https://hub.example", state = state, mock = false, cap = 131_071uL, price = 1_000uL,
+        funded = 0uL, fundedReceived = false, paidFrom = 50_000uL, protectsUntil = 2_000u, closesAt = 2_100u,
+        funding = null, createdAt = createdAt, covers = 0uL, step = null, transfer = null,
+    )
+
     @Test
-    fun the_first_funding_goes_from_waiting_to_opening() {
+    fun the_first_funding_goes_from_waiting_to_ready() {
         assertEquals(FundingStage.WAITING, stage(fresh))
         assertEquals(FundingStage.SEEN, stage(fresh.copy(incoming = listOf(line(Kind.ONCHAIN)))))
         assertEquals(FundingStage.IN_BLOCK, stage(fresh.copy(balance = balance(onchain = 50_000uL))))
@@ -54,36 +60,84 @@ class FundingTest {
         assertEquals(FundingStage.WAITING, stage(fresh.copy(balance = balance(onchain = 50_000uL, kept = 50_000uL))))
         assertEquals(FundingStage.OPENING, stage(fresh.copy(balance = balance(onchain = 50_000uL), opening = "https://hub.example")))
         assertEquals(listOf("Waiting", "Seen", "In a block", "Opening vault", "Ready"), FundingStage.entries.map { it.title })
-        assertEquals("50,000 sat on its way. It needs a block, about 10 minutes.", stageSays(FundingStage.SEEN, 50_000uL))
+        // One block is all a deposit is said to need: how deep it is, under its details.
+        assertEquals("50,000 sat on its way. One block is enough, about 10 minutes.", stageSays(FundingStage.SEEN, 50_000uL))
+        assertFalse(FundingStage.entries.any { stageSays(it, 1uL).contains("confirmation", ignoreCase = true) })
     }
 
     @Test
-    fun the_least_to_send_pays_the_price_and_a_small_part() {
-        val price = { cap: ULong, funded: ULong -> 43_000uL + cap / 1_000uL + funded * 0uL }
-        // A hub taking it: the price for the cap, and the fixed part.
-        assertEquals(44_131uL, leastFor(131_071uL, price) { _, least -> least })
-        // One refusing a contract of that cap for it: none.
-        assertNull(leastFor(131_071uL, price) { _, _ -> null })
-        assertEquals(524_287uL, receivingCap(listOf(131_071uL, 262_143uL, 524_287uL, 1_048_575uL)))
-        assertEquals(262_143uL, receivingCap(listOf(131_071uL, 262_143uL)))
-        assertNull(receivingCap(emptyList()))
+    fun a_vault_guided_to_keeps_its_steps_in_sight_until_it_protects() {
+        val guided = fresh.copy(guideSince = 200L)
+        // Signed, its coin spent, nothing on Bitcoin any more: still opening, not back to waiting.
+        for (state in listOf(ContractState.Opening, ContractState.Confirming)) {
+            val setUp = guided.copy(contracts = listOf(contract(300L, state)))
+            assertEquals("$state", FundingStage.OPENING, stage(setUp))
+            assertEquals(300L, guidedVault(setUp, 200L)?.createdAt)
+        }
+        // It protects: ready, whatever arrived on Bitcoin since.
+        val ready = guided.copy(contracts = listOf(contract(300L, ContractState.Protecting)), balance = balance(onchain = 9_000uL))
+        assertEquals(FundingStage.READY, stage(ready))
+        // One from before the guide is not its vault, nor one that failed, nor any never guided.
+        assertNull(guidedVault(guided.copy(contracts = listOf(contract(100L, ContractState.Protecting))), 200L))
+        assertNull(guidedVault(guided.copy(contracts = listOf(contract(300L, ContractState.Failed("no")))), 200L))
+        assertNull(guidedVault(ready, null))
+        assertEquals(FundingStage.IN_BLOCK, stage(ready.copy(guideSince = null)))
+        // The newest of those since.
+        val two = guided.copy(contracts = listOf(contract(300L, ContractState.Protecting), contract(400L, ContractState.Opening)))
+        assertEquals(400L, guidedVault(two, 200L)?.createdAt)
     }
 
     @Test
-    fun how_much_to_send_follows_what_the_vault_is_for() {
-        assertEquals("Send at least 44,131 sat. Send what you plan to spend.", howMuch(Intent.BOTH, 44_131uL, null))
-        assertEquals(
-            "Send at least 50,000 sat for room to receive about 524,287 sat.",
-            howMuch(Intent.RECEIVE, 44_131uL, 50_000uL to 524_287uL),
-        )
-        assertNull(howMuch(Intent.PAY, null, null))
+    fun a_step_is_done_once_passed_and_in_a_block_as_soon_as_reached() {
+        val marks = { at: FundingStage -> FundingStage.entries.map { markOf(it, at) } }
+        assertEquals(listOf(Mark.NOW, Mark.NEXT, Mark.NEXT, Mark.NEXT, Mark.NEXT), marks(FundingStage.WAITING))
+        assertEquals(listOf(Mark.DONE, Mark.NOW, Mark.NEXT, Mark.NEXT, Mark.NEXT), marks(FundingStage.SEEN))
+        // In a block: nothing more is waited for there, so it does not keep spinning.
+        assertEquals(listOf(Mark.DONE, Mark.DONE, Mark.DONE, Mark.NEXT, Mark.NEXT), marks(FundingStage.IN_BLOCK))
+        assertEquals(listOf(Mark.DONE, Mark.DONE, Mark.DONE, Mark.NOW, Mark.NEXT), marks(FundingStage.OPENING))
+        assertEquals(List(5) { Mark.DONE }, marks(FundingStage.READY))
     }
 
-    private fun contract(createdAt: Long, state: ContractState) = Contract(
-        id = "c$createdAt", hub = "https://hub.example", state = state, mock = false, cap = 131_071uL, price = 1_000uL,
-        funded = 0uL, fundedReceived = false, paidFrom = 50_000uL, protectsUntil = 2_000u, closesAt = 2_100u,
-        funding = null, createdAt = createdAt, covers = 0uL, step = null, transfer = null,
-    )
+    @Test
+    fun a_first_deposit_is_asked_as_one_figure() {
+        assertEquals(50_000uL, FIRST_DEPOSIT)
+        assertEquals("Send at least 50,000 sat. It opens your vault and covers its reserve and fees.", HOW_MUCH)
+    }
+
+    @Test
+    fun a_wallet_is_set_up_until_its_vault_was_said_ready_and_not_one_in_use() {
+        // No hub, or one and nothing yet: set up.
+        assertTrue(setupDue(fresh.copy(hubs = emptyList())))
+        assertTrue(setupDue(fresh))
+        // In use, never asked: as before this, no screen of it, with a vault or without.
+        val held = fresh.copy(balance = balance(notes = 10_000uL))
+        assertFalse(setupDue(held))
+        assertFalse(setupDue(held.copy(contracts = listOf(contract(100L, ContractState.Protecting)))))
+        // Asked: until its vault protects, then once more, to say so.
+        val asked = held.copy(guideSince = 200L)
+        assertTrue(setupDue(asked))
+        assertTrue(setupDue(asked.copy(contracts = listOf(contract(300L, ContractState.Opening)))))
+        val ready = asked.copy(contracts = listOf(contract(300L, ContractState.Protecting)))
+        assertTrue(setupDue(ready))
+        assertFalse(setupDue(ready.copy(guideSince = null)))
+        // Its vault ended before that was said: over.
+        assertFalse(setupDue(asked.copy(contracts = listOf(contract(300L, ContractState.Closed)))))
+        assertEquals("Set up your vault", setupWords(FundingStage.WAITING).title)
+        assertEquals(FundingStage.entries.size, FundingStage.entries.map { setupWords(it).line }.toSet().size)
+    }
+
+    @Test
+    fun send_takes_a_balance_or_a_vault() {
+        assertFalse(canSend(fresh))
+        assertTrue(canSend(fresh.copy(balance = balance(notes = 1uL))))
+        assertTrue(canSend(fresh.copy(balance = balance(onchain = 1uL))))
+        for (state in listOf(ContractState.Opening, ContractState.Confirming, ContractState.Protecting)) {
+            assertTrue("$state", canSend(fresh.copy(contracts = listOf(contract(1L, state)))))
+        }
+        // One that ended or failed is no vault.
+        assertFalse(canSend(fresh.copy(contracts = listOf(contract(1L, ContractState.Closed), contract(2L, ContractState.Failed("no"))))))
+        assertTrue(NOTHING_TO_SEND.contains("vault"))
+    }
 
     @Test
     fun the_guide_asked_for_again_lasts_until_a_new_vault_protects() {

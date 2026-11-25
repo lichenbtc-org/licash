@@ -489,20 +489,30 @@ async fn used(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     let fallback = fallback.assume_checked().to_string();
     ensure!(code.silent.is_none(), "a silent payment address in {code}");
     let silent = phone.silent_address().await?;
-    // A wallet with nothing yet: Home guides its first funding, to that
-    // same address, bare.
+    // A wallet with nothing yet: its first funding is a screen of its
+    // own, which Home's card leads back to, to that same address, bare,
+    // and one figure to send at least.
+    phone.tap_id("setup-card-go").await?;
     phone.tagged("funding-title", "Fill your vault", 30).await?;
+    let asked = phone.by_id("funding-how-much", 10).await?;
+    ensure!(
+        asked.text.starts_with("Send at least 50,000 sat."),
+        "{:?} asked for",
+        asked.text
+    );
     let guided = phone.qr(30).await?;
     ensure!(
         guided == format!("BITCOIN:{}", fallback.to_uppercase()),
         "{guided} guided to, {fallback} on Receive"
     );
-    // Paid at the fallback address: Home says it is on its way, then it
-    // is found in a block and moved into the balance once asked, the next
-    // address shown from then on.
+    // Paid at the fallback address: its steps say it was seen, and Home,
+    // once gone to, that it is on its way; then it is found in a block
+    // and moved into the balance once asked, the next address shown from
+    // then on.
     eco.send_to(&fallback, 30_000).await?;
+    phone.tagged("funding-title", "Seen", 60).await?;
+    phone.home(30).await?;
     phone.tagged("status", "Receiving 30,000 sat", 60).await?;
-    phone.tagged("funding-title", "Seen", 30).await?;
     eco.mine(1).await?;
     move_in(eco, phone).await?;
     settle(eco, phone, 1).await?;
@@ -660,7 +670,7 @@ async fn used(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
 }
 
 /// The onboarding again, from Settings, for a wallet holding and protected
-/// already: the tour, then Home guiding to a vault, until hidden.
+/// already: the tour, then a vault set up a screen at a time, until hidden.
 async fn guided_again(phone: &Phone) -> anyhow::Result<()> {
     phone.launch().await?;
     ensure!(
@@ -673,13 +683,15 @@ async fn guided_again(phone: &Phone) -> anyhow::Result<()> {
     phone.tap_id("guide-start").await?;
     phone.tagged("funding-title", "Fill your vault", 30).await?;
     phone.by_id("funding-address", 30).await?;
-    // Below the address, its steps and the copy button: out of sight until
-    // scrolled to, gently, not to open the history. Its words in sight, not
-    // only its tag, so that the center of its bounds is not under the
-    // buttons below.
-    let hide = phone.scroll_home_to_text("Hide guide").await?;
-    phone.tap_view(&hide).await?;
+    // Under its steps, always in sight: of a wallet in use, it ends the guide.
+    phone.wait("Hide guide", 10).await?;
+    phone.tap_id("funding-hide").await?;
     phone.gone("funding", 10).await?;
+    phone.home(10).await?;
+    ensure!(
+        !phone.has("setup-card").await?,
+        "a guide hidden still suggested"
+    );
     Ok(())
 }
 

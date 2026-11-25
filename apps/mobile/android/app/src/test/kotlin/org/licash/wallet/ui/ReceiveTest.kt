@@ -5,6 +5,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.licash.core.Contract
+import org.licash.core.ContractState
 import org.licash.core.DonationAddress
 import org.licash.core.Hub
 import org.licash.core.LightningTerms
@@ -148,5 +150,27 @@ class ReceiveTest {
     fun the_bitcoin_tab_shows_the_bare_address() {
         assertEquals("BITCOIN:BCRT1QABC", bareQr("bcrt1qabc", null))
         assertEquals("BITCOIN:BCRT1QABC?amount=0.00050000", bareQr("bcrt1qabc", 50_000L))
+    }
+
+    private fun contract(state: ContractState) = Contract(
+        id = "c", hub = "https://hub.example", state = state, mock = false, cap = 131_071uL, price = 1_000uL,
+        funded = 0uL, fundedReceived = false, paidFrom = 50_000uL, protectsUntil = 2_000u, closesAt = 2_100u,
+        funding = null, createdAt = 1L, covers = 0uL, step = null, transfer = null,
+    )
+
+    @Test
+    fun what_a_hub_is_paid_with_no_vault_is_said_unprotected_each_time() {
+        assertTrue(RECEIVED_UNPROTECTED.contains("not protected"))
+        // Paid into a hub: its notes, on its word alone.
+        for (way in listOf(Way.CODE, Way.LIGHTNING, Way.DONATIONS)) {
+            assertTrue("$way", unprotectedWay(way, emptyList()))
+            assertTrue("$way", unprotectedWay(way, listOf(contract(ContractState.Closed))))
+            // A vault protecting, or being set up to: not said.
+            for (state in listOf(ContractState.Opening, ContractState.Confirming, ContractState.Protecting)) {
+                assertFalse("$way $state", unprotectedWay(way, listOf(contract(state))))
+            }
+        }
+        // On Bitcoin it is hers; a bridge account says whose word it is held on.
+        for (way in listOf(Way.BITCOIN, Way.SILENT, Way.ADDRESS)) assertFalse("$way", unprotectedWay(way, emptyList()))
     }
 }
