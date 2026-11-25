@@ -2028,12 +2028,7 @@ async fn serve(
     // Each request knows its peer: deposits and receipts are capped by its
     // address, or its client's behind a trusted proxy
     // (licash_hub_service::AdmissionSource).
-    axum::serve(
-        listener,
-        router.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(stop)
-    .await?;
+    licash_tor::listen(listener, router, stop).await;
     for task in announcing.into_iter().chain(swaps) {
         task.abort();
     }

@@ -386,6 +386,13 @@ Reservations remain visible while a service is disabled. A swap's hash
 reservation is not by itself proof that it owns a gateway's existing lock:
 the recorded lock id decides ownership during recovery.
 
+On the clear web the hub (like the bridge, a swap provider and the
+observatory) speaks HTTP/1.1 to at most 1,024 connections at once,
+closing any more as they arrive, and closes a connection whose request
+headers take more than 30 seconds to arrive, or that stays idle that long
+between requests. Its onion service takes at most 128 streams, each given
+120 seconds for its headers.
+
 The hub serves at most 256 requests at once (`/health` aside); any past
 them, of its own API or its swaps', receive 503 at once rather than wait
 in a queue. A request whose body is still arriving 60 seconds after its

@@ -310,9 +310,7 @@ async fn serve(data: PathBuf, run: Run) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("listening at {}", run.listen))?;
     tracing::info!("serving the observatory at http://{}", run.listen);
-    axum::serve(listener, web::router(apps))
-        .with_graceful_shutdown(shutdown())
-        .await?;
+    licash_tor::listen(listener, web::router(apps), shutdown()).await;
     for task in tasks {
         task.abort();
     }
