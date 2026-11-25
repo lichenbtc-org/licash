@@ -4259,6 +4259,81 @@ async fn a_holder_challenges_a_false_assertion_and_its_failure_pays_her_whole_cl
     Ok(())
 }
 
+/// An assertion in `rt`'s mempool, if one is: by its witness, bottom first
+/// π3 (G1, compressed) and π2 (G2), then π1's 254 Lamport preimages of
+/// 20 bytes.
+fn in_mempool_asserting(rt: &Regtest) -> Result<Option<bitcoin::Transaction>> {
+    for txid in rt.mempool()? {
+        let tx = rt.get_tx(&txid)?;
+        let w = &tx.input[0].witness;
+        let preimages = (2..256).all(|k| w.nth(k).is_some_and(|p| p.len() == 20));
+        if w.len() > 256
+            && w.nth(0).map(<[u8]>::len) == Some(32)
+            && w.nth(1).map(<[u8]>::len) == Some(64)
+            && preimages
+        {
+            return Ok(Some(tx));
+        }
+    }
+    Ok(None)
+}
+
+/// The hub asserts a true proof, and a miner mines it with π2 and π3 (which
+/// its leaf drops unchecked) replaced: the same transaction, by its id, but
+/// a proof that no longer verifies, to whoever reads it from the chain. She
+/// challenges it; the hub answers from the proof it made and pinned, not
+/// from the one the chain shows, and pays her what is left.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_hub_answers_the_challenge_of_its_assertion_mined_with_another_pi2_and_pi3() -> Result<()>
+{
+    use licash_contracts::holder::recovery::{self, Stage};
+
+    let s = stale_claim([17; 32]).await?;
+    s.openings.refuse_evidence();
+    // A coin for a challenge's fee, set aside from her next round.
+    let to = s.wallet.fallback_address()?.script_pubkey();
+    s.rt.fund(&to, Amount::from_sat(100_000))?;
+    s.rt.mine(1)?;
+    scan(&s.wallet, &s.chain).await?;
+
+    let mut altered = None;
+    for _ in 0..400 {
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        let r = recovery::advance(&s.wallet, &s.chain, &s.mine.join("wallet.sqlite"), s.rate)
+            .await?[0]
+            .clone();
+        ensure!(!matches!(r.stage, Stage::Lost | Stage::Done), "{r:?}");
+        if let Some(mut assert) = in_mempool_asserting(&s.rt)? {
+            let txid = assert.compute_txid();
+            let mut items = assert.input[0].witness.to_vec();
+            items[0] = vec![0xff; 32];
+            items[1] = vec![0xff; 64];
+            assert.input[0].witness = bitcoin::Witness::from_slice(&items);
+            ensure!(assert.compute_txid() == txid, "the same transaction");
+            s.rt.mine_with(&[assert])?;
+            altered = Some(txid);
+            break;
+        }
+        s.rt.mine(1)?;
+    }
+    let altered = altered.context("the hub never asserted")?;
+    // Mined with π2 and π3 no proof: she reads it unproved, so challenges.
+    let done = played(&s, |_| true).await?;
+    ensure!(done.assertion == Some(altered) && !done.proved, "{done:?}");
+    ensure!(done.challenge.is_some(), "not challenged: {done:?}");
+    ensure!(done.corrected == Some(98_304), "{done:?}");
+    // Paid by the hub's answer to her challenge, not by her timeout.
+    ensure!(done.payout.is_some() && done.timeout.is_none(), "{done:?}");
+    let received = done.received.context("nothing received")?;
+    ensure!(
+        received < 131_071,
+        "{received} of a claim of 131071: {done:?}"
+    );
+    Ok(())
+}
+
 /// A backup of the hub's data directory `from` made in `to` while it runs,
 /// as docs/hub.md tells: each database copied online (`VACUUM INTO`, a
 /// consistent copy as SQLite's `.backup` makes), every other file as it

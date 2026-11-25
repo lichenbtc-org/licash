@@ -306,9 +306,17 @@ impl HubOpening {
     }
     /// Answer with a committed kept instance. Its index in `kept` selects
     /// the graph's wrongly_challenged leaf, not the instance's number.
+    ///
+    /// On the proof of `signed`, the assertion as the hub signed it, when
+    /// it is the one in a block (`asserted`, by txid) and signs the same
+    /// π1: π2 and π3 sit in its witness unsigned and unchecked by its leaf,
+    /// so whoever relays or mines it can replace them, and the proof read
+    /// from the block no longer verify. Else on the proof read from the
+    /// block.
     pub fn answer(
         &self,
         asserted: &Transaction,
+        signed: Option<&Transaction>,
         challenge: &Transaction,
         i: u32,
         bytes: &[u8],
@@ -332,7 +340,12 @@ impl HubOpening {
         let (digits, secrets) = reveal::extract(&self.hub.lamport, &self.offer.presigs, &args)
             .context("challenge does not reveal secrets")?;
         ensure!(digits == a.digits, "challenge of another assertion");
-        let Some(proof) = &a.proof else {
+        let kept = signed
+            .filter(|s| s.compute_txid() == asserted.compute_txid())
+            .and_then(|s| self.babe.assertion(s).ok())
+            .filter(|s| s.digits == a.digits)
+            .and_then(|s| s.proof);
+        let Some(proof) = kept.as_ref().or(a.proof.as_ref()) else {
             return Ok(None);
         };
         // a malformed instance, or one whose evaluation panics, answers

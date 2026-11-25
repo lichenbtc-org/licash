@@ -2466,19 +2466,45 @@ mod tests {
         assert!(legacy.challenge(&a.keys, &asserted).is_err());
         let (i, bytes) = &stored_instance[0];
         assert!(ho
-            .answer(&asserted, &challenge, *i, bytes)
+            .answer(&asserted, None, &challenge, *i, bytes)
             .unwrap()
             .is_some());
+        // Mined with π2 and π3 replaced (the same txid): no proof read
+        // from the block, but the hub's, of the assertion it signed.
+        let mut mined = asserted.clone();
+        let mut items = mined.input[0].witness.to_vec();
+        items[0] = vec![0xff; items[0].len()];
+        items[1] = vec![0xff; items[1].len()];
+        mined.input[0].witness = lichen_btc::bitcoin::Witness::from_slice(&items);
+        assert_eq!(mined.compute_txid(), asserted.compute_txid());
+        assert!(ho.babe.assertion(&mined).unwrap().proof.is_none());
+        assert!(!ao.verify_assertion(&mined).unwrap());
+        let challenged = ao.challenge(&a.keys, &mined).unwrap();
+        assert!(ho
+            .answer(&mined, None, &challenged, *i, bytes)
+            .unwrap()
+            .is_none());
+        assert!(ho
+            .answer(&mined, Some(&asserted), &challenged, *i, bytes)
+            .unwrap()
+            .is_some());
+        // Not the one in the block: the proof read from the block.
+        let mut other = asserted.clone();
+        other.lock_time = lichen_btc::bitcoin::absolute::LockTime::from_consensus(1);
+        assert!(ho
+            .answer(&mined, Some(&other), &challenged, *i, bytes)
+            .unwrap()
+            .is_none());
         let mut bad = Instance::from_bytes(bytes).unwrap();
         bad.gc.ands.pop();
         assert!(ho
-            .answer(&asserted, &challenge, *i, &bad.to_bytes())
+            .answer(&asserted, None, &challenge, *i, &bad.to_bytes())
             .unwrap()
             .is_none());
         let mut bad = Instance::from_bytes(bytes).unwrap();
         bad.hmsg[0] ^= 1;
         assert!(ho
-            .answer(&asserted, &challenge, *i, &bad.to_bytes())
+            .answer(&asserted, None, &challenge, *i, &bad.to_bytes())
             .unwrap()
             .is_none());
         let rotated = Context {

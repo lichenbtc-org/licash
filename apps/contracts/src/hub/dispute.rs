@@ -1510,6 +1510,15 @@ impl Openings {
         by: (u32, Amount),
         tip: u32,
     ) -> Result<Played> {
+        // The assertion as the hub signed it, pinned before it was: its
+        // proof, whatever π2 and π3 the block shows.
+        let signed = match Responses::open(&self.data)?.response(&tagged(id, b"assert")) {
+            Ok(signed) => signed,
+            Err(e) => {
+                tracing::error!(id = %crate::hex_id(id), "the assertion pinned: {e:#}");
+                None
+            }
+        };
         for &i in &o.kept {
             let bytes = match self.store().kept_instance(id, i) {
                 Ok(b) => b,
@@ -1518,7 +1527,7 @@ impl Openings {
                     continue;
                 }
             };
-            match o.answer(asserted, challenge, i, &bytes) {
+            match o.answer(asserted, signed.as_ref(), challenge, i, &bytes) {
                 Ok(Some(tx)) => {
                     let name = format!(
                         "wrongly_challenged_{}",

@@ -392,7 +392,7 @@ async fn lifecycle(amount: u32, altered: bool, answer: bool, reorged: bool) {
             let i = ho.kept[0];
             let bytes = holder.instance(i).unwrap();
             let tx = ho
-                .answer(&assertion, &challenge, i, &bytes)
+                .answer(&assertion, None, &challenge, i, &bytes)
                 .unwrap()
                 .unwrap();
             chain.mine(Some(tx))
