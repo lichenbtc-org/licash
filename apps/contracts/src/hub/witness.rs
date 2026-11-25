@@ -361,7 +361,7 @@ impl Witnesses {
 
     /// Give a hub's witnesses, all unsealed, what it signed before it had
     /// them, its database in `data` (the hub stopped): each contract
-    /// enrolled, and each answer it signed or may have ([`to_import`]).
+    /// enrolled, and each answer it signed or may have (`to_import`).
     /// Then the set is sealed, and the hub's database bound to it: what
     /// was imported. Refused once bound, or a seal written: an import that
     /// failed before its seal is run again.

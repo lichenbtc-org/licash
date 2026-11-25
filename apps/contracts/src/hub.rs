@@ -671,7 +671,7 @@ impl Openings {
     /// choose a hub by before paying a deposit: what its wallet funds
     /// (`funds`), of the caps it offers and no more of its balance than
     /// those tell, and whether a new opening is refused now (`full`), as
-    /// [`run::admits`] and [`Openings::step_now`] refuse one.
+    /// `run::admits` and `Openings::step_now` refuse one.
     pub fn advertise(&self) -> licash_api::Contracts {
         let step = match self.load() {
             Ok(load) => load.step,
