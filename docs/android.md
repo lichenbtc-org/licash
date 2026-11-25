@@ -43,8 +43,10 @@ screen (`ui/Setup.kt`), in Home's place:
    too, and takes one by its address; the back gesture returns to those
    recommended. None found says "No hubs available".
 3. **Fund.** "Send at least 50,000 sat. It opens your vault and covers its
-   reserve and fees.": one figure at every hub, the address as a QR code
-   with a copy button, and where it stands (Waiting, Seen, In a block,
+   reserve and fees.": one figure at every hub; folded under "How much to
+   send", a bit more than she expects to spend, the vault sized by the
+   deposit, room to swap some out later to receive more; the address as a
+   QR code with a copy button, and where it stands (Waiting, Seen, In a block,
    Opening vault, Ready), the marks joined by a line. One block is all a
    deposit is said to need, and "In a block" is done once reached; how
    deep it is is under "Details". Nothing opens without a tap: "Open your
@@ -119,9 +121,12 @@ within 10 s of another that served every block asked for holds nothing
 back while another serves them, and each of them learns how far the
 wallet has looked, as the one asked alone did before.
 
-Home says when bitcoin paid to the wallet waits outside the balance and no
-protection is offered for it ("N sat on Bitcoin", its card's button "See
-it"); it
+Protection is offered for a coin at a trusted hub that takes it whole in
+the smallest vault it fills, its fee and interest (not its reserve, which
+comes back) no more than half the coin: the largest vault first, then the
+cheapest. Home says when bitcoin paid to the wallet waits outside the
+balance and no protection is offered for it ("N sat on Bitcoin", its card's
+button "See it"); it
 opens the page for what is on Bitcoin, which lists each hub's protection to
 open. That page is always one tap from the balance: its row says "Add it
 to your balance, protected or not" while bitcoin is held and nothing is
@@ -447,13 +452,15 @@ to her as notes at that hub once its funding is 3 blocks deep (or claimed by a
 recovery should the hub never issue it), the hub charging its interest on its
 own part only. No change comes back from the coin. The sheet shows first
 what the hub would hold protected once it opens (its cover bar, then in
-words), then the cover, chosen first: at first the smallest at least half
-again the smallest coin a contract takes whole and what is not protected at
-the hub yet, room to be paid more, else
-the largest the hub allows for it (at a hub that lets the wallet choose,
-`--contracts-max-cap`, among its sizes, `2^n - 1` sat; an older hub may
-bound it by the coin paying, as it announces), a slider choosing among every
-cover some coin opens when several do. The cover decides the coins that pay
+words), then the cover, chosen first: at first the smallest the smallest
+coin a contract takes whole fills, the hub funding the rest of it at its
+interest (among its sizes, `2^n - 1` sat, at a hub that lets the wallet
+choose, as hubs do by default; an older hub may bound it by the coin paying,
+as it announces). Under More, what it is for sizes it otherwise (Smallest,
+Pay, Both or Receive: room for what is put in and held at the hub, half
+again, or three times it, the hub funding more of it), the choice kept once
+tapped, and a slider chooses among every cover some coin opens when several
+do. The cover decides the coins that pay
 it whole, chips when several do, the smallest at first. Then its cost, the
 reserve, and "Into your balance", her part; why no coin pays any, each short
 of the price or beyond what the hub's largest contract takes; and one line
@@ -461,12 +468,15 @@ of what it asks of her, opening the app now and then and before the day it
 ends. Under More, a slider chooses how long it lasts (at first half a
 year), with the hub's part and the cost itemized.
 With no coin
-on Bitcoin paying any, opened from a hub's page, the sheet offers the cover
-the same way for what is not protected there and a coin to cash out to the
-wallet first: its price and a 1,000 sat part, the hub funding the rest of
-the cap (the largest smaller cover a hub bounding it by the coin allows),
-the part larger if a provider pays out no coin that small (the least an
-announced one pays out, its minimum risen with fees). Paid as quoted: the
+on Bitcoin paying any, opened from a hub's page, the sheet offers a coin to
+cash out to the wallet first (or pay for with notes) of what is not
+protected there, less a hundredth and 5,000 sat for the cash-out's fees: its
+price paid from it and the rest the owner's part, in the smallest cover it
+fills, the hub funding the rest. Under More, mostly the hub's: a coin of the
+price and a 1,000 sat part, the hub funding nearly all of a cover half again
+what is not protected (the largest smaller cover a hub bounding it by the
+coin allows), the part larger if a provider pays out no coin that small
+(the least an announced one pays out, its minimum risen with fees). Paid as quoted: the
 coin quoted must still open the contract quoted, else it is quoted again.
 Once the coin arrives, Protect opens on it. Priced live as the
 hub prices it: its cost (the hub's opening fee and its yearly interest on each

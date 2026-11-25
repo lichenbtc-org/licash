@@ -273,7 +273,7 @@ fun Setup(
                     SetupPage.VAULT -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).testTag("offer-page")) {
                         Say(VAULT_MEANS)
                         ui.offer?.let { q ->
-                            Offered(engine, q, ready = !behind(ui), verb = "Open", sized = false) { nav.choosing = false }
+                            Offered(engine, q, ready = !behind(ui), verb = "Open") { nav.choosing = false }
                         }
                         Spacer(Modifier.height(24.dp))
                     }
@@ -408,6 +408,9 @@ private fun ColumnScope.Fund(
                 style = MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center,
             )
+            More("How much to send", Modifier.testTag("funding-more")) {
+                Say(DEPOSIT_MORE)
+            }
             address?.let { shown ->
                 QrCode("bitcoin:$shown".uppercase(), size = 220.dp, description = "Bitcoin address as a QR code")
                 SelectionContainer {

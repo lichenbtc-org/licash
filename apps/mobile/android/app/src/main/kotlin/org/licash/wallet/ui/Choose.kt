@@ -61,8 +61,7 @@ internal fun OfferSheet(engine: Engine, q: ContractQuote, ready: Boolean, dismis
  * The protection offered for what was paid on Bitcoin, as [Choosing], in
  * a sheet or on a page: a coin on Bitcoin added to the balance, protected,
  * once accepted, or declined so it is not offered unasked again; `done`
- * either way. `verb` names accepting it. Not `sized` by what it is mostly
- * for, a first one: its size is still chosen under More.
+ * either way. `verb` names accepting it.
  */
 @Composable
 internal fun Offered(
@@ -70,7 +69,6 @@ internal fun Offered(
     q: ContractQuote,
     ready: Boolean,
     verb: String = "Add",
-    sized: Boolean = true,
     done: () -> Unit,
 ) {
     val range = q.range ?: return
@@ -89,7 +87,6 @@ internal fun Offered(
         verb = verb,
         intent = intentOf(engine.prefs.intent),
         chooseIntent = { engine.prefs.intent = it.name },
-        sized = sized,
         open = { chosen, price ->
             done()
             engine.openContract(q.hub, price, chosen)
@@ -124,19 +121,24 @@ internal fun fitsFrom(least: ULong, fit: (least: ULong) -> ContractFit?): List<C
 }
 
 /**
- * What protection is mostly for, which sizes it at first: room for what
- * she puts in and holds at the hub (`halves` of it, in halves), to pay
- * with; half as much again, to be paid too; or three times it, to be paid
- * mostly. The hub funds the room beyond her part.
+ * What protection is mostly for, which sizes it at first: the smallest her
+ * coin fills, the hub adding as little as it can, at its interest (`halves`
+ * none); or room for what she puts in and holds at the hub (`halves` of it,
+ * in halves), to pay with; half as much again, to be paid too; or three
+ * times it, to be paid mostly. The hub funds the room beyond her part.
  */
 internal enum class Intent(val label: String, val says: String, val halves: ULong) {
-    PAY("Mostly pay", "Room for what you put in, to pay with.", 2uL),
+    FITS("Smallest", "The smallest your deposit fills, the hub adding the rest. It costs the least.", 0uL),
+    PAY("Pay", "Room for what you put in, to pay with.", 2uL),
     BOTH("Both", "Room for half as much again, to receive.", 3uL),
-    RECEIVE("Mostly receive", "Room to receive twice what you put in.", 6uL),
+    RECEIVE("Receive", "Room to receive twice what you put in.", 6uL),
 }
 
-/** The intent the owner last chose: [Intent.BOTH], as before there was a choice, if none. */
-internal fun intentOf(saved: String?): Intent = Intent.entries.find { it.name == saved } ?: Intent.BOTH
+/**
+ * The intent the owner last chose, kept only once she taps one: [Intent.FITS]
+ * if none, the hub funding as little as it can.
+ */
+internal fun intentOf(saved: String?): Intent = Intent.entries.find { it.name == saved } ?: Intent.FITS
 
 /**
  * The contract offered at first of `fits` for a coin of `coin` sat, with
@@ -157,9 +159,9 @@ internal fun intentFit(fits: List<ContractFit>, coin: ULong, missing: ULong, int
 internal fun suggestedFit(fits: List<ContractFit>, coin: ULong, missing: ULong = 0uL): ContractFit? =
     intentFit(fits, coin, missing, Intent.BOTH)
 
-/** The contract offered at first for `coin`, if one takes it whole. */
+/** The smallest contract that takes `coin` whole, if one does. */
 internal fun fitOf(q: ContractQuote, range: ContractRange, blocks: UInt, coin: DepositCoin): ContractFit? =
-    suggestedFit(fitsOf(q, range, blocks, coin), coin.value)
+    fitsOf(q, range, blocks, coin).firstOrNull()
 
 /**
  * Each cover some coin of `fits` (each coin's contracts, as [fitsOf])
@@ -179,17 +181,52 @@ internal fun coversOf(fits: List<Pair<DepositCoin, List<ContractFit>>>): List<Pa
 internal fun suggestedCover(
     fits: List<Pair<DepositCoin, List<ContractFit>>>,
     missing: ULong = 0uL,
-    intent: Intent = Intent.BOTH,
+    intent: Intent = Intent.FITS,
 ): ULong? =
     fits.filter { it.second.isNotEmpty() }.minByOrNull { it.first.value }
         ?.let { (coin, its) -> intentFit(its, coin.value, missing, intent)?.cap }
 
-/** What to cash out to herself to protect what she holds at a hub: a coin of `coin` sat opening `cap`. */
-internal data class CashOutFirst(val cap: ULong, val coin: ULong)
+/** What to cash out to herself to protect what she holds at a hub: a coin of `coin` sat opening `cap`, `funded` of it hers. */
+internal data class CashOutFirst(val cap: ULong, val coin: ULong, val funded: ULong)
+
+/**
+ * What is left at a hub of what a coin cashed out of it to protect it
+ * takes, for the cash-out's own fees, from `missing` sat: a hundredth and
+ * 5,000 sat, more than a provider and miners ask. What is left is covered
+ * all the same: the size rounds up.
+ */
+internal fun cashOutRoom(missing: ULong): ULong = minOf(missing, missing / 100uL + 5_000uL)
 
 /**
  * With no coin on Bitcoin that pays for it, the coin to cash out to herself
- * first to protect the `missing` sat at a hub not protected yet: one paying
+ * first to protect the `missing` sat at a hub not protected yet, of her
+ * own: those sat but for the cash-out's fees ([cashOutRoom]), the cost and
+ * reserve paid from them and the rest her part, issued back, in the
+ * smallest of `sizes` that takes it whole (`fit` of a coin at a least cap,
+ * as [contractFit]), the hub funding the rest of it, as a coin she holds is
+ * sized at first ([Intent.FITS]). The price paid from what she holds, the
+ * rest is covered. At least what the smallest takes, [FIXED_PART] hers; at
+ * most what the largest takes, all hers. None with nothing missing, or if
+ * no contract takes it.
+ */
+internal fun cashOutOwn(
+    sizes: List<ULong>,
+    missing: ULong,
+    price: (cap: ULong, funded: ULong) -> ULong,
+    fit: (coin: ULong, least: ULong) -> ContractFit?,
+): CashOutFirst? {
+    if (missing == 0uL) return null
+    val least = sizes.firstOrNull() ?: return null
+    val largest = sizes.last()
+    val own = missing - cashOutRoom(missing)
+    val coin = own.coerceIn(price(least, FIXED_PART) + FIXED_PART, price(largest, largest) + largest)
+    return fit(coin, least)?.let { CashOutFirst(it.cap, coin, it.funded) }
+}
+
+/**
+ * With no coin on Bitcoin that pays for it, the coin to cash out to herself
+ * first to protect the `missing` sat at a hub not protected yet, mostly of
+ * the hub's funds (under More: [cashOutOwn] at first): one paying
  * the price of the smallest of `sizes` covering half again them (else the
  * largest) and [FIXED_PART], her part, the hub funding the rest. If a
  * contract of that cap does not take it whole (`fit` of a coin at a least
@@ -206,7 +243,7 @@ internal fun cashOutFirst(
     val wanted = sizes.firstOrNull { it >= missing + missing / 2uL } ?: sizes.lastOrNull() ?: return null
     return sizes.filter { it <= wanted }.asReversed().firstNotNullOfOrNull { cap ->
         val coin = price(cap, FIXED_PART) + FIXED_PART
-        fit(coin, cap)?.takeIf { it.cap == cap }?.let { CashOutFirst(cap, coin) }
+        fit(coin, cap)?.takeIf { it.cap == cap }?.let { CashOutFirst(cap, coin, it.funded) }
     }
 }
 
@@ -228,9 +265,9 @@ internal fun ChooseSheet(
     title: String = "Protect at $hub",
     verb: String = "Protect",
     decline: (() -> Unit)? = null,
-    payWithNotes: ((cap: ULong, blocks: UInt) -> Unit)? = null,
+    payWithNotes: ((cap: ULong, blocks: UInt, coin: ULong) -> Unit)? = null,
     cashOut: ((ULong) -> Unit)? = null,
-    intent: Intent = Intent.BOTH,
+    intent: Intent = Intent.FITS,
     chooseIntent: (Intent) -> Unit = {},
 ) {
     Sheet(title, dismiss) {
@@ -263,15 +300,13 @@ internal fun Choosing(
     hub: String,
     verb: String = "Protect",
     decline: (() -> Unit)? = null,
-    // With no coin paying it: one paid for with notes, of so large a cover over so many blocks.
-    payWithNotes: ((cap: ULong, blocks: UInt) -> Unit)? = null,
+    // With no coin paying it: one paid for with notes, of so large a cover over so many blocks, a coin of so many sat at least.
+    payWithNotes: ((cap: ULong, blocks: UInt, coin: ULong) -> Unit)? = null,
     // With no coin paying it: cashing out a coin of so many sat to herself first, to pay it.
     cashOut: ((ULong) -> Unit)? = null,
     // What it is mostly for, sizing it at first, and where her choice is kept.
-    intent: Intent = Intent.BOTH,
+    intent: Intent = Intent.FITS,
     chooseIntent: (Intent) -> Unit = {},
-    // Whether what it is mostly for is asked, sizing it: else its size is only under More.
-    sized: Boolean = true,
 ) {
     val colors = MaterialTheme.colorScheme
     val download = android.text.format.Formatter.formatShortFileSize(LocalContext.current, q.download.toLong())
@@ -296,21 +331,19 @@ internal fun Choosing(
     val cost = fee.cost()
     // It stops protecting a little before it ends.
     val protectsFor = if (blocks > q.afterAssert) blocks - q.afterAssert else 0u
-    // None paying it: what she holds here protected by a coin cashed out to herself first.
-    val first = if (fit == null && cashOut != null) {
-        cashOutFirst(
-            contractSizes(range),
-            cover.missing,
-            price = { c, f -> contractPrice(range, c, blocks, f) },
-            fit = { v, least -> contractFit(range, blocks, v, least, q.dust, q.denominations, q.fundedNotes) },
-        )
-    } else {
-        null
-    }
+    // None paying it: what she holds here protected by a coin cashed out to
+    // herself first, of her own at first; mostly the hub's under More.
+    val sizes = contractSizes(range)
+    val priced = { c: ULong, f: ULong -> contractPrice(range, c, blocks, f) }
+    val fitted = { v: ULong, least: ULong -> contractFit(range, blocks, v, least, q.dust, q.denominations, q.fundedNotes) }
+    val own = if (fit == null && cashOut != null) cashOutOwn(sizes, cover.missing, priced, fitted) else null
+    val hubs = if (fit == null && cashOut != null) cashOutFirst(sizes, cover.missing, priced, fitted) else null
+    val first = own ?: hubs
+    val mostlyHubs = hubs?.takeIf { own != null && it != own }
     if (fit != null || first != null) {
         // Cashed out first, what she holds here less the coin, her part of it back.
         val after = if (first != null) {
-            coverAfter(cover.copy(held = cover.held - minOf(cover.held, first.coin)), first.cap, FIXED_PART)
+            coverAfter(cover.copy(held = cover.held - minOf(cover.held, first.coin)), first.cap, first.funded)
         } else {
             coverAfter(cover, capped, funded)
         }
@@ -323,20 +356,6 @@ internal fun Choosing(
                 color = colors.onSurfaceVariant,
             )
         }
-    }
-    // What it is for sizes it: the exact size, and the coin, under More.
-    if (sized && fit != null && covers.size > 1) {
-        Segmented(Intent.entries.map { it.label }, picked.ordinal, Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-            picked = Intent.entries[it]
-            chosenCap = null
-            chooseIntent(picked)
-        }
-        Text(
-            if (chosenCap == null) picked.says else "$PROTECTED_AMOUNT chosen under More.",
-            modifier = Modifier.padding(bottom = 4.dp).testTag("intent-says"),
-            style = MaterialTheme.typography.bodySmall,
-            color = colors.onSurfaceVariant,
-        )
     }
     Line("Covers up to", sat(first?.cap ?: capped), tag = "quote-cap")
     if (fit != null && coin != null) {
@@ -355,16 +374,16 @@ internal fun Choosing(
     }
     Line("For", span(protectsFor.toLong(), blockSecs), tag = "quote-for")
     if (first != null && cashOut != null) {
-        val firstFee = contractFee(range, first.cap, blocks, FIXED_PART)
+        val firstFee = contractFee(range, first.cap, blocks, first.funded)
         FeeLine(
             "Cost", firstFee.cost(), first.cap, tag = "quote-price", value = sat(firstFee.cost()),
-            breakdown = contractCost(range, first.cap, firstFee, FIXED_PART),
+            breakdown = contractCost(range, first.cap, firstFee, first.funded),
         )
         Line("Reserve, refundable", sat(range.reserve), tag = "contract-reserve")
         if (payWithNotes != null) {
             Say(PAY_WITH_NOTES)
             BigButton("Pay ${sat(first.coin)} from notes", Modifier.fillMaxWidth().testTag("pay-with-notes")) {
-                payWithNotes(first.cap, blocks)
+                payWithNotes(first.cap, blocks, first.coin)
             }
             Spacer(Modifier.height(8.dp))
         }
@@ -412,8 +431,26 @@ internal fun Choosing(
                 )
             }
         }
-        // Its size, after what it costs: larger, the hub funds more of it, room to be paid more at its interest.
+        // Its size, after what it costs: at first the smallest her coin
+        // fills; larger, by what it is for or exactly, the hub funds more
+        // of it, room to be paid more at its interest.
         if (fit != null && covers.size > 1) {
+            Text("What it is for", modifier = Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyLarge)
+            Segmented(
+                Intent.entries.map { it.label },
+                picked.ordinal,
+                Modifier.fillMaxWidth().padding(vertical = 8.dp).testTag("contract-intent"),
+            ) {
+                picked = Intent.entries[it]
+                chosenCap = null
+                chooseIntent(picked)
+            }
+            Text(
+                if (chosenCap == null) picked.says else "$PROTECTED_AMOUNT chosen below.",
+                modifier = Modifier.padding(bottom = 4.dp).testTag("intent-says"),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant,
+            )
             Text(PROTECTED_AMOUNT, modifier = Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyLarge)
             val at = covers.indexOfFirst { it.first == capped }
             Slider(
@@ -439,6 +476,30 @@ internal fun Choosing(
                 }
             } else {
                 Line("Paid with", "${sat(coin.value)} on Bitcoin", tag = "contract-paid-with")
+            }
+        }
+        // Cashed out first: less of hers, the hub funding nearly all of it at its interest.
+        if (mostlyHubs != null && cashOut != null) {
+            val fee = contractFee(range, mostlyHubs.cap, blocks, mostlyHubs.funded)
+            Text("Mostly the hub's", modifier = Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyLarge)
+            Say(MOSTLY_THE_HUBS)
+            Line("Covers up to", sat(mostlyHubs.cap), tag = "hubs-cap")
+            Line("Cost", sat(fee.cost()), tag = "hubs-price")
+            if (payWithNotes != null) {
+                BigButton(
+                    "Pay ${sat(mostlyHubs.coin)} from notes",
+                    Modifier.fillMaxWidth().padding(top = 8.dp).testTag("pay-hubs-with-notes"),
+                    quiet = true,
+                ) {
+                    payWithNotes(mostlyHubs.cap, blocks, mostlyHubs.coin)
+                }
+            }
+            BigButton(
+                "Cash out ${sat(mostlyHubs.coin)} to yourself",
+                Modifier.fillMaxWidth().padding(top = 8.dp).testTag("cash-out-hubs"),
+                quiet = true,
+            ) {
+                cashOut(mostlyHubs.coin)
             }
         }
         Line("Takes", "$SETUP_TAKES · $download")
@@ -473,6 +534,10 @@ internal const val PROTECTED_AMOUNT = "Protected amount"
 /** How protecting what she holds is paid for with no coin on Bitcoin: one cashed out to herself, then. */
 internal const val CASH_OUT_FIRST = "None of your bitcoin pays for this. Cash out this much to yourself, then " +
     "protect with it once it arrives. Beyond the cost and the reserve, it comes back to your balance."
+
+/** Protecting what she holds at a hub mostly with the hub's funds, under More. */
+internal const val MOSTLY_THE_HUBS = "Or move out only the cost, the reserve and 1,000 sat: the hub funds nearly " +
+    "all of the protection and charges its interest on it. It costs more, but less of your money moves."
 
 /** Paying for a coin with notes, then protecting with it, in one step. */
 internal const val PAY_WITH_NOTES = "Or pay for it with your notes here: a swap provider sends this much to " +

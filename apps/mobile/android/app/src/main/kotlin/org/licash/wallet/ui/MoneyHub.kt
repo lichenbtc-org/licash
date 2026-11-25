@@ -103,12 +103,12 @@ internal fun HubPage(
         }
     }
 
-    // With no coin on Bitcoin: one paid for with the notes here, of `cap` over `blocks` if chosen.
-    fun payWithNotes(cap: ULong?, blocks: UInt?) {
+    // With no coin on Bitcoin: one paid for with the notes here, of `cap` over `blocks` if chosen, a coin of `coin` sat at least.
+    fun payWithNotes(cap: ULong?, blocks: UInt?, coin: ULong? = null) {
         quote = null
         quoting = true
         scope.launch {
-            engine.paidContractQuote(holding.hub, cap, blocks).fold({ paidQuote = it }, { fail(explain(it)) })
+            engine.paidContractQuote(holding.hub, cap, blocks, coin).fold({ paidQuote = it }, { fail(explain(it)) })
             quoting = false
         }
     }
@@ -236,7 +236,7 @@ internal fun HubPage(
                 },
                 dismiss = { quote = null },
                 hub = engine.called(q.hub),
-                payWithNotes = { cap, blocks -> payWithNotes(cap, blocks) },
+                payWithNotes = { cap, blocks, coin -> payWithNotes(cap, blocks, coin) },
                 intent = intentOf(engine.prefs.intent),
                 chooseIntent = { engine.prefs.intent = it.name },
                 cashOut = { coin ->

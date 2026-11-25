@@ -95,6 +95,15 @@ internal const val FIRST_DEPOSIT = 50_000uL
 /** How much to send, said over the address. */
 internal val HOW_MUCH = "Send at least ${sat(FIRST_DEPOSIT)}. It opens your vault and covers its reserve and fees."
 
+/**
+ * How much more to send, folded under the address: her deposit sizes her
+ * vault, the hub adding the rest of it, so more than she means to spend
+ * leaves room to swap some out later, for more room to receive protected.
+ */
+internal const val DEPOSIT_MORE =
+    "Send a bit more than you expect to spend. Your vault is sized to your deposit, so the extra leaves " +
+        "room to swap some out later if you need more room to receive."
+
 /** Said of bitcoin in a block that no vault is offered for. */
 internal const val NO_VAULT_YET = "No vault fits it yet. Send more, or see it under your balance."
 

@@ -60,9 +60,11 @@ class ChooseContractTest {
             listOf(1_048_575uL to listOf(small, large), 2_097_151uL to listOf(large)),
             coversOf(fits),
         )
-        // At first the one suggested for the smallest coin a contract takes whole.
+        // At first the smallest cover the smallest coin a contract takes whole opens.
         assertEquals(1_048_575uL, suggestedCover(fits))
-        assertEquals(2_097_151uL, suggestedCover(listOf(large to fits[0].second)))
+        assertEquals(1_048_575uL, suggestedCover(listOf(large to fits[0].second)))
+        // Asked for room to be paid too: half again the coin.
+        assertEquals(2_097_151uL, suggestedCover(listOf(large to fits[0].second), intent = Intent.BOTH))
         assertNull(suggestedCover(listOf(tiny to emptyList())))
         assertEquals(emptyList<Pair<ULong, List<DepositCoin>>>(), coversOf(emptyList()))
     }
@@ -81,11 +83,40 @@ class ChooseContractTest {
     private fun price(cap: ULong, funded: ULong) = 23_000uL + (cap - funded) / 1_000uL
 
     @Test
+    fun with_no_coin_she_cashes_out_what_she_holds_unprotected_the_hub_adding_the_rest() {
+        // The smallest of the sizes a coin funds whole but for the hub's part, as contractFit.
+        val absorbing = { coin: ULong, least: ULong ->
+            sizes.filter { it >= least }.firstNotNullOfOrNull { cap ->
+                val funded = coin - 23_000uL - (cap - minOf(cap, coin)) / 1_000uL
+                ContractFit(cap, funded).takeIf { funded in 1uL..cap }
+            }
+        }
+        // 200,000 sat held unprotected, all of it moved but 7,000 for the cash-out's fees:
+        // 262,143, the hub adding the rest, not half again it as mostly the hub's.
+        assertEquals(7_000uL, cashOutRoom(200_000uL))
+        assertEquals(3_000uL, cashOutRoom(3_000uL))
+        val own = cashOutOwn(sizes, 200_000uL, ::price, absorbing)
+        assertEquals(262_143uL to 193_000uL, own?.let { it.cap to it.coin })
+        assertEquals(193_000uL - 23_000uL - 69uL, own?.funded)
+        assertEquals(524_287uL, cashOutFirst(sizes, 200_000uL, ::price, absorbing)?.cap)
+        // Too little for the smallest: what it takes, a little of hers.
+        val least = price(131_071uL, FIXED_PART) + FIXED_PART
+        assertEquals(131_071uL to least, cashOutOwn(sizes, 5_000uL, ::price, absorbing)?.let { it.cap to it.coin })
+        // More than the largest takes: the largest, all hers.
+        val most = cashOutOwn(sizes, 5_000_000uL, ::price, absorbing)
+        assertEquals(1_048_575uL to price(1_048_575uL, 1_048_575uL) + 1_048_575uL, most?.let { it.cap to it.coin })
+        // Nothing missing, or none taking it: none.
+        assertNull(cashOutOwn(sizes, 0uL, ::price, absorbing))
+        assertNull(cashOutOwn(sizes, 200_000uL, ::price) { _, _ -> null })
+        assertNull(cashOutOwn(emptyList(), 200_000uL, ::price, absorbing))
+    }
+
+    @Test
     fun with_no_coin_she_cashes_out_one_paying_for_what_she_holds() {
         // 300,000 sat held unprotected: half again is 450,000, the hub funding nearly all of 524,287.
         val any = { coin: ULong, least: ULong -> ContractFit(cap = least, funded = coin - price(least, FIXED_PART)) }
         assertEquals(
-            CashOutFirst(524_287uL, price(524_287uL, FIXED_PART) + FIXED_PART),
+            CashOutFirst(524_287uL, price(524_287uL, FIXED_PART) + FIXED_PART, FIXED_PART),
             cashOutFirst(sizes, 300_000uL, ::price, any),
         )
         // More than the largest: the largest.
@@ -114,6 +145,10 @@ class ChooseContractTest {
         assertEquals(524_287uL, intentFit(fits, 100_000uL, 0uL, Intent.RECEIVE)?.cap)
         // Beyond the largest the coin pays: the largest.
         assertEquals(1_048_575uL, intentFit(fits, 1_000_000uL, 0uL, Intent.RECEIVE)?.cap)
+        // At first the smallest the coin fills, whatever is not protected yet.
+        assertEquals(131_071uL, intentFit(fits, 100_000uL, 0uL, Intent.FITS)?.cap)
+        assertEquals(131_071uL, intentFit(fits, 100_000uL, 5_000_000uL, Intent.FITS)?.cap)
+        assertNull(intentFit(emptyList(), 100_000uL, 0uL, Intent.FITS))
         // Both is what was offered before there was a choice.
         for (coin in listOf(1uL, 99_999uL, 100_001uL, 700_000uL)) {
             assertEquals(suggestedFit(fits, coin), intentFit(fits, coin, 0uL, Intent.BOTH))
@@ -121,9 +156,11 @@ class ChooseContractTest {
     }
 
     @Test
-    fun no_intent_saved_means_both() {
-        assertEquals(Intent.BOTH, intentOf(null))
-        assertEquals(Intent.BOTH, intentOf("something else"))
+    fun no_intent_saved_means_the_smallest_and_one_saved_is_kept() {
+        assertEquals(Intent.FITS, intentOf(null))
+        assertEquals(Intent.FITS, intentOf("something else"))
         assertEquals(Intent.RECEIVE, intentOf("RECEIVE"))
+        assertEquals(Intent.BOTH, intentOf("BOTH"))
+        assertEquals(Intent.PAY, intentOf("PAY"))
     }
 }

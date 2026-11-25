@@ -2394,7 +2394,7 @@ fn a_phone_whose_hub_opens_no_contracts_has_none_and_keeps_no_file_for_them() {
     let other = invalid(alice.contract_quote("https://other.example".into()));
     assert!(other.contains("no hub you use"), "{other}");
     // Nor paid for with notes: none waiting.
-    let paid = invalid(alice.paid_contract_quote(hub.url.clone(), None, None, None));
+    let paid = invalid(alice.paid_contract_quote(hub.url.clone(), None, None, None, None));
     assert!(paid.contains("opens no contracts"), "{paid}");
     assert!(alice.paid_contracts().unwrap().is_empty());
     // No contract to exit: no consent taken, nothing driven.
