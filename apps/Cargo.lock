@@ -20,6 +20,17 @@ dependencies = [
 
 [[package]]
 name = "aes"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
+dependencies = [
+ "cfg-if",
+ "cipher 0.4.4",
+ "cpufeatures 0.2.17",
+]
+
+[[package]]
+name = "aes"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fc36d7440d015b45468ba08a21e80e056ebbd014c611c6298bb7503e04bd1"
@@ -3385,6 +3396,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "licash-bridge"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bitcoin",
+ "clap",
+ "hex",
+ "http-body-util",
+ "licash",
+ "licash-api",
+ "licash-hub",
+ "licash-hub-service",
+ "licash-store",
+ "licash-tor",
+ "licash-transport",
+ "licash-wallet",
+ "lightning-invoice",
+ "nostr",
+ "nostr-sdk",
+ "rand_core 0.6.4",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tower-http 0.7.1",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
 name = "licash-chain"
 version = "0.0.1"
 dependencies = [
@@ -4175,6 +4219,7 @@ version = "0.45.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7a55567533eb00df5a6e2855f229e2092f593ab67c97aff7521fdfe55cf0383"
 dependencies = [
+ "aes 0.8.4",
  "base64 0.22.1",
  "bech32 0.12.0",
  "bip39",
@@ -7238,7 +7283,7 @@ version = "0.48.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d0ec60b9eb029431cc291445b8da36f64c2ed50c6456f6d2c41124089f5852f"
 dependencies = [
- "aes",
+ "aes 0.9.4",
  "base64ct",
  "ctr",
  "curve25519-dalek",
@@ -7457,7 +7502,7 @@ version = "0.48.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9f01894c375bfda9afbe290eaf187c7414f454097f2d7e9458bae8ad155cbb7"
 dependencies = [
- "aes",
+ "aes 0.9.4",
  "amplify",
  "async-trait",
  "asynchronous-codec",
