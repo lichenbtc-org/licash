@@ -337,7 +337,9 @@ for one with notes instead, in two steps. First a payout: a swap provider
 (`--provider <url>`, or by default one announced on the relays the wallet's
 hubs name or `--relay` names, as `payout` finds it) pays the wallet's own
 fallback address a coin worth the contract's price and 1,000 sat of it yours
-(the hub funds the rest), for notes locked to it at `--from` (by default the
+(the hub funds the rest), more of it yours if that is less than the least
+coin the provider pays out now (its `--payout-min`, risen with fees; of
+those announced, the lowest), for notes locked to it at `--from` (by default the
 hub holding the most; another hub's notes do, the provider swapping them), the
 claim's, provider's and lock's fees
 at most `--max-fee` (by default 1% and 2,000), the claim budgeted at
@@ -431,7 +433,8 @@ holds it. Should all of it fall short, `recoveries` says so, and
 `allow-publication-fee <id> <sats>` lets it pay that much in all, the rest
 from one coin of the wallet's, never two together; if none holds enough,
 `recoveries --chain` pays a coin out of notes (at the richest hub, if it
-holds that much) to the
+holds that much, raised to the least coin an announced provider pays out,
+the rest coming back as change) to the
 wallet's own silent payment address through a swap provider announced on
 its hubs' relays, the request waiting for it until six blocks before its
 deadline. Only as an exception, no payout made in time, are the wallet's

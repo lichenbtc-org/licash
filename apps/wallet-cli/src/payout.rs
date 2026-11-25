@@ -5,7 +5,10 @@
 use anyhow::{bail, Context};
 use bitcoin::FeeRate;
 use licash_chain_client::Source;
-use licash_nostr::{wallet::payout_providers, Route};
+use licash_nostr::{
+    wallet::{payout_providers, Announcements},
+    Route,
+};
 use licash_transport::Http;
 use licash_wallet::{Payout, PayoutQuote, PayoutState, Wallet};
 use serde_json::json;
@@ -90,13 +93,7 @@ pub(crate) async fn quote(
             }
         }
         Provider::Announced(relays, route) => {
-            let relays = match relays {
-                relays if !relays.is_empty() => relays,
-                _ => licash_nostr::wallet::hub_relays(wallet)?,
-            };
-            if relays.is_empty() {
-                bail!("no relay to find a provider on: name one with --relay, or a provider");
-            }
+            let relays = relays_or_hubs(wallet, relays)?;
             let limits = (max_fee, rate);
             let found = payout_providers(wallet, &relays, &route, (from, to), amount, limits);
             let found = found.await?.into_iter().next().with_context(|| {
@@ -107,6 +104,48 @@ pub(crate) async fn quote(
             found.quote
         }
     })
+}
+
+/// The least `provider` pays out to `to`, the wallet's own, from notes at
+/// `from`, the claim budgeted at `rate` ([`Wallet::payout_least`]): of
+/// those announced, the least any does. A payout to herself raised to it
+/// is one a provider makes, as one of what she needs may not be: a coin of
+/// a contract's price and her part was refused on Mutinynet, its smallest
+/// coin risen with fees. None if no provider says.
+pub(crate) async fn least(
+    wallet: &Wallet<Http>,
+    provider: &Provider,
+    (from, to): (&str, &str),
+    rate: FeeRate,
+) -> anyhow::Result<Option<u64>> {
+    let infos = match provider {
+        Provider::At(url) => vec![wallet.provider_info(url).await?],
+        Provider::Announced(relays, route) => {
+            let relays = relays_or_hubs(wallet, relays.clone())?;
+            let announced = Announcements::default();
+            (announced.refresh(&relays, route, wallet.network().name())).await?;
+            announced.infos(wallet, &relays).await?
+        }
+    };
+    let mut least = None;
+    for info in &infos {
+        if let Some(one) = wallet.payout_least(info, from, to, rate)? {
+            least = Some(least.map_or(one, |l: u64| l.min(one)));
+        }
+    }
+    Ok(least)
+}
+
+/// `relays`, or those the trusted hubs name if none: refused if neither.
+fn relays_or_hubs(wallet: &Wallet<Http>, relays: Vec<String>) -> anyhow::Result<Vec<String>> {
+    let relays = match relays {
+        relays if !relays.is_empty() => relays,
+        _ => licash_nostr::wallet::hub_relays(wallet)?,
+    };
+    if relays.is_empty() {
+        bail!("no relay to find a provider on: name one with --relay, or a provider");
+    }
+    Ok(relays)
 }
 
 /// Take the payout `hash` on, then broadcast the wallet's claims.
@@ -163,8 +202,15 @@ pub async fn for_fees(
     rate: bitcoin::FeeRate,
     record: impl FnOnce(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<Payout> {
-    let from = fees_from(wallet.balance()?, amount)?;
+    let balance = wallet.balance()?;
+    let from = fees_from(balance.clone(), amount)?;
     let to = wallet.silent_keys().address().to_string();
+    // As much as a provider pays out at least: the rest comes back as
+    // change.
+    let announced = Provider::Announced(Vec::new(), route.clone());
+    let least = least(wallet, &announced, (&from, &to), rate).await?;
+    let amount = amount.max(least.unwrap_or(0));
+    fees_from(balance, amount)?;
     let max_fee = amount / 100 + USUAL_MAX_FEE;
     let limits = (max_fee, rate);
     recorded(wallet, route, (&from, &to), amount, limits, record).await

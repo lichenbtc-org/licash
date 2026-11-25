@@ -185,9 +185,12 @@ pub async fn open_paid(
         cap: asked.cap,
         deposit: None,
     };
-    let coin = holder::paid::coin(wallet, hub, ask).await?;
     let source = crate::payout::source(chain.unwrap_or_default())?;
     let rate = crate::onchain::rate(&source, fee_rate).await?;
+    // The coin as large as a provider pays out at least, the rest hers.
+    let to = wallet.fallback_address()?.to_string();
+    let floor = crate::payout::least(wallet, &provider, (&from, &to), rate).await?;
+    let coin = holder::paid::coin(wallet, hub, ask, floor.unwrap_or(0)).await?;
     let max_fee = max_fee.unwrap_or(coin.value / 100 + crate::payout::USUAL_MAX_FEE);
     let pair = (from.as_str(), coin.to.as_str());
     let quote = crate::payout::quote(wallet, provider, pair, coin.value, (max_fee, rate), json);
@@ -758,7 +761,7 @@ async fn fund(
     let mut lines = Vec::new();
     for need in needs {
         let id = licash_contracts::hex_id(&need.id);
-        let amount = need.amount.to_sat().max(FEE_PAYOUT_FLOOR);
+        let amount = need.amount.to_sat();
         // Recorded as awaited before it is made: one made is never asked
         // for again.
         let record = |hash: &str| recovery::expect_fee(path, &need.id, need.purpose, hash);
@@ -767,7 +770,7 @@ async fn fund(
                 lines.push(format!(
                     "{}  fees: {} paid out of notes to the wallet by payout {}",
                     &id[..16],
-                    crate::say::sat(amount),
+                    crate::say::sat(payout.amount),
                     payout.hash
                 ));
             }
@@ -780,11 +783,6 @@ async fn fund(
     }
     lines
 }
-
-/// The least a payout for a forced close's fees asks: swap providers pay
-/// out no smaller coin by default (`licash-swaps --payout-min`), and what
-/// it holds beyond the fees comes back as change.
-const FEE_PAYOUT_FLOOR: u64 = 10_000;
 
 /// Give up forcing contract `id` closed, the wallet's notes back to it:
 /// only before its request is signed.

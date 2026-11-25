@@ -261,7 +261,7 @@ impl Wallet {
             cap,
             deposit: None,
         };
-        let coin = holder::paid::coin(&self.wallet, &hub, ask);
+        let coin = holder::paid::coin(&self.wallet, &hub, ask, 0);
         let coin = self.operation(coin).map_err(unavailable)?;
         let payout = self.payout_quote(coin.to.clone(), Some(coin.value), from)?;
         Ok(PaidContractQuote {
@@ -298,7 +298,7 @@ impl Wallet {
             .contracting
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let coin = holder::paid::coin(&self.wallet, &hub, ask);
+        let coin = holder::paid::coin(&self.wallet, &hub, ask, 0);
         let coin = self.operation(coin).map_err(unavailable)?;
         if (coin.value, coin.to.as_str()) != (quote.value, quote.payout.address.as_str()) {
             return Err(LicashError::invalid(format!(

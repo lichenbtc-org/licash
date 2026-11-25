@@ -74,10 +74,16 @@ const SCAN: u32 = 144;
 
 /// The coin to pay for to open a contract at `hub` as `ask`ed, but for its
 /// deposit (that coin): the smallest contract of `ask`'s cap at least, her
-/// part of it [`PART`]. Refused at a hub charging more than is sane, or
-/// pricing it beyond `ask.max_price`. A payout of [`Coin::value`] to
+/// part of it [`PART`], more for the coin to be worth `floor` at least (the
+/// least a provider pays out). Refused at a hub charging more than is sane,
+/// or pricing it beyond `ask.max_price`. A payout of [`Coin::value`] to
 /// [`Coin::to`] pays for it ([`pay`]).
-pub async fn coin<T: Transport>(wallet: &Wallet<T>, hub: &str, ask: Ask) -> Result<Coin> {
+pub async fn coin<T: Transport>(
+    wallet: &Wallet<T>,
+    hub: &str,
+    ask: Ask,
+    floor: u64,
+) -> Result<Coin> {
     ensure!(
         ask.deposit.is_none(),
         "a coin paid for is the deposit: none other to name"
@@ -109,7 +115,7 @@ pub async fn coin<T: Transport>(wallet: &Wallet<T>, hub: &str, ask: Ask) -> Resu
     let dust = fixed.quote.graph.dust;
     let least = ask.cap.unwrap_or(0);
     let notes = (&denominations[..], notes);
-    let (value, fitted) = plan(&pricing, ask.blocks, dust, notes, least)
+    let (value, fitted) = plan(&pricing, ask.blocks, dust, notes, (least, floor))
         .context("no contract of this hub to pay for: none of the cap asked")?;
     let price = pricing.price(fitted.cap, ask.blocks, fitted.funded);
     ensure!(
@@ -172,13 +178,14 @@ pub async fn pay<T: Transport>(
 /// The coin to pay for, and the contract it fits ([`fit`]): of the smallest
 /// cap of `least` at least that a coin of its price and her part fits
 /// whole, her part [`PART`] at least, more if the hub takes contracts of so
-/// many times a coin at most and the cap needs it.
+/// many times a coin at most and the cap needs it, or for the coin to be
+/// worth `floor` at least.
 fn plan(
     pricing: &Pricing,
     blocks: u32,
     dust: u64,
     (denominations, notes): (&[u64], usize),
-    least: u32,
+    (least, floor): (u32, u64),
 ) -> Option<(u64, Fit)> {
     let makes = |f: u64| fundable(denominations, notes, f) == f;
     for cap in pricing.caps(u64::MAX, least) {
@@ -190,6 +197,7 @@ fn plan(
             _ => 0,
         };
         let price = pricing.price(cap, blocks, 1);
+        let needed = needed.max(floor);
         let mut funded = needed.saturating_sub(price).max(PART);
         for _ in 0..PLANS {
             while funded <= u64::from(cap) && !makes(funded) {
@@ -204,7 +212,9 @@ fn plan(
             let value = funded + pricing.price(cap, blocks, part);
             // As the opening fits it, of this cap.
             match fit(pricing, blocks, value, dust, (denominations, notes), least) {
-                Some(fitted) if fitted.cap == cap => return Some((value, fitted)),
+                Some(fitted) if fitted.cap == cap && value >= needed => {
+                    return Some((value, fitted))
+                }
                 _ => funded += value.max(needed) - value + 1,
             }
         }
@@ -369,7 +379,7 @@ mod tests {
             cap: 3_584,
             price: 21_000,
         };
-        let (value, fitted) = plan(&fixed, 1_000, 330, (&wide, 32), 0).unwrap();
+        let (value, fitted) = plan(&fixed, 1_000, 330, (&wide, 32), (0, 0)).unwrap();
         let part = PART as u32;
         assert_eq!(
             (value, fitted),
@@ -383,12 +393,12 @@ mod tests {
         );
         // Notes of 16 sat at the least: her part the next they make.
         let coarse: Vec<u64> = (4..32).map(|i| 1 << i).collect();
-        let (value, fitted) = plan(&fixed, 1_000, 330, (&coarse, 32), 0).unwrap();
+        let (value, fitted) = plan(&fixed, 1_000, 330, (&coarse, 32), (0, 0)).unwrap();
         assert_eq!((value, fitted.funded), (21_008 + PART, part + 8));
 
         let range = range();
         let pricing = Pricing::Range(&range);
-        let (value, fitted) = plan(&pricing, 52_560, 330, (&wide, 32), 0).unwrap();
+        let (value, fitted) = plan(&pricing, 52_560, 330, (&wide, 32), (0, 0)).unwrap();
         assert_eq!(
             (fitted.cap, u64::from(fitted.funded)),
             (range.min_cap, PART)
@@ -397,9 +407,40 @@ mod tests {
         assert!(value - pays < 330, "{value} for {pays}");
         // Of a larger cap asked: the smallest of it at least, the coin
         // large enough for it.
-        let (value, larger) = plan(&pricing, 52_560, 330, (&wide, 32), 200_000).unwrap();
+        let (value, larger) = plan(&pricing, 52_560, 330, (&wide, 32), (200_000, 0)).unwrap();
         assert!(larger.cap >= 200_000);
         assert!(value * u64::from(range.per_coin) >= u64::from(larger.cap));
+    }
+
+    /// A provider paying out no coin as small as the price and her part:
+    /// the coin worth its least, the rest her part, of the same contract.
+    /// On Mutinynet one paid out 31,760 sat at least, not 24,466.
+    #[test]
+    fn a_coin_paid_for_is_worth_the_least_a_provider_pays_out() {
+        let wide: Vec<u64> = (0..32).map(|i| 1 << i).collect();
+        let range = range();
+        let pricing = Pricing::Range(&range);
+        let (usual, planned) = plan(&pricing, 52_560, 330, (&wide, 32), (0, 0)).unwrap();
+        let floor = usual + 7_294;
+        let (value, fitted) = plan(&pricing, 52_560, 330, (&wide, 32), (0, floor)).unwrap();
+        assert!(value >= floor && value - floor < 330, "{value} for {floor}");
+        assert_eq!(fitted.cap, planned.cap);
+        assert!(fitted.funded > planned.funded + 7_000, "{fitted:?}");
+        assert_eq!(
+            fit(&pricing, 52_560, value, 330, (&wide, 32), 0),
+            Some(fitted)
+        );
+        // A floor below the usual coin changes nothing.
+        let lower = plan(&pricing, 52_560, 330, (&wide, 32), (0, usual - 1));
+        assert_eq!(lower, Some((usual, planned)));
+        let fixed = Pricing::Fixed {
+            cap: 3_584,
+            price: 21_000,
+        };
+        let (value, fitted) = plan(&fixed, 1_000, 330, (&wide, 32), (0, 23_000)).unwrap();
+        assert_eq!((value, fitted.funded), (23_000, 2_000));
+        // Her part larger than the contract: none to pay for.
+        assert_eq!(plan(&fixed, 1_000, 330, (&wide, 32), (0, 25_000)), None);
     }
 
     /// A claim paying a higher fee than budgeted leaves her a coin worth
@@ -410,7 +451,7 @@ mod tests {
         let wide: Vec<u64> = (0..32).map(|i| 1 << i).collect();
         let range = range();
         let pricing = Pricing::Range(&range);
-        let (value, planned) = plan(&pricing, 52_560, 330, (&wide, 32), 0).unwrap();
+        let (value, planned) = plan(&pricing, 52_560, 330, (&wide, 32), (0, 0)).unwrap();
         // The hub's interest rising as her part falls: a little less than
         // her part is room to spare.
         for less in [1, 100, PART / 2] {

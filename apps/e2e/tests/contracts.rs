@@ -57,7 +57,7 @@ async fn a_wallet_with_no_coin_pays_for_a_contract_with_notes() -> anyhow::Resul
         cap: None,
         deposit: None,
     };
-    let coin = paid::coin(&alice, hub1, ask).await?;
+    let coin = paid::coin(&alice, hub1, ask, 0).await?;
     assert_eq!(coin.to, alice.fallback_address()?.to_string());
     // Its provider found on the relay it announces itself on, as the app
     // finds it.
