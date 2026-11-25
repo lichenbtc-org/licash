@@ -18,6 +18,7 @@ mod responses;
 mod run;
 mod store;
 pub mod terms;
+mod vigil;
 mod witness;
 
 pub use witness::Witnesses;
@@ -198,6 +199,8 @@ pub struct Openings {
     load_told: std::sync::atomic::AtomicU32,
     /// Each contract's fold offered, until its holder signs or asks again.
     folds: Mutex<HashMap<[u8; 32], dispute::PendingFold>>,
+    /// The responder's health, told the operator as it changes.
+    vigil: Mutex<vigil::Vigil>,
     /// What the node's wallet last said it holds, in sat: the most it
     /// funds an F with ([`terms::fundable`]). None until it says.
     funds: Mutex<Option<u64>>,
@@ -448,6 +451,7 @@ impl Openings {
             max_live: std::sync::atomic::AtomicUsize::new(MAX_LIVE),
             load_told: Default::default(),
             folds: Mutex::default(),
+            vigil: Mutex::new(vigil::Vigil::new(profile)),
             funds: Mutex::new(None),
             witnesses: std::sync::OnceLock::new(),
         });
@@ -1034,11 +1038,27 @@ impl Openings {
         Ok(round)
     }
 
-    /// Play the exits every `every` while the hub runs: never returns.
+    /// Play the exits every `every` while the hub runs: never returns. The
+    /// operator is told if the node's chain stalls, or rounds fail, for long
+    /// ([`vigil::Vigil`]).
     pub async fn respond_every(self: Arc<Self>, every: Duration) {
         loop {
-            if let Err(e) = self.answer_requests().await {
-                tracing::error!("automatic contract responder: {e:#}");
+            let failed = match self.answer_requests().await {
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::error!("automatic contract responder: {e:#}");
+                    Some(format!("{e:#}"))
+                }
+            };
+            let tip = self.source.tip().await.ok().map(|tip| tip.hash);
+            let now = tokio::time::Instant::now();
+            let told = (self.vigil.lock().unwrap_or_else(PoisonError::into_inner)).round(
+                now,
+                tip,
+                failed.as_deref(),
+            );
+            for message in told {
+                self.alert(&message);
             }
             tokio::time::sleep(every).await;
         }
@@ -1507,6 +1527,7 @@ mod tests {
             max_live: std::sync::atomic::AtomicUsize::new(MAX_LIVE),
             load_told: Default::default(),
             folds: Mutex::default(),
+            vigil: Mutex::new(vigil::Vigil::new(profile)),
             funds: Mutex::new(None),
             witnesses: std::sync::OnceLock::from(Witnesses::none()),
         }

@@ -832,6 +832,12 @@ nothing from a link: the hub posts it with the child its other coins make,
 or alone at its presigned fee, and alerts once a contract. Its terminals pay
 no fee of their own and wait for a coin, so keep the wallet funded.
 
+The responder can only answer what its node shows it. The hub alerts once
+if the node's tip stays unchanged for 12 blocks' time (2 hours, 6 minutes
+on Mutinynet, never on regtest), which means the node is stalled, out of
+sync or cut off, and once if the responder's rounds fail for 10 minutes.
+It alerts again once each recovers.
+
 A response commits the hub to a proof: its assertion must confirm within
 the assert window (48 blocks on signet, 2 of them to confirm in), or the
 holder's timeout pays her what she claims, as if it had not responded. So
