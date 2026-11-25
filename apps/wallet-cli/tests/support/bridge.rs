@@ -44,13 +44,14 @@ impl Bridged {
                 .unwrap();
                 wallet.add_hub(&url).await.unwrap();
                 let pairing = Bridge::init(&wallet).unwrap();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let config = Config {
                     hub: url,
                     relays: vec!["ws://127.0.0.1:1".into()],
+                    public_url: Some(format!("http://{}", listener.local_addr().unwrap())),
                     ..Config::default()
                 };
                 let bridge = Arc::new(Bridge::open(wallet, config).unwrap());
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 ready
                     .send((listener.local_addr().unwrap(), bridge.clone(), pairing))
                     .unwrap();

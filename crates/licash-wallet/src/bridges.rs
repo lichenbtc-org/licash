@@ -10,7 +10,7 @@
 use licash::crypto::tagged_hash;
 use licash_api::bridge::{
     self, Account, Connect, Connected, Connection, Info, Invoice, Payment, Register, Revoke,
-    Signed, State, TopUp, Withdraw,
+    Signed, State, TopUp, Username, Withdraw,
 };
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde::{de::DeserializeOwned, Serialize};
@@ -379,6 +379,17 @@ impl<T: Transport> Wallet<T> {
     pub async fn bridge_connect(&self, url: &str, connect: &Connect) -> Result<Connected, Error> {
         let added = self.bridge(url)?;
         self.bridge_call(&added.url, &added.info, bridge::CONNECT, connect)
+            .await
+    }
+
+    /// Name the account's Lightning Address at `url` `name@`, its domain the
+    /// bridge's, or none.
+    pub async fn bridge_username(&self, url: &str, name: Option<&str>) -> Result<Account, Error> {
+        let added = self.bridge(url)?;
+        let named = Username {
+            username: name.map(str::to_owned),
+        };
+        self.bridge_call(&added.url, &added.info, bridge::USERNAME, &named)
             .await
     }
 

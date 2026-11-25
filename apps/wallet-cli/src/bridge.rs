@@ -56,6 +56,20 @@ pub enum BridgeCommand {
         #[arg(long)]
         qr: bool,
     },
+    /// The account's Lightning Address, for payers and zaps: named NAME at
+    /// the bridge's domain, or none with --clear. Its hub's fee on
+    /// receiving comes out of what it is paid.
+    Address {
+        #[arg(required_unless_present = "clear")]
+        name: Option<String>,
+        #[arg(long)]
+        bridge: Option<String>,
+        #[arg(long, conflicts_with = "name")]
+        clear: bool,
+        /// Draw it as a QR code, on a terminal.
+        #[arg(long)]
+        qr: bool,
+    },
     /// Revoke the app connected under KEY, its key in hex, for good.
     Revoke {
         key: String,
@@ -219,6 +233,25 @@ pub async fn run(wallet: &Wallet<Http>, command: BridgeCommand, json: bool) -> a
             );
             show_qr(qr && !json, &connected.uri);
             show(json, json!(connected), connected.uri.clone());
+        }
+        BridgeCommand::Address {
+            name,
+            bridge,
+            clear,
+            qr,
+        } => {
+            let url = which(wallet, bridge)?;
+            let name = if clear { None } else { name };
+            let account = wallet.bridge_username(&url, name.as_deref()).await?;
+            let address = account.lightning_address.clone();
+            if let Some(address) = &address {
+                show_qr(qr && !json, address);
+            }
+            show(
+                json,
+                json!({ "lightning_address": address }),
+                address.unwrap_or_else(|| "no Lightning Address".into()),
+            );
         }
         BridgeCommand::Revoke { key, bridge } => {
             let url = which(wallet, bridge)?;

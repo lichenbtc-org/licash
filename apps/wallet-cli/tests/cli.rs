@@ -2379,6 +2379,10 @@ fn owners_top_up_a_bridge_and_connect_apps_on_the_command_line() {
     assert_eq!(ruled["rules"]["below"], 40);
     let run = json(&alice, &["bridge", "run"]);
     assert_eq!(run["invoice"]["amount"], 15_000);
+    let host = url.strip_prefix("http://").unwrap();
+    let named = json(&alice, &["bridge", "address", "Alice"]);
+    assert_eq!(named["lightning_address"], format!("alice@{host}"));
+    failed(wallet(&alice, &["bridge", "address", "no way"], None), 1, "a-z");
     let key = connected["connection"]["key"].as_str().unwrap();
     let revoked = json(&alice, &["bridge", "revoke", key]);
     assert_eq!(revoked["revoked"], true);
