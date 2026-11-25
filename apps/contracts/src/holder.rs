@@ -74,7 +74,9 @@ pub struct Ask {
     /// Blocks from now to the close, when the hub's collateral returns
     /// to it: at most what the hub offers.
     pub blocks: u32,
-    /// The most she pays to open, in sat.
+    /// The most she pays to open, in sat: `u64::MAX` for no ceiling of
+    /// hers, a price no one saw, bounded then by what is sane of her coin
+    /// ([`fees::costly`]).
     pub max_price: u64,
     /// The least notes it protects, in sat, of terms she chooses within
     /// the hub's range (its info's), over `blocks` from the hub's quote: the
@@ -94,7 +96,9 @@ pub struct Ask {
 /// free that a contract absorbs whole ([`fit`]). Kept in `wallet_file`, the wallet's directory,
 /// from her first message on, with the fees the hub charges now: the most
 /// it may charge her since ([`fees`]). Refused at a hub charging more
-/// than is sane ([`fees::abusive`]).
+/// than is sane ([`fees::abusive`]), or, of no ceiling of hers on its
+/// price, for a contract costing more than is sane of her coin
+/// ([`fees::costly`]).
 /// Driven once: an upload dropped leaves it to [`resume`].
 pub async fn open<T: Transport, C: Chain>(
     wallet: &Wallet<T>,
@@ -124,7 +128,8 @@ pub async fn open_with<T: Transport, C: Chain>(
 }
 
 /// [`open_with`], at a hub charging more than is sane too
-/// ([`fees::abusive`]): for her who was told, and asks all the same.
+/// ([`fees::abusive`]), or of a contract costing more than is sane of her
+/// coin ([`fees::costly`]): for her who was told, and asks all the same.
 pub async fn open_anyway<T: Transport, C: Chain>(
     wallet: &Wallet<T>,
     chain: &C,
@@ -177,7 +182,7 @@ async fn open_once<T: Transport, C: Chain>(
     let now = wallet.hub_info(&hub).await;
     let now = now.map_err(|e| anyhow!("{hub}'s fees: {e}"))?;
     let range = now.contracts.and_then(|c| c.range);
-    if let Some(why) = fees::abusive(&now.fees, range.as_ref()).filter(|_| sane) {
+    if let Some(why) = fees::abusive(&now.fees).filter(|_| sane) {
         bail!("{hub} charges more than is sane, {why}: no contract opens there unless asked all the same");
     }
     // Her reserve returns at the close to a deposit of the hub's that swaps
@@ -232,6 +237,14 @@ async fn open_once<T: Transport, C: Chain>(
         "{hub} asks {price} sat to open, more than {}",
         ask.max_price
     );
+    // Of a price she bounded, she chose it: the bound is hers.
+    let reserve = offer.quote.graph.reserve_alice;
+    let unbounded = ask.max_price == u64::MAX;
+    if let Some(why) = fees::costly(price, reserve, coin.value).filter(|_| sane && unbounded) {
+        bail!(
+            "{hub}'s contract costs more than is sane, {why}: it opens only if asked all the same"
+        );
+    }
     let funded = u64::from(fitted.funded);
     // Quoted as she priced it: her coin is spent whole.
     let left = coin.value.checked_sub(price + funded);

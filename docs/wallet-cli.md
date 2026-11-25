@@ -339,8 +339,10 @@ wallet preparing a step, then, once its upload starts, the megabytes sent
 of about how many, the speed in kbps and about how long the rest takes.
 Several contracts, at one hub or several, each take
 their own coin. No contract opens at a hub charging more than is sane (over
-10 sat or 1% on a payment, lock or refund, over 1 sat for each note made, or
-over 20% of a chosen cap a year) unless `--any-fees` asks all the same.
+10 sat or 1% on a payment, lock or refund, or over 1 sat for each note made),
+nor, without `--max-price`, one whose fee and interest are more than half
+the coin paying it (its reserve, which comes back, not counted), unless
+`--any-fees` asks all the same.
 
 With no coin on Bitcoin, `open-contract <hub> --with-notes --chain <url>` pays
 for one with notes instead, in two steps. First a payout: a swap provider

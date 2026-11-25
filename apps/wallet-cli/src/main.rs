@@ -539,8 +539,8 @@ enum Command {
         #[arg(long)]
         blocks: Option<u32>,
         /// The most to pay to open it, in sat, its reserve and the hub's
-        /// fee [default: no more than sane fees make it, --any-fees
-        /// aside].
+        /// fee and interest [default: fee and interest no more than half
+        /// the coin paying it, --any-fees aside].
         #[arg(long)]
         max_price: Option<u64>,
         /// The least notes it protects, in sat, if the hub lets holders
@@ -557,8 +557,9 @@ enum Command {
         #[arg(long)]
         coin: Option<bitcoin::OutPoint>,
         /// Open it at a hub charging more than is sane too: over 10 sat
-        /// or 1% a payment, lock or refund, a sat for each note made, or
-        /// 20% of the cap chosen a year.
+        /// or 1% a payment, lock or refund, or a sat for each note made;
+        /// or its fee and interest more than half the coin paying it, of
+        /// no --max-price.
         #[arg(long)]
         any_fees: bool,
         /// With no coin of the wallet's: pay for one with notes, a payout
