@@ -1870,10 +1870,11 @@ class Engine(context: Context) {
     /**
      * What protecting at `hub` costs paid for with notes there, with no coin
      * on Bitcoin: of `cap` at least over `blocks` if chosen, else the
-     * smallest, as late as it closes.
+     * smallest, as late as it closes; its coin `worth` sat at least if
+     * given, the rest of it hers.
      */
-    suspend fun paidContractQuote(hub: String, cap: ULong?, blocks: UInt?): Result<PaidContractQuote> = io {
-        local { it.paidContractQuote(hub, hub, cap, blocks) }
+    suspend fun paidContractQuote(hub: String, cap: ULong?, blocks: UInt?, worth: ULong? = null): Result<PaidContractQuote> = io {
+        local { it.paidContractQuote(hub, hub, cap, blocks, worth) }
     }
 
     /**

@@ -105,6 +105,13 @@ class FundingTest {
     }
 
     @Test
+    fun the_hint_to_send_more_says_why() {
+        // The vault sized by the deposit: the extra is room to swap out, for more room to receive.
+        assertTrue(DEPOSIT_MORE.startsWith("Send a bit more than you expect to spend."))
+        assertTrue("swap" in DEPOSIT_MORE && "receive" in DEPOSIT_MORE)
+    }
+
+    @Test
     fun a_wallet_is_set_up_until_its_vault_was_said_ready_and_not_one_in_use() {
         // No hub, or one and nothing yet: set up.
         assertTrue(setupDue(fresh.copy(hubs = emptyList())))
