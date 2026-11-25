@@ -638,6 +638,7 @@ impl Openings {
     /// kept as one once a contract opens on it, else at its tip: its
     /// quote of `cap` sat over `blocks` she chose, if within its terms,
     /// else its fixed one; `funded` sat of it hers, the rest the hub's.
+    /// Unavailable while it admits no new opening.
     pub async fn offer(&self, chosen: Option<(u32, u32)>, funded: u32) -> Result<Offer, Refused> {
         let (cap, blocks) = chosen.unwrap_or((terms::CAP, self.timing().lock()));
         self.timing().allows(cap, blocks).map_err(Refused::bad)?;
@@ -652,6 +653,10 @@ impl Openings {
                 "the hub's wallet funds {most} sat of a contract at most now"
             )));
         }
+        // Unavailable now if an opening on it would be (503): she waits
+        // before asking for a deposit for her reserve, of which a coin has
+        // only so many attempts ([`licash_wallet::CLOSE_ATTEMPTS`]).
+        run::admits(&self.store())?;
         let tip = self.source.tip().await.map_err(Refused::unavailable)?;
         let height = self.opening_height(tip.height)?;
         let checkpoint = self.source.checkpoint(height).await;
@@ -1646,9 +1651,11 @@ mod tests {
     }
 
     /// The openings under way, or signed and not funded, are counted at
-    /// the store: one started meanwhile counts against the next.
-    #[test]
-    fn openings_are_admitted_only_below_both_caps() {
+    /// the store: one started meanwhile counts against the next. Its quote
+    /// refused alike, before any node RPC, so that she asks no deposit for
+    /// an opening it would refuse.
+    #[tokio::test]
+    async fn openings_are_admitted_only_below_both_caps() {
         let dir = tempfile::tempdir().unwrap();
         let openings = test_openings(dir.path());
         for n in 0..MAX_UNDER_WAY as u8 {
@@ -1663,6 +1670,11 @@ mod tests {
         assert!(why.contains("under way"), "{why}");
         // Said in its info, for a wallet to choose another hub by.
         assert!(openings.advertise().full);
+        let Err(quoted) = openings.offer(None, 0).await else {
+            panic!("quoted with no room");
+        };
+        assert_eq!(quoted.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(quoted.reason.contains("under way"), "{}", quoted.reason);
     }
 
     #[test]
