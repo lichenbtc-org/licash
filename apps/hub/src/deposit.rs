@@ -957,7 +957,17 @@ impl Gateway {
             close: body.close,
         };
         let canonical = serde_json::to_string(&canonical).expect("a deposit serializes");
+        // The chain's tip, asked before the turn every payment of the hub
+        // waits on: a chain source slow to answer holds up this deposit
+        // alone. None asked for one recorded (a retry), which keeps its
+        // terms.
+        let tip = match self.store.get(&hash).map_err(store_down)? {
+            Some(_) => None,
+            None => self.source.tip().await.ok().map(|tip| tip.height),
+        };
         let turn = self.peer.turn().await;
+        // Everything a new deposit is refused for, checked again in the
+        // turn: what another payment recorded while this one waited.
         if self.store.get(&hash).map_err(store_down)?.is_none() {
             // Refused before any work, if it would be at the end.
             if let Some(kept) = self.store.full(c.max_open, source).map_err(store_down)? {
@@ -1021,10 +1031,9 @@ impl Gateway {
             };
             // Its window from now, not from where the scan is: a scan behind
             // the node would leave it a part of it, or none once caught up.
-            let now = match self.source.tip().await {
-                Ok(tip) => tip.height.max(from),
-                Err(_) => from,
-            };
+            // The newer of the tip asked and the scan read in the turn: a
+            // wait for the turn shortens it by none.
+            let now = tip.map_or(from, |tip| tip.max(from));
             let fund_by = now.saturating_add(c.window);
             let new = New {
                 body: &canonical,

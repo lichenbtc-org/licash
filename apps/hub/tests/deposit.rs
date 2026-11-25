@@ -434,6 +434,55 @@ async fn a_gateway_waits_for_the_issuers_turn_and_then_sees_its_reservation() {
         .contains("another payment"));
 }
 
+/// The chain's tip is asked outside the turn every payment of the hub
+/// waits on: a chain source that never answers holds up the deposit that
+/// asks it alone, not the receipts, swaps and deposits waiting on that
+/// turn. A deposit asked again asks it nothing, and is answered at once.
+#[tokio::test]
+async fn a_stalled_chain_tip_holds_up_no_other_payment() {
+    let net = Net::new().await;
+    let alice = net.wallet("alice");
+    let deposit = alice.deposit(HUB, 3_000).await.unwrap();
+    let (_, recorded) = net.asked("alice", &deposit.hash);
+    let other = alice.deposit(HUB, 3_000).await.unwrap();
+    let (_, body) = net.asked("alice", &other.hash);
+    let hash = bytes(&other.hash);
+    let db = rusqlite::Connection::open(net.dir.path().join("hub.sqlite")).unwrap();
+    db.execute("DELETE FROM deposits WHERE hash = ?1", [hash])
+        .unwrap();
+    // Accepts, and never answers.
+    let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let source: Source = format!("esplora+http://{}/api", stalled.local_addr().unwrap())
+        .parse()
+        .unwrap();
+    let gateway = Arc::new(gateway(
+        &net.hub,
+        &source,
+        &net.dir.path().join("hub.sqlite"),
+    ));
+    let turn = Arc::new(tokio::sync::Mutex::new(()));
+    peer::coordinate(None, Some(&gateway), net.dir.path(), turn.clone());
+    let again = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        gateway.deposit(&recorded, None),
+    )
+    .await
+    .expect("a deposit asked again waits on no chain source")
+    .unwrap();
+    assert_eq!(again, net.deposits.deposit(&recorded, None).await.unwrap());
+    let asking = tokio::spawn({
+        let gateway = gateway.clone();
+        async move { gateway.deposit(&body, None).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!asking.is_finished());
+    assert!(
+        turn.try_lock().is_ok(),
+        "the turn is free while the tip is asked"
+    );
+    asking.abort();
+}
+
 async fn adoption_with_a_swap_row(state: &str, recorded: bool) {
     let net = Net::new().await;
     let alice = net.wallet("alice");
