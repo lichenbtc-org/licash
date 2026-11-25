@@ -637,7 +637,10 @@ not looked at again. The same database pins the evidence each response is
 decided on and each one-time signature (the response, the assertion) before
 it is made, with the openings, so that one copy holds both as of one moment:
 a second answer signed with a one-time key over other evidence gives the
-holder the hub's outputs. So the hub signs none where it can tell one was:
+holder the hub's outputs. A request is the one pinned when it is the same
+transaction claiming the same `b` with the same `E`, however its witness
+writes them: a request mined again after a reorg, its digits written
+otherwise or her signatures made again, is answered as pinned. So the hub signs none where it can tell one was:
 the openings keep each answer before it is signed, and one kept with nothing
 pinned for it, as when the pins' rows were lost, is not decided anew. Nor is
 one neither keeps (the whole database restored older) while a transaction in

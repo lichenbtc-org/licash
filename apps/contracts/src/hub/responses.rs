@@ -1,5 +1,6 @@
 //! One-time answers shared by the daemon and the operator. The request is
-//! committed before signing; a restart can only sign that same witness.
+//! committed before signing; a restart can only sign for that same request
+//! (its `b` and `E`, however its witness writes them).
 //! With it, the evidence the hub decided her claim on: its response, its
 //! disclosure and its proof all cite that evidence, whatever the ledger
 //! learns after.
@@ -31,6 +32,21 @@ CREATE TABLE response_pins (
 
 pub(super) struct Responses(Connection);
 
+/// Whether `request` is the request `pinned`: the same transaction, by
+/// txid, signing the same `b` and `E` as its script reads them. Its
+/// witness may differ, and still be valid: a digit written another way
+/// (Bitcoin takes a 15 written as 16, which whoever mines it may write),
+/// her signatures made again. Read so, a request confirmed again after a
+/// reorg is answered with what was pinned, not refused.
+fn same_request(pinned: &Transaction, request: &Transaction) -> bool {
+    if pinned.compute_wtxid() == request.compute_wtxid() {
+        return true;
+    }
+    let read = licash_contract::graph::HubProves::requested_b;
+    pinned.compute_txid() == request.compute_txid()
+        && matches!((read(pinned), read(request)), (Ok(a), Ok(b)) if a == b)
+}
+
 impl Responses {
     /// The pins in the hub's data directory `data`, made if none were.
     pub fn open(data: &Path) -> Result<Self> {
@@ -55,7 +71,7 @@ impl Responses {
         )?;
         let pinned: Transaction = deserialize(&pinned).context("pinned request")?;
         ensure!(
-            pinned.compute_wtxid() == request.compute_wtxid(),
+            same_request(&pinned, request),
             "request witness differs from the one-time signing pin; refusing to sign again"
         );
         Ok(evidence.unwrap_or_default())
@@ -116,14 +132,15 @@ impl Responses {
         )?;
         let pinned: Transaction = deserialize(&pinned).context("pinned request")?;
         ensure!(
-            pinned.compute_wtxid() == request.compute_wtxid(),
+            same_request(&pinned, request),
             "request witness differs from the one-time signing pin; refusing to sign again"
         );
         Ok(proof)
     }
 
-    /// `request` must be validated before this call. Its witness, not its
-    /// txid alone, binds the one-time signatures. No signing in a SQL
+    /// `request` must be validated before this call. Its `b` and `E`, not
+    /// its txid alone, bind the one-time signatures ([`same_request`]).
+    /// No signing in a SQL
     /// transaction: the pin must survive even a stopped signer.
     pub fn answer(
         &self,
@@ -142,7 +159,7 @@ impl Responses {
         )?;
         let pinned: Transaction = deserialize(&pinned).context("pinned request")?;
         ensure!(
-            pinned.compute_wtxid() == request.compute_wtxid(),
+            same_request(&pinned, request),
             "request witness differs from the one-time signing pin; refusing to sign again"
         );
         if let Some(response) = response {
@@ -265,6 +282,77 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("version 3"));
+        Ok(())
+    }
+
+    /// A real request of the shared mock opening, claiming `b` with `E`
+    /// all 0xff (its digits 15, each written `[15]`).
+    fn real_request(b: u32) -> Transaction {
+        use licash_contract::{
+            keys::HolderKeys,
+            opening::{Context, Holder, Trust},
+        };
+        let saved = crate::testing::opened();
+        let ctx = Context {
+            tip: 0,
+            trust: Trust::mock(),
+        };
+        let holder = Holder::load(&saved.holder, &saved.seed, &ctx).unwrap();
+        let keys = HolderKeys::derive(&saved.seed, &holder.id());
+        holder
+            .signed()
+            .unwrap()
+            .request(&keys, b, &[0xff; 32])
+            .unwrap()
+    }
+
+    /// `r` with each digit of 15 written `to`, as the script reads it.
+    fn rewritten(r: &Transaction, to: &[u8]) -> Transaction {
+        let mut tx = r.clone();
+        let items: Vec<Vec<u8>> = tx.input[0]
+            .witness
+            .iter()
+            .map(|i| if i == [15] { to.to_vec() } else { i.to_vec() })
+            .collect();
+        tx.input[0].witness = items.into();
+        tx
+    }
+
+    /// Mined again with its digits written otherwise (a reorg, a miner's
+    /// choice), her request is the one pinned: answered with the pinned
+    /// response, its evidence and proof the pinned ones. Another `b`, by
+    /// the same txid, is refused.
+    #[test]
+    fn a_request_written_otherwise_is_answered_as_pinned_and_another_b_refused() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let pins = Responses::open(&crate::testing::hub_data(dir.path()))?;
+        let r = real_request(3072);
+        let again = rewritten(&r, &[16]);
+        assert_eq!(again.compute_txid(), r.compute_txid());
+        assert_ne!(again.compute_wtxid(), r.compute_wtxid());
+        assert_eq!(pins.pin(&[1; 32], &r, b"first")?, b"first");
+        assert_eq!(pins.pin(&[1; 32], &again, b"later")?, b"first");
+        let answer = request(2);
+        assert_eq!(pins.answer(&[1; 32], &r, || Ok(answer.clone()))?, answer);
+        assert_eq!(
+            pins.answer(&[1; 32], &again, || panic!("signed twice"))?,
+            answer
+        );
+        assert_eq!(
+            pins.pin_proof(&[2; 32], &r, b"proof")?,
+            Some(b"proof".to_vec())
+        );
+        assert_eq!(
+            pins.pin_proof(&[2; 32], &again, b"other")?,
+            Some(b"proof".to_vec())
+        );
+        let other = real_request(2048);
+        assert_eq!(other.compute_txid(), r.compute_txid());
+        assert!(pins.pin(&[1; 32], &other, b"first").is_err());
+        assert!(pins
+            .answer(&[1; 32], &other, || panic!("signed another claim"))
+            .is_err());
+        assert!(pins.pin_proof(&[2; 32], &other, b"proof").is_err());
         Ok(())
     }
 

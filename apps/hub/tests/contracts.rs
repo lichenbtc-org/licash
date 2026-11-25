@@ -4259,6 +4259,105 @@ async fn a_holder_challenges_a_false_assertion_and_its_failure_pays_her_whole_cl
     Ok(())
 }
 
+/// The unconfirmed transactions of `rt`'s `harness` wallet (the hub's: its
+/// fee coins' funding and their children) that a reorg evicted, submitted
+/// again. Evicted here as they spend coinbases just matured, which the
+/// shorter chain makes immature: a regtest artifact. The hub does not
+/// recover from a fee coin gone on its own: it posts the package of its
+/// cached coin again, which never relays. Tested apart from this.
+async fn resubmit_evicted(rt: &Regtest) -> Result<()> {
+    use serde_json::{json, Value};
+    let wallet = rpc_of(rt, Some("harness"))?;
+    let listed: Value = wallet.rpc("listtransactions", json!(["*", 100])).await?;
+    let evicted: Vec<String> = listed
+        .as_array()
+        .context("listtransactions")?
+        .iter()
+        .filter(|t| t["confirmations"].as_i64() == Some(0) && t["category"] != "orphan")
+        .filter_map(|t| t["txid"].as_str().map(str::to_owned))
+        .collect();
+    // Parents before children: as many rounds as a chain of them is long.
+    for _ in 0..evicted.len() {
+        for txid in &evicted {
+            let tx: Value = wallet.rpc("gettransaction", json!([txid])).await?;
+            let _: Result<Value> = wallet.rpc("sendrawtransaction", json!([tx["hex"]])).await;
+        }
+    }
+    Ok(())
+}
+
+/// Her request, in a block, answered: the hub's response in the mempool.
+/// Then a reorg: her request mined again, its witness written otherwise
+/// (each digit of 15 as 16, which Bitcoin takes as 15), the same txid,
+/// `b` and `E`. The hub answers it as the request it pinned, with the
+/// response it signed (no other: its one-time key signed once), and she
+/// is paid what is left.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_hub_answers_her_request_mined_again_written_otherwise_after_a_reorg() -> Result<()> {
+    use licash_contracts::holder::recovery::{self, Stage};
+    use serde_json::{json, Value};
+
+    let s = stale_claim([18; 32]).await?;
+    let mut request = None;
+    for _ in 0..200 {
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        let r = recovery::advance(&s.wallet, &s.chain, &s.mine.join("wallet.sqlite"), s.rate)
+            .await?[0]
+            .clone();
+        ensure!(!matches!(r.stage, Stage::Lost | Stage::Done), "{r:?}");
+        if let Some(txid) = r.request.filter(|_| r.response.is_none()) {
+            let main = bitcoin::OutPoint { txid, vout: 0 };
+            let answered = s.rt.mempool()?.into_iter().any(|t| {
+                s.rt.get_tx(&t)
+                    .is_ok_and(|tx| tx.input.iter().any(|i| i.previous_output == main))
+            });
+            if answered && s.rt.confirmations(&txid)?.is_some() {
+                request = Some(txid);
+                break;
+            }
+        }
+        s.rt.mine(1)?;
+    }
+    let txid = request.context("the hub never responded")?;
+    let first = s.rt.get_tx(&txid)?;
+    let mut again = first.clone();
+    let items: Vec<Vec<u8>> = first.input[0]
+        .witness
+        .iter()
+        .map(|i| if i == [15] { vec![16] } else { i.to_vec() })
+        .collect();
+    again.input[0].witness = items.into();
+    ensure!(again.compute_txid() == txid, "the same transaction");
+    ensure!(
+        again.compute_wtxid() != first.compute_wtxid(),
+        "no digit of 15"
+    );
+
+    let node = rpc_of(&s.rt, None)?;
+    let at = s.rt.confirmations(&txid)?.context("unconfirmed")?;
+    let hash: Value = node.rpc("getblockhash", json!([at])).await?;
+    let _: Option<Value> = node.rpc_optional("invalidateblock", json!([hash])).await?;
+    s.rt.mine_with(&[again.clone()])?;
+    resubmit_evicted(&s.rt).await?;
+    ensure!(
+        s.rt.get_tx(&txid)?.compute_wtxid() == again.compute_wtxid(),
+        "mined as written otherwise"
+    );
+    // Every round of the hub's played without a failure.
+    let done = played(&s, |_| true).await?;
+    ensure!(done.request == Some(txid), "{done:?}");
+    ensure!(done.corrected == Some(98_304), "{done:?}");
+    ensure!(done.payout.is_some() && done.timeout.is_none(), "{done:?}");
+    let received = done.received.context("nothing received")?;
+    ensure!(
+        received < 131_071,
+        "{received} of a claim of 131071: {done:?}"
+    );
+    Ok(())
+}
+
 /// An assertion in `rt`'s mempool, if one is: by its witness, bottom first
 /// π3 (G1, compressed) and π2 (G2), then π1's 254 Lamport preimages of
 /// 20 bytes.
