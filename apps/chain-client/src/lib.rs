@@ -502,7 +502,9 @@ impl Source {
                 }
             }
             Kind::Esplora { base } => {
-                let url = format!("{base}/tx/{txid}/status");
+                // The transaction, not its status: Blockstream's electrs
+                // answers `{"confirmed":false}` for one it never saw.
+                let url = format!("{base}/tx/{txid}");
                 let response = self
                     .client
                     .get(&url)
