@@ -35,6 +35,7 @@ tracing-subscriber.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+licash-bridge = { path = "../bridge" }
 licash-contracts = { path = "../contracts", features = ["testing"] }
 bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
 licash-hub.workspace = true

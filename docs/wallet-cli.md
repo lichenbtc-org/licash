@@ -486,7 +486,34 @@ no block, and paying at most what the challenge wins.
 
 `discover --relay wss://relay.example` lists the hubs announced on Nostr,
 at the URLs that answer as the hub that announced them; with `--swaps`, the
-swap providers.
+swap providers; with `--bridges`, the NWC bridges open to anyone, those at
+hubs the wallet trusts first.
+
+`bridge` keeps accounts at NWC bridges ([docs/bridge.md](bridge.md)), for
+apps to pay and be paid through Nostr Wallet Connect. `bridge add URL`
+registers the wallet's account there, with `--pairing CODE` at a bridge
+for its owner only; added again after a restore, it finds the same
+account. `bridge top-up AMOUNT --bridge URL` pays the account from the hub
+holding the most, `bridge withdraw AMOUNT` pays it back, and `bridge rules
+--below B --up-to U --daily D [--max-fee F]` tops it up by `bridge run` or
+`watch` once it holds less than B sat, up to U, at most D a day, in sat,
+counting top-ups still paying. `bridge connect NAME --pay --receive
+[--max-payment] [--budget --period] [--qr]` shows an app's
+`nostr+walletconnect://` URI once; `bridge revoke KEY` ends it. `bridge
+address NAME` gives the account a Lightning Address at a bridge with a
+public URL. `bridge show` lists the balance, the apps and the latest
+payments, and the wallet's key there. Custodial: the bridge holds what the
+account does.
+
+Should the bridge's hub stop cooperating, `bridge export --yes` freezes an
+owner bridge for good and imports its notes; for an open bridge, its
+operator exports them to the wallet's key with `licash-bridge export`, and
+`bridge import FILE` imports them. Imported notes are never in the balance
+nor spent: a recovery contract at their hub claims them only within the
+cap its own notes, locks and funding leave, dropping them if they would
+make the claim unsound. `bridge imported` lists them, and `bridge discard
+SOURCE` forgets them (refused while a recovery claims them), for the
+operator to unfreeze the bridge.
 
 With `--tor`, the wallet reaches hubs, swap providers and Nostr relays,
 onion services included, through a Tor client of its own (Arti), which

@@ -255,6 +255,32 @@ services:
       hub2:
         condition: service_healthy
 
+  # An NWC bridge open to anyone, paying and paid through hub2, its
+  # accounts' Lightning Addresses at the URL published on the host, which
+  # it announces on the relay.
+  bridge:
+    image: licash-bridge:e2e
+    build:
+      context: ../..
+      dockerfile: apps/bridge/Dockerfile
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        [ -f /data/wallet.sqlite ] || licash-bridge init --network regtest --hub http://hub2:8338;
+        exec licash-bridge run --relay ws://relay:8080 --open --name bridge --interval 1
+        --max-balance 100000 --public-url http://127.0.0.1:${LICASH_E2E_BRIDGE:-38341} --announce
+    environment:
+      RUST_LOG: info
+    ports:
+      - "127.0.0.1:${LICASH_E2E_BRIDGE:-38341}:8090"
+    volumes:
+      - bridge:/data
+    depends_on:
+      hub2:
+        condition: service_healthy
+      relay:
+        condition: service_started
+
   gotify:
     image: &gotify gotify/server:2.9.1@sha256:a3af47067ce6aad76aadf5ba32d6ddfecd1ae576a961359f039fd1831e8b7652
     environment:
@@ -293,6 +319,7 @@ volumes:
   hub1:
   hub2:
   swaps:
+  bridge:
   hub1-ln:
   hub2-ln:
   swaps-ln:

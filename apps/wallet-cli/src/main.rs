@@ -25,6 +25,7 @@ use serde_json::json;
 use tracing_subscriber::EnvFilter;
 
 mod background;
+mod bridge;
 mod cold;
 mod contract;
 mod onchain;
@@ -180,7 +181,7 @@ enum Command {
     Deliver,
     /// Receive and deliver until stopped, as `mailbox` does, every so
     /// often: payments made reach their payees even if they never collect
-    /// them at the hub.
+    /// them at the hub. Bridges with rules are topped up as they say.
     Watch {
         /// Seconds between looks.
         #[arg(long, default_value_t = 60)]
@@ -505,6 +506,13 @@ enum Command {
         #[command(subcommand)]
         command: onchain::Onchain,
     },
+    /// Licash bridges: Nostr Wallet Connect for apps, out of an account the
+    /// wallet tops up there, by hand or by rules. Custodial: the bridge
+    /// holds what the account does.
+    Bridge {
+        #[command(subcommand)]
+        command: bridge::BridgeCommand,
+    },
     /// Cold storage: notes withdrawn now and then to an external wallet by
     /// its extended public key, never to an address twice, and what it
     /// holds.
@@ -697,6 +705,10 @@ enum Command {
         /// Swap providers instead of hubs.
         #[arg(long)]
         swaps: bool,
+        /// NWC bridges keeping accounts for anyone instead of hubs: those
+        /// at hubs the wallet trusts first.
+        #[arg(long, conflicts_with = "swaps")]
+        bridges: bool,
     },
 }
 
@@ -792,15 +804,30 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
             relays,
             network,
             swaps,
+            bridges,
         } => {
-            let network = match network {
-                Some(network) => network,
-                // Opening it reaches nothing.
-                None if path.exists() => Wallet::open(&path, Http::new(None)?)?.network(),
-                None => ChainProfile::Core30Mainnet,
+            // Opening it reaches nothing.
+            let known = match path.exists() {
+                true => Some(Wallet::open(&path, Http::new(None)?)?),
+                false => None,
+            };
+            let network = match (network, &known) {
+                (Some(network), _) => network,
+                (None, Some(wallet)) => wallet.network(),
+                (None, None) => ChainProfile::Core30Mainnet,
+            };
+            let role = match (swaps, bridges) {
+                (true, _) => Role::Swaps,
+                (_, true) => Role::Bridge,
+                _ => Role::Hub,
+            };
+            let trusted = match &known {
+                Some(wallet) => wallet.hubs()?.into_iter().map(|(url, _)| url).collect(),
+                None => Vec::new(),
             };
             let route = route(tor, cli.proxy.as_deref())?;
-            return discover(transport, route, &relays, network.name(), swaps, json).await;
+            let at = (&relays[..], network.name(), role, &trusted[..]);
+            return discover(transport, route, at, json).await;
         }
         _ => {}
     }
@@ -1506,6 +1533,7 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
         Command::Onchain { chain, command } => {
             return onchain::run(&wallet, chain, command, json).await;
         }
+        Command::Bridge { command } => return bridge::run(&wallet, command, json).await,
         Command::Cold { chain, command } => {
             let route = route(tor, cli.proxy.as_deref())?;
             return cold::run(&wallet, chain, route, command, json).await;
@@ -1689,19 +1717,17 @@ async fn pay_invoice(
     }
 }
 
-/// Print the hubs, or swap providers, announced on `relays` for `network`,
-/// each at the URLs whose info names the key that announced it.
+/// Print the services of `role` announced on `relays` for `network`, each
+/// at the URLs whose info names the key that announced it: bridges open to
+/// anyone only, those at hubs `trusted` first.
 async fn discover(
     http: Http,
     route: Route,
-    relays: &[String],
-    network: &str,
-    swaps: bool,
+    (relays, network, role, trusted): (&[String], &str, Role, &[String]),
     json: bool,
 ) -> anyhow::Result<()> {
     // Onion services are reached the way relays are, if through Tor.
     let onions = !matches!(route, Route::Direct);
-    let role = if swaps { Role::Swaps } else { Role::Hub };
     let found = licash_nostr::discover(relays, &route, role, network).await?;
     let http = Arc::new(http);
     let mut checks = tokio::task::JoinSet::new();
@@ -1715,7 +1741,7 @@ async fn discover(
             let (http, url, at_once) = (http.clone(), url.clone(), at_once.clone());
             checks.spawn(async move {
                 let _turn = at_once.acquire_owned().await;
-                let info = tokio::time::timeout(CHECK_TIMEOUT, info_at(&http, &url, swaps)).await;
+                let info = tokio::time::timeout(CHECK_TIMEOUT, info_at(&http, &url, role)).await;
                 let info = info.unwrap_or_else(|_| Err("no answer in time".into()));
                 (i, url, info)
             });
@@ -1733,7 +1759,16 @@ async fn discover(
     }
     let mut rows = Vec::new();
     let mut lines = Vec::new();
-    for (service, mut at) in found.iter().zip(answered) {
+    let mut services: Vec<_> = found.iter().zip(answered).collect();
+    let same = |a: &str, b: &str| a.trim_end_matches('/') == b.trim_end_matches('/');
+    let at_trusted = |info: &licash_api::bridge::Info| trusted.iter().any(|t| same(t, &info.hub));
+    services.retain(|(_, at)| !matches!(at.first(), Some((_, Answer::Bridge(info))) if !info.open));
+    // Stable: in the order found otherwise.
+    services.sort_by_key(|(_, at)| match at.first() {
+        Some((_, Answer::Bridge(info))) => !at_trusted(info),
+        _ => false,
+    });
+    for (service, mut at) in services {
         if at.is_empty() {
             continue;
         }
@@ -1780,6 +1815,28 @@ async fn discover(
                     "max": info.max, "margin": info.margin, "hubs": hubs.collect::<Vec<_>>(),
                 }));
             }
+            Answer::Bridge(info) => {
+                let trusted = at_trusted(info);
+                let most = |m: Option<u64>| m.map_or("no limit".to_owned(), |m| say::sat(m / 1000));
+                let address = if info.lightning_address.is_some() {
+                    "  address"
+                } else {
+                    ""
+                };
+                lines.push(format!(
+                    "{}  at {}{}  holds {}  pays {}{address}  {name}",
+                    urls.join(" "),
+                    info.hub,
+                    if trusted { " (trusted)" } else { "" },
+                    most(info.max_balance),
+                    most(info.max_payment),
+                ));
+                rows.push(json!({
+                    "key": key, "name": shown, "urls": urls, "hub": info.hub, "trusted": trusted,
+                    "max_balance": info.max_balance, "max_payment": info.max_payment,
+                    "receive_fee": info.receive_fee, "lightning_address": info.lightning_address,
+                }));
+            }
         }
     }
     show(json, rows.into(), lines.join("\n"));
@@ -1797,6 +1854,7 @@ const CHECKS_AT_ONCE: usize = 32;
 enum Answer {
     Hub(Box<licash_api::Info>),
     Swaps(Box<licash_api::swaps::Info>),
+    Bridge(Box<licash_api::bridge::Info>),
 }
 
 impl Answer {
@@ -1805,16 +1863,17 @@ impl Answer {
         match self {
             Self::Hub(info) => info.nostr.as_deref(),
             Self::Swaps(info) => info.nostr.as_deref(),
+            Self::Bridge(info) => Some(&info.nostr),
         }
     }
 }
 
-/// What the hub, or the swap provider, at `url` says of itself.
-async fn info_at(http: &Http, url: &str, swaps: bool) -> Result<Answer, String> {
-    let path = if swaps {
-        licash_api::swaps::SWAPS_INFO
-    } else {
-        licash_api::INFO
+/// What the service of `role` at `url` says of itself.
+async fn info_at(http: &Http, url: &str, role: Role) -> Result<Answer, String> {
+    let path = match role {
+        Role::Hub => licash_api::INFO,
+        Role::Swaps => licash_api::swaps::SWAPS_INFO,
+        Role::Bridge => licash_api::bridge::INFO,
     };
     let at = format!("{}{path}", url.trim_end_matches('/'));
     let response = licash_wallet::Transport::request(http, &at, None).await?;
@@ -1822,10 +1881,10 @@ async fn info_at(http: &Http, url: &str, swaps: bool) -> Result<Answer, String> 
         return Err(format!("status {}", response.status));
     }
     let body = &response.body;
-    let answer = if swaps {
-        serde_json::from_slice(body).map(|info| Answer::Swaps(Box::new(info)))
-    } else {
-        serde_json::from_slice(body).map(|info| Answer::Hub(Box::new(info)))
+    let answer = match role {
+        Role::Hub => serde_json::from_slice(body).map(|info| Answer::Hub(Box::new(info))),
+        Role::Swaps => serde_json::from_slice(body).map(|info| Answer::Swaps(Box::new(info))),
+        Role::Bridge => serde_json::from_slice(body).map(|info| Answer::Bridge(Box::new(info))),
     };
     answer.map_err(|e| format!("not a service's info: {e}"))
 }
@@ -2206,7 +2265,11 @@ async fn watch(
                 unlink(wallet).await;
             }
         };
-        let (_, mailed) = tokio::join!(unlinking, deliver_due(wallet, route));
+        let (_, mailed, _) = tokio::join!(
+            unlinking,
+            deliver_due(wallet, route),
+            bridge::top_up_due(wallet, json)
+        );
         for r in &received {
             show(
                 json,

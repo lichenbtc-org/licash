@@ -32,6 +32,7 @@
 //! back up its file.
 
 mod backup;
+mod bridges;
 mod claims;
 mod closes;
 mod code;
@@ -40,6 +41,7 @@ mod coins;
 mod cold;
 mod delivery;
 mod deposits;
+mod imports;
 mod inquiry;
 mod journal;
 mod lane;
@@ -80,6 +82,7 @@ use rand_core::{OsRng, RngCore};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{de::DeserializeOwned, Serialize};
 
+pub use bridges::{AddedBridge, BridgeRules, BridgeTopUp};
 pub use claims::{ClaimNote, ClaimSlot, FundedNote, LockClaim, OwedLock, SlotPays};
 pub use closes::ClosePayment;
 pub use code::{
@@ -92,6 +95,7 @@ pub use delivery::{Delivery, Due, Inboxed, ACK_WITHIN, PAGES_AT_ONCE};
 pub use deposits::{
     Close, CloseDeposit, Deposit, DepositState, DepositTerms, CLOSE_ATTEMPTS, GAP as DEPOSIT_GAP,
 };
+pub use imports::{Imported, ImportedSource, SealedNotes};
 pub use inquiry::Checked;
 pub use journal::{CoinSpan, Journal, NoteSpan};
 pub use lane::{current_lane, in_background, in_background_now, in_lane, Background, Lane};

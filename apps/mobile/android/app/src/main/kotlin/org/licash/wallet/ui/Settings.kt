@@ -65,6 +65,7 @@ import org.licash.wallet.storage
 /** A page of Settings, behind a row of its first. */
 private enum class Page(val title: String) {
     Hubs("Hubs"),
+    Bridges("Connected apps"),
     Backup("Backup"),
     Cold("Cold storage"),
     Bitcoin("Bitcoin"),
@@ -121,6 +122,7 @@ fun Settings(engine: Engine, ui: Ui, balance: () -> Unit, back: () -> Unit) {
                 TopBar(p.title, back = { page = null })
                 when (p) {
                     Page.Hubs -> HubsPage(engine, ui)
+                    Page.Bridges -> BridgesPage(engine)
                     Page.Backup -> BackupPage(engine, ui)
                     Page.Cold -> ColdPage(engine, ui)
                     Page.Bitcoin -> BitcoinPage(engine, ui)
@@ -149,6 +151,12 @@ private fun Overview(engine: Engine, ui: Ui, tour: () -> Unit, open: (Page) -> U
             Divider()
         }
         Entry("Hubs", value = "${ui.hubs.size}", icon = Glyphs.bank, tag = "hubs") { open(Page.Hubs) }
+        if (ui.wallet) {
+            Divider()
+            Entry("Connected apps", sub = "Nostr Wallet Connect, through a bridge", icon = Glyphs.code, tag = "bridges") {
+                open(Page.Bridges)
+            }
+        }
         // An advanced feature: shown in advanced mode, or once set up.
         val cold = ui.cold
         if (ui.wallet && (ui.developer || cold != null)) {

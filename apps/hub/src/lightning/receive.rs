@@ -292,12 +292,12 @@ impl Gateway {
         if outputs.is_empty() || amount < c.min_receive || amount > c.max_receive {
             return Err(refused("outside the amounts the gateway receives"));
         }
-        let msat = amount
-            .checked_add(c.receive.due(amount))
-            .and_then(|sat| sat.checked_mul(1000))
-            .ok_or_else(|| Failure(Problem::invalid("the amount overflows")))?;
+        let msat = body.asks(amount, &c.receive)?;
         let memo = body.checked_memo()?;
-        let canonical = Receive::new(&keyset, &ephemeral, &outputs, &hash).with_memo(memo.clone());
+        let described = body.checked_description_hash()?;
+        let canonical = Receive::new(&keyset, &ephemeral, &outputs, &hash)
+            .with_memo(memo.clone())
+            .with_lnurl(body.msat, described);
         let canonical = serde_json::to_string(&canonical).expect("a receipt serializes");
         let turn = self.peer.turn().await;
         if self.receipts.get(&hash)?.is_none() {
@@ -332,7 +332,10 @@ impl Gateway {
                 receipt.msat,
                 cltv,
                 c.invoice_expiry,
-                memo.map(Description::Text),
+                match described {
+                    Some(hash) => Some(Description::Hash(hash)),
+                    None => memo.map(Description::Text),
+                },
             )
             .await;
         let request = match held {

@@ -948,7 +948,8 @@ impl<T: Transport> Wallet<T> {
     }
 
     /// The notes the recovery of contract `id` took, of the keyset of id
-    /// `keyset`, the largest first.
+    /// `keyset`: its own, the largest first, then those imported
+    /// ([`Wallet::claim_imported`]), the largest first.
     pub fn claimed_notes(&self, id: &[u8; 32], keyset: &[u8; 32]) -> Result<Vec<ClaimNote>, Error> {
         let keyset = self.keyset_of(keyset)?;
         self.store.read(|c| {
@@ -958,7 +959,11 @@ impl<T: Transport> Wallet<T> {
             let ys = stmt
                 .query_map(params![id, keyset.id()], |r| r.get::<_, [u8; 33]>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
-            ys.iter().map(|y| claim_note(c, &keyset, y)).collect()
+            let mut notes = (ys.iter())
+                .map(|y| claim_note(c, &keyset, y))
+                .collect::<Result<Vec<_>, _>>()?;
+            notes.extend(crate::imports::claimed(c, &keyset, id)?);
+            Ok(notes)
         })
     }
 
@@ -993,6 +998,7 @@ impl<T: Transport> Wallet<T> {
                     )?;
                 }
             }
+            let freed = freed + crate::imports::release(t, id)?;
             let locks = t.execute(
                 "UPDATE locks SET claimed_by = NULL WHERE claimed_by = ?1",
                 [id],
@@ -1007,12 +1013,20 @@ impl<T: Transport> Wallet<T> {
     }
 
     /// Each of `notes`' message and its hold key, which authorizes it in a
-    /// claim: of this wallet's keys, refused for a note not derived from
-    /// them.
+    /// claim: of this wallet's keys, or imported ([`Wallet::import_notes`]),
+    /// refused for a note of neither.
     pub fn hold_keys(&self, notes: &[ClaimNote]) -> Result<Vec<(Message, ScalarBytes)>, Error> {
+        let root = self.keys.bridges;
         notes
             .iter()
             .map(|n| {
+                let y = n.note.message().identifier()?.0;
+                if let Some(key) = self
+                    .store
+                    .read(|c| crate::imports::hold_key(c, &root, &y))?
+                {
+                    return Ok((n.note.message().clone(), key));
+                }
                 let derivation = self.derivation(&n.held())?;
                 if derivation.message() != n.note.message() {
                     return Err(Error::Invalid("a note not of this wallet's keys".into()));
@@ -1083,15 +1097,44 @@ fn slot_of<'s>(id: &[u8; 32], slots: &'s [ClaimSlot]) -> Result<&'s ClaimSlot, E
         .ok_or_else(|| Error::Invalid("a recovery claiming in no slot".into()))
 }
 
-/// Whether the recovery of contract `id` took notes or lock branches.
+/// Whether the recovery of contract `id` took notes, its own or imported,
+/// or lock branches.
 fn took(c: &rusqlite::Connection, id: &[u8; 32]) -> Result<bool, Error> {
-    Ok(c.query_row(
+    let own: bool = c.query_row(
         "SELECT EXISTS (SELECT 1 FROM notes WHERE spent_by = ?1)
             OR EXISTS (SELECT 1 FROM locks WHERE claimed_by = ?1)
             OR EXISTS (SELECT 1 FROM owed_locks WHERE claimed_by = ?1)",
         [id],
         |r| r.get(0),
-    )?)
+    )?;
+    Ok(own || crate::imports::took(c, id)?)
+}
+
+/// Which of notes of `denoms`, the largest first, one contract claims of
+/// `cap` and `max` notes at most, by position: as it shares its own
+/// ([`Searched::share`]), covering its cap if it can.
+pub(crate) fn share(denoms: &[u64], cap: u64, max: usize) -> Vec<usize> {
+    let mut stock: Vec<(u64, Vec<usize>)> = Vec::new();
+    for (i, denom) in denoms.iter().enumerate().filter(|(_, d)| **d > 0) {
+        match stock.iter_mut().find(|(d, _)| d == denom) {
+            Some((_, at)) => at.push(i),
+            None => stock.push((*denom, vec![i])),
+        }
+    }
+    stock.sort_by_key(|(denom, _)| Reverse(*denom));
+    let counts = stock.iter().map(|(d, at)| (*d, at.len())).collect();
+    let slot = ClaimSlot {
+        id: [0; 32],
+        keyset: [0; 32],
+        cap,
+        max,
+    };
+    let take = Searched::default().share(&slot, counts, false);
+    let mut picked: Vec<usize> = (take.iter().zip(&stock))
+        .flat_map(|(k, (_, at))| at[..*k].iter().copied())
+        .collect();
+    picked.sort_unstable();
+    picked
 }
 
 /// Give up the payments spending notes of `keyset` that the wallet never
@@ -1223,7 +1266,11 @@ fn take_notes(
     Ok(notes)
 }
 
-fn claim_note(c: &rusqlite::Connection, keyset: &Keyset, y: &[u8; 33]) -> Result<ClaimNote, Error> {
+pub(crate) fn claim_note(
+    c: &rusqlite::Connection,
+    keyset: &Keyset,
+    y: &[u8; 33],
+) -> Result<ClaimNote, Error> {
     let held = held(c, keyset, y)?;
     Ok(ClaimNote {
         note: held.note,

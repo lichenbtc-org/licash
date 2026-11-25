@@ -247,6 +247,11 @@ apart, no control characters), which its invoice says to the payer as its
 description; the gateway names the `memo` feature in `/v1/info`, so wallets
 ask older hubs for none. The memo is part of the receipt: the same hash
 asked again with another is refused.
+A receipt may instead ask for an exact invoice total in millisatoshis, the
+gateway's fee taken from it, and a description hash its invoice commits to,
+as LNURL-pay and Nostr zaps need. The total must be at least the notes and
+the fee on them and at most 1999 msat more, which the hub keeps. The
+gateway names the `lnurl` feature in `/v1/info` for these.
 
 `--ln-max-pay-day SAT` bounds what the gateway pays out over the node in
 any 24 hours: the sum of what the locks of the invoices paid, or under way,

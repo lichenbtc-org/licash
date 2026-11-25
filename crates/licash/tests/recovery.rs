@@ -1762,6 +1762,45 @@ fn a_note_is_claimed_in_any_contract_its_hold_key_designates() {
     }
 }
 
+/// A claim of notes of two wallets, each authorized by its own hold key:
+/// a holder's and those she imported from a bridge of hers.
+#[test]
+fn a_claim_of_notes_of_two_hold_roots_is_owed_them_all() {
+    let o = open();
+    let keyset = o.base.parts().keyset.clone();
+    let (chain, _) = activated_chain();
+    let bridge = HoldRoot::from_seed(&[61; 32]).unwrap();
+    let ds = [
+        derive(SPEND, &hold(), 4, 23, 0),
+        derive(SPEND, &hold(), 4, 23, 1),
+        derive(43, &bridge, 4, 31, 0),
+    ];
+    let notes: Vec<_> = ds.iter().map(|d| mint(&o.issuer, &keyset, d)).collect();
+    let items = ds
+        .iter()
+        .map(|d| Item::Settled(d.message().clone()))
+        .collect();
+    let keys = vec![
+        (ds[0].message().clone(), ds[0].hold_key(&hold()).unwrap()),
+        (ds[1].message().clone(), ds[1].hold_key(&hold()).unwrap()),
+        (ds[2].message().clone(), ds[2].hold_key(&bridge).unwrap()),
+    ];
+    let p = Publication::sign(claim(&o, items, vec![], vec![], &ds, 12), &keys, LIMIT).unwrap();
+    let request = Request {
+        amount: 12,
+        claim_digest: *p.claim().digest(),
+    };
+    let witness = Witness {
+        notes,
+        sources: vec![],
+        activations: vec![],
+        funded: vec![],
+    };
+    let bytes = Filing::new(p, witness).unwrap().to_bytes(Format::Legacy);
+    let owed = recovery::owed(&o.base, &request, &bytes, &[], &chain).unwrap();
+    assert_eq!((owed.owed, owed.ineligible), (12, None));
+}
+
 #[test]
 fn fabricated_or_malformed_filings_are_owed_nothing() {
     let o = open();

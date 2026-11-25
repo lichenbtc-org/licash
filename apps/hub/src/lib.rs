@@ -408,6 +408,7 @@ async fn info(State((hub, services)): State<(Arc<Hub>, Services)>) -> Answer<Inf
     info.lightning = services.gateway.and_then(|gateway| gateway.advertise());
     if info.lightning.is_some() {
         info.features.push(licash_api::FEATURE_MEMO.into());
+        info.features.push(licash_api::FEATURE_LNURL.into());
     }
     if services.inbox.is_some() {
         info.features.push(licash_api::inbox::FEATURE_NOTE.into());

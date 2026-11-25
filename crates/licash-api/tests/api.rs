@@ -998,6 +998,57 @@ fn a_receipt_says_a_memo_only_if_asked_and_only_as_a_memo_is_made() {
 }
 
 #[test]
+fn an_exact_receipt_asks_its_total_and_commits_to_a_description_hash() {
+    use licash_api::{receivable, Fee, Receive, MAX_RECEIVE_SURPLUS};
+    let f = fixture();
+    let outputs: Vec<Output> = f
+        .outputs
+        .iter()
+        .map(|d| Output::from_derivation(d).unwrap())
+        .collect();
+    let ephemeral = Ephemeral::random().public();
+    let receive = Receive::new(f.keyset.id(), &ephemeral, &outputs, &[5; 32]);
+    // Without, the same bytes as before: a hub's stored receipts stay its own.
+    let wire = serde_json::to_value(&receive).unwrap();
+    assert!(wire.get("msat").is_none() && wire.get("description_hash").is_none());
+    let fee = Fee { base: 1, ppm: 100 };
+    assert_eq!(receive.asks(1_000, &fee).unwrap(), 1_002_000);
+    assert_eq!(receive.checked_description_hash().unwrap(), None);
+
+    let exact = receive.clone().with_lnurl(Some(1_002_999), Some([9; 32]));
+    assert_eq!(json(&exact), exact);
+    assert_eq!(exact.asks(1_000, &fee).unwrap(), 1_002_999);
+    assert_eq!(exact.checked_description_hash().unwrap(), Some([9; 32]));
+    // Less than the notes and the fee, or more than a surplus beyond.
+    for msat in [1_001_999, 1_002_000 + MAX_RECEIVE_SURPLUS + 1] {
+        let asked = receive.clone().with_lnurl(Some(msat), None);
+        assert_eq!(asked.asks(1_000, &fee).unwrap_err().code, Code::Invalid);
+    }
+    // A memo or a description hash, never both.
+    let both = exact.with_memo(Some("Rent".into()));
+    assert_eq!(
+        both.checked_description_hash().unwrap_err().code,
+        Code::Invalid
+    );
+
+    // The most notes a total pays: what is left is under the surplus.
+    for msat in [3_000, 21_000, 21_999, 1_002_000, 1_002_999, 100_000_000_123] {
+        let notes = receivable(msat, &fee).unwrap();
+        let least = (notes + fee.due(notes)) * 1000;
+        assert!(
+            least <= msat && msat - least <= MAX_RECEIVE_SURPLUS,
+            "{msat}"
+        );
+        let more = (notes + 1 + fee.due(notes + 1)) * 1000;
+        assert!(more > msat, "{msat}");
+    }
+    // The fee takes it all.
+    assert_eq!(receivable(1_000, &fee), None);
+    assert_eq!(receivable(1_999, &fee), None);
+    assert_eq!(receivable(0, &fee), None);
+}
+
+#[test]
 fn deposit_bodies_are_receipts_with_a_refund_key_and_a_payment() {
     use licash_api::{
         Deposit, DepositStatus, Depositing, Deposits, Funding, Receive, ReceiveState, ReceiveStatus,
@@ -1471,4 +1522,27 @@ fn a_contracts_interest_counts_the_year_its_hub_says() {
         ..bitcoin
     };
     assert_eq!(rate(1, 1, 1, none.year_blocks), 0);
+}
+
+#[test]
+fn a_signed_bridge_request_verifies_for_its_path_and_time_only() {
+    use licash_api::bridge::{Signed, ACCOUNT, MAX_SKEW, REGISTER};
+    let signed = Signed::sign(&[3; 32], REGISTER, 1_000, r#"{"pairing":"ab"}"#.into()).unwrap();
+    let signed = json(&signed);
+    let key = signed.verify(REGISTER, 1_000 + MAX_SKEW).unwrap();
+    assert_eq!(key.to_vec(), signed.key.0);
+    // Another path, too late or ahead, or another request: refused.
+    assert!(signed.verify(ACCOUNT, 1_000).is_err());
+    assert!(signed.verify(REGISTER, 1_001 + MAX_SKEW).is_err());
+    assert!(signed.verify(REGISTER, 999 - MAX_SKEW).is_err());
+    let mut forged = signed.clone();
+    forged.request = r#"{"pairing":"cd"}"#.into();
+    assert_eq!(
+        forged.verify(REGISTER, 1_000).unwrap_err().code,
+        Code::Invalid
+    );
+    let mut moved = signed;
+    moved.at += 1;
+    assert!(moved.verify(REGISTER, 1_000).is_err());
+    assert!(Signed::sign(&[0; 32], REGISTER, 0, String::new()).is_err());
 }

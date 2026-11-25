@@ -79,6 +79,9 @@ internal enum class Way(val label: String, val says: String, val tag: String) {
 
     /** A static LNURL of a swap provider's: any wallet pays it, again, while the phone is off. */
     DONATIONS("Donation address", "Any Lightning wallet, again and again, even while you're offline", "way-donations"),
+
+    /** The Lightning Address of an account at a bridge: any wallet pays it, again, into that account. */
+    ADDRESS("Lightning Address", "Any Lightning wallet, again and again, into your bridge account", "way-address"),
 }
 
 /** The ways Receive shows a tab of, in its order: the rest are under More. */
@@ -99,13 +102,15 @@ internal fun picked(amount: Long?, lightning: Boolean): Way =
  * The ways to be paid while a hub trusted takes `lightning` payments, and
  * `silent` ones, and while a provider takes `donations` to the wallet.
  */
-internal fun ways(lightning: Boolean, silent: Boolean, donations: Boolean = false): List<Way> = listOfNotNull(
-    Way.LIGHTNING.takeIf { lightning },
-    Way.CODE,
-    Way.BITCOIN,
-    Way.SILENT.takeIf { silent },
-    Way.DONATIONS.takeIf { donations },
-)
+internal fun ways(lightning: Boolean, silent: Boolean, donations: Boolean = false, address: Boolean = false): List<Way> =
+    listOfNotNull(
+        Way.LIGHTNING.takeIf { lightning },
+        Way.CODE,
+        Way.BITCOIN,
+        Way.SILENT.takeIf { silent },
+        Way.DONATIONS.takeIf { donations },
+        Way.ADDRESS.takeIf { address },
+    )
 
 /**
  * The ways not open to the wallet now, each with why: said grayed out
@@ -188,6 +193,8 @@ fun Receive(engine: Engine, back: () -> Unit) {
     // Looked for once, out of sight: a way to be paid only if found.
     var donations by remember { mutableStateOf<DonationAddress?>(null) }
     var lookingForDonations by remember { mutableStateOf(true) }
+    // The Lightning Address of a bridge account, if one is named.
+    var address by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     // The amount typed in, in place of the QR code: asked for once done.
     var editing by remember { mutableStateOf(false) }
@@ -232,7 +239,7 @@ fun Receive(engine: Engine, back: () -> Unit) {
     }
     val takesLightning = hubsLightning || providerLightning
     val invoicedBy = if (hubsLightning) "the hub" else "the provider"
-    val ways = ways(takesLightning, ui.hubs.any { it.silent }, donations != null)
+    val ways = ways(takesLightning, ui.hubs.any { it.silent }, donations != null, address != null)
     // Picked for the amount, unless another way was asked for.
     var chosen by rememberSaveable { mutableStateOf<Way?>(null) }
     val way = chosen?.takeIf { it in ways } ?: picked(amount, takesLightning)
@@ -248,11 +255,12 @@ fun Receive(engine: Engine, back: () -> Unit) {
         }
     }
     // No amount, as a silent payment address.
-    val anyAmount = way == Way.SILENT || way == Way.DONATIONS
+    val anyAmount = way == Way.SILENT || way == Way.DONATIONS || way == Way.ADDRESS
     val shown = when (way) {
         Way.LIGHTNING -> request?.let { way.label to it }
         Way.SILENT -> silent?.let { way.label to it }
         Way.DONATIONS -> donations?.let { way.label to it.lnurl }
+        Way.ADDRESS -> address?.let { way.label to it }
         Way.CODE -> code?.let { way.label to it.text }
         Way.BITCOIN -> bitcoin?.address?.let { way.label to it }
     }
@@ -281,6 +289,7 @@ fun Receive(engine: Engine, back: () -> Unit) {
         donations = engine.donationAddress().getOrNull()
         lookingForDonations = false
     }
+    LaunchedEffect(Unit) { address = engine.bridgeAddress().getOrNull() }
     // Shown, its provider is kept: the same address shows from then on.
     val shownDonations = donations?.lnurl?.takeIf { way == Way.DONATIONS }
     LaunchedEffect(shownDonations) {
@@ -471,6 +480,7 @@ fun Receive(engine: Engine, back: () -> Unit) {
             val pending = !editing && error == null && when {
                 lightning -> amount != null && request == null
                 way == Way.DONATIONS -> donations == null
+                way == Way.ADDRESS -> address == null
                 way == Way.SILENT -> silent == null
                 else -> (if (way == Way.BITCOIN) bitcoin else code) == null
             }
@@ -488,6 +498,11 @@ fun Receive(engine: Engine, back: () -> Unit) {
                 lightning && request != null -> QrCode(request.uppercase())
                 lightning -> if (amount != null && error == null) Waiting()
                 way == Way.DONATIONS -> donations?.let { QrCode(it.lnurl) }
+                way == Way.ADDRESS -> address?.let {
+                    QrCode("lightning:$it")
+                    Spacer(Modifier.height(8.dp))
+                    Text(it, modifier = Modifier.testTag("lightning-address"), style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
+                }
                 way == Way.SILENT -> when (silent) {
                     null -> if (error == null) Waiting()
                     else -> {
@@ -536,6 +551,7 @@ fun Receive(engine: Engine, back: () -> Unit) {
                 Text(
                     when {
                         way == Way.SILENT -> "Any amount, on Bitcoin"
+                        way == Way.ADDRESS -> "Any amount"
                         way == Way.DONATIONS -> donations?.let { "${sat(it.min)} to ${sat(it.max)}" } ?: "Any amount"
                         else -> amount?.let { sat(it.toULong()) } ?: if (lightning) "Choose an amount" else "Any amount"
                     },
@@ -560,6 +576,7 @@ fun Receive(engine: Engine, back: () -> Unit) {
                 Way.SILENT -> "Found once in a block. Each payment lands at an address of its own."
                 Way.BITCOIN -> "Any Bitcoin wallet or exchange. Arrives once in a block, about 10 minutes."
                 Way.DONATIONS -> donations?.let { donationWords(it) }
+                Way.ADDRESS -> "Paid into your bridge account, held on its operator's word."
                 else -> paying ?: waits
             }
             says?.let {

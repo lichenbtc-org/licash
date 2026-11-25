@@ -503,6 +503,89 @@ async fn an_invoice_says_the_memo_its_wallet_asked_for_and_no_other() {
     }
 }
 
+fn committed(request: &str) -> Option<[u8; 32]> {
+    use bitcoin::hashes::Hash as _;
+    let invoice: Bolt11Invoice = request.parse().unwrap();
+    match invoice.description() {
+        lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(h) => Some(h.0.to_byte_array()),
+        lightning_invoice::Bolt11InvoiceDescriptionRef::Direct(_) => None,
+    }
+}
+
+#[tokio::test]
+async fn an_exact_invoice_asks_its_total_and_commits_to_its_description() {
+    let net = Net::new().await;
+    let features = net.info().await.features;
+    assert!(features.iter().any(|f| f == licash_api::FEATURE_LNURL));
+    let alice = net.wallet("alice");
+    // 12.5 sat: 11 in notes, the 1 sat fee, and half a sat the hub's.
+    let invoice = alice
+        .invoice_exact(HUB, 12_500, None, Some([7; 32]))
+        .await
+        .unwrap();
+    assert_eq!(invoice.amount, 11);
+    let request = invoice.request.clone().unwrap();
+    let parsed: Bolt11Invoice = request.parse().unwrap();
+    assert_eq!(parsed.amount_milli_satoshis(), Some(12_500));
+    assert_eq!(committed(&request), Some([7; 32]));
+    assert_eq!(description(&request), None);
+    net.pay_held(&invoice.hash);
+    net.gateway.round().await;
+    let received = alice.follow_invoice(&invoice.hash).await.unwrap();
+    assert_eq!(received.state, InvoiceState::Received);
+    assert_eq!(available(&alice), 11);
+    // What the fee takes all of is refused before the hub hears of it.
+    let refused_here = alice.invoice_exact(HUB, 1_999, None, None).await;
+    assert!(matches!(
+        refused_here,
+        Err(licash_wallet::Error::Invalid(_))
+    ));
+
+    // Paid inside the hub, as a top-up from another wallet of it is.
+    let bob = net.funded("bob", 40).await;
+    let carol = net.wallet("carol");
+    let invoice = carol
+        .invoice_exact(HUB, 10_000, Some("Top up"), None)
+        .await
+        .unwrap();
+    assert_eq!(invoice.amount, 9);
+    let said = description(invoice.request.as_deref().unwrap());
+    assert_eq!(said.as_deref(), Some("Top up"));
+    let lock = bob
+        .pay_invoice(HUB, invoice.request.as_deref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(lock.amount, 10);
+    let received = carol.follow_invoice(&invoice.hash).await.unwrap();
+    assert_eq!(received.state, InvoiceState::Received);
+    assert_eq!(available(&carol), 9);
+
+    // At the hub: a total outside what the notes and their fee ask, or a
+    // description hash with a memo, is refused.
+    let db = rusqlite::Connection::open(net.dir.path().join("hub.sqlite")).unwrap();
+    let body: String = db
+        .query_row(
+            "SELECT body FROM lightning_receipts WHERE hash = ?1",
+            [bytes(&invoice.hash)],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let body: licash_api::Receive = serde_json::from_str(&body).unwrap();
+    assert_eq!(body.msat, Some(10_000));
+    let mut other = body.clone().with_lnurl(None, None);
+    other.hash = licash_api::Hex(vec![8; 32]);
+    for msat in [9_999, 10_000 + licash_api::MAX_RECEIVE_SURPLUS + 1] {
+        let bad = other.clone().with_lnurl(Some(msat), None);
+        let problem = refused(&net, licash_api::LN_RECEIVE, &bad).await;
+        assert!(problem.message.contains("msat"), "{msat}: {problem:?}");
+    }
+    let both = other
+        .with_memo(Some("Rent".into()))
+        .with_lnurl(None, Some([7; 32]));
+    let problem = refused(&net, licash_api::LN_RECEIVE, &both).await;
+    assert!(problem.message.contains("not both"), "{problem:?}");
+}
+
 #[tokio::test]
 async fn a_memo_is_never_asked_of_a_hub_that_would_leave_it_out() {
     let net = Net::new().await;

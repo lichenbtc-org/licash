@@ -3007,3 +3007,161 @@ fn a_phone_counts_what_it_did_and_what_it_cost_and_replays_its_balance() {
     };
     assert_eq!((before.licash, before.bitcoin), (0, 0));
 }
+
+/// A bridge for its owner alone at the hub of `net`, serving Lightning
+/// Addresses, its rounds every 100 ms: its URL and pairing code.
+fn bridged(net: &Net) -> (String, String) {
+    let path = net.dir.path().join("bridge.sqlite");
+    let hub = net.url.clone();
+    net.runtime.block_on(async move {
+        let wallet = licash_wallet::Wallet::create(
+            &path,
+            &[0x60; 32],
+            licash::spend::ChainProfile::Core30DefaultRegtest,
+            licash_transport::Http::new(None).unwrap(),
+        )
+        .unwrap();
+        wallet.add_hub(&hub).await.unwrap();
+        let pairing = licash_bridge::Bridge::init(&wallet).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let config = licash_bridge::Config {
+            hub,
+            relays: vec!["ws://127.0.0.1:1".into()],
+            public_url: Some(url.clone()),
+            ..licash_bridge::Config::default()
+        };
+        let bridge = Arc::new(licash_bridge::Bridge::open(wallet, config).unwrap());
+        let every = std::time::Duration::from_millis(100);
+        tokio::spawn(licash_bridge::rounds(bridge.clone(), every));
+        tokio::spawn(async move {
+            axum::serve(listener, licash_bridge::router(bridge))
+                .await
+                .unwrap()
+        });
+        (url, pairing)
+    })
+}
+
+/// The account at the bridge at `url` once it holds `balance`, as its
+/// rounds take the payments to it.
+fn credited(net: &Net, wallet: &Wallet, url: &str, balance: u64) -> licash_mobile::BridgeAccount {
+    for _ in 0..100 {
+        net.runtime.block_on(net.lightning.round());
+        wallet.resume().unwrap();
+        let account = wallet.bridge_account(url.into()).unwrap();
+        if account.balance == balance {
+            return account;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("the bridge never credited {balance}");
+}
+
+#[test]
+fn a_phone_tops_up_a_bridge_connects_apps_and_takes_its_notes_back_to_claim() {
+    let net = Net::new(false);
+    let light = Light::new(&net);
+    let alice = funded(&net, &light, "alice");
+    let (url, pairing) = bridged(&net);
+    // Its owner's alone: not without the pairing code.
+    assert!(alice.add_bridge(url.clone(), None).is_err());
+    let added = alice.add_bridge(url.clone(), Some(pairing)).unwrap();
+    assert_eq!(
+        (added.open, added.addresses, added.rules),
+        (false, true, None)
+    );
+    assert_eq!(added.hub, net.url);
+    assert_eq!(alice.bridges().unwrap(), vec![added]);
+
+    // By hand, the hub's fee on receiving of 3 kept out of it.
+    let topped = alice.top_up_bridge(url.clone(), 300, None).unwrap();
+    assert_eq!((topped.credits, topped.error), (297, None));
+    credited(&net, &alice, &url, 297);
+
+    // By the rules: below 1000, up to 1000, 500 a day, 300 of it spent.
+    let wrong = licash_mobile::TopUpRules {
+        below: 2_000,
+        up_to: 1_000,
+        daily: 500,
+        max_fee: None,
+    };
+    assert!(alice.set_bridge_rules(url.clone(), Some(wrong)).is_err());
+    let rules = licash_mobile::TopUpRules {
+        below: 1_000,
+        ..wrong
+    };
+    alice.set_bridge_rules(url.clone(), Some(rules)).unwrap();
+    assert_eq!(alice.bridges().unwrap()[0].rules, Some(rules));
+    let done = alice.top_up_bridges().unwrap();
+    assert_eq!(done.len(), 1, "{done:?}");
+    assert_eq!((done[0].credits, &done[0].error), (197, &None));
+    credited(&net, &alice, &url, 494);
+    assert!(alice.top_up_bridges().unwrap().is_empty());
+    alice.set_bridge_rules(url.clone(), None).unwrap();
+
+    // An app, paying at most 100 a week; revoked.
+    let terms = licash_mobile::AppTerms {
+        name: "  Zapper ".into(),
+        pay: true,
+        receive: false,
+        max_payment: None,
+        budget: Some(100),
+        period: licash_mobile::BudgetPeriod::Weekly,
+        expires_at: None,
+    };
+    let refused = licash_mobile::AppTerms {
+        pay: false,
+        ..terms.clone()
+    };
+    assert!(invalid(alice.connect_app(url.clone(), refused)).contains("paid"));
+    let connected = alice.connect_app(url.clone(), terms).unwrap();
+    assert!(
+        connected.uri.starts_with("nostr+walletconnect://"),
+        "{}",
+        connected.uri
+    );
+    let app = &connected.app;
+    assert_eq!(
+        (app.name.as_str(), app.pay, app.receive),
+        ("Zapper", true, false)
+    );
+    assert_eq!(
+        (app.budget, app.period),
+        (Some(100), Some(licash_mobile::BudgetPeriod::Weekly))
+    );
+    assert!(
+        alice
+            .revoke_app(url.clone(), app.key.clone())
+            .unwrap()
+            .revoked
+    );
+
+    // Its Lightning Address, named and cleared.
+    let host = url.strip_prefix("http://").unwrap();
+    let named = alice
+        .bridge_address(url.clone(), Some("Alice".into()))
+        .unwrap();
+    assert_eq!(named.lightning_address, Some(format!("alice@{host}")));
+    let cleared = alice.bridge_address(url.clone(), None).unwrap();
+    assert_eq!(cleared.lightning_address, None);
+
+    // Frozen for good, its notes the phone's to claim; nothing paid out
+    // from then on, until discarded and unfrozen.
+    let exported = alice.export_bridge(url.clone()).unwrap();
+    assert!(exported.imported.amount >= 494, "{exported:?}");
+    let imported = alice.imported_notes().unwrap();
+    assert_eq!(imported.len(), 1);
+    assert_eq!(imported[0].amount, exported.imported.amount);
+    assert_eq!((imported[0].claimed, imported[0].dropped), (0, 0));
+    let again = alice.import_notes(exported.export.clone()).unwrap();
+    assert_eq!(again.known, exported.imported.added);
+    assert!(invalid(alice.import_notes("zz".into())).contains("export"));
+    assert!(alice.top_up_bridge(url.clone(), 10, None).is_err());
+    let source = exported.imported.source.clone();
+    assert_eq!(
+        alice.discard_imported(source).unwrap(),
+        exported.imported.added
+    );
+    assert!(alice.imported_notes().unwrap().is_empty());
+}

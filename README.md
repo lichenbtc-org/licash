@@ -100,6 +100,7 @@ and a contract's recovery there is only as strong as that work.
 [Android app](apps/mobile/android/README.md) ·
 [Hub](apps/hub/README.md) ·
 [Swap provider](apps/swaps/README.md) ·
+[NWC bridge](apps/bridge/README.md) ·
 [Observatory](apps/observatory/README.md) ·
 [Proving](r0/README.md) ·
 [Contracts on regtest](regtest/README.md)

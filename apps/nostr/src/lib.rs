@@ -112,6 +112,9 @@ pub fn onion(url: &str) -> bool {
 pub enum Role {
     Hub,
     Swaps,
+    /// An NWC bridge keeping accounts for anyone ([`Announcement::urls`]
+    /// answering its info, naming the key that announced it).
+    Bridge,
 }
 
 impl Role {
@@ -120,6 +123,7 @@ impl Role {
         match self {
             Role::Hub => "hub",
             Role::Swaps => "swaps",
+            Role::Bridge => "bridge",
         }
     }
 
@@ -128,6 +132,7 @@ impl Role {
         match self {
             Role::Hub => "licash-hub",
             Role::Swaps => "licash-swaps",
+            Role::Bridge => "licash-bridge",
         }
     }
 }

@@ -505,6 +505,9 @@ pub(crate) struct CodeKeys {
     /// What the seeds of the wallet's extra codes derive from, with their
     /// number ([`crate::codes`]).
     pub(crate) codes: [u8; 32],
+    /// What the wallet's keys at bridges derive from, with each bridge's
+    /// Nostr key ([`crate::bridges`]).
+    pub(crate) bridges: [u8; 32],
 }
 
 /// What a wallet brings to opening a recovery contract with a hub, as its
@@ -534,6 +537,7 @@ impl CodeKeys {
         let shaping = tagged_hash("licash/shaping/key", &[seed]);
         let deposit = tagged_hash("licash/deposit/seed", &[seed]);
         let codes = tagged_hash("licash/codes/seed", &[seed]);
+        let bridges = tagged_hash("licash/bridges/seed", &[seed]);
         Ok(Self {
             silent,
             mailbox,
@@ -541,6 +545,7 @@ impl CodeKeys {
             shaping,
             deposit,
             codes,
+            bridges,
         })
     }
 }

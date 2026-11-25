@@ -70,6 +70,8 @@ jobs:
         run: docker build -f apps/observatory/Dockerfile .
       - name: Witness image
         run: docker build -f apps/witness/Dockerfile .
+      - name: Bridge image
+        run: docker build -f apps/bridge/Dockerfile .
   # The hub's prover (r0/host), its CPU build: the CUDA build is the hub
   # image's.
   r0:
@@ -332,11 +334,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
       # One after another, on the builder's cache of the crates they share.
-      - name: Hub, wallet, swaps and observatory images
+      - name: Hub, wallet, swaps, observatory and bridge images
         env:
           PLATFORM: ${{ matrix.platform }}
         run: |
-          for pair in hub:hub wallet:wallet-cli swaps:swaps observatory:observatory; do
+          for pair in hub:hub wallet:wallet-cli swaps:swaps observatory:observatory bridge:bridge; do
             image=${pair%%:*}
             docker buildx build --platform "$PLATFORM" --file "apps/${pair#*:}/Dockerfile" \
               --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
@@ -361,7 +363,7 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        image: [hub, wallet, swaps, observatory]
+        image: [hub, wallet, swaps, observatory, bridge]
     permissions:
       contents: read
       packages: write
