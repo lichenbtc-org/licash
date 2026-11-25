@@ -25,6 +25,7 @@ use serde_json::json;
 use tracing_subscriber::EnvFilter;
 
 mod background;
+mod bridge;
 mod cold;
 mod contract;
 mod onchain;
@@ -180,7 +181,7 @@ enum Command {
     Deliver,
     /// Receive and deliver until stopped, as `mailbox` does, every so
     /// often: payments made reach their payees even if they never collect
-    /// them at the hub.
+    /// them at the hub. Bridges with rules are topped up as they say.
     Watch {
         /// Seconds between looks.
         #[arg(long, default_value_t = 60)]
@@ -504,6 +505,13 @@ enum Command {
         chain: Option<String>,
         #[command(subcommand)]
         command: onchain::Onchain,
+    },
+    /// Licash bridges: Nostr Wallet Connect for apps, out of an account the
+    /// wallet tops up there, by hand or by rules. Custodial: the bridge
+    /// holds what the account does.
+    Bridge {
+        #[command(subcommand)]
+        command: bridge::BridgeCommand,
     },
     /// Cold storage: notes withdrawn now and then to an external wallet by
     /// its extended public key, never to an address twice, and what it
@@ -1506,6 +1514,7 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
         Command::Onchain { chain, command } => {
             return onchain::run(&wallet, chain, command, json).await;
         }
+        Command::Bridge { command } => return bridge::run(&wallet, command, json).await,
         Command::Cold { chain, command } => {
             let route = route(tor, cli.proxy.as_deref())?;
             return cold::run(&wallet, chain, route, command, json).await;
@@ -2206,7 +2215,11 @@ async fn watch(
                 unlink(wallet).await;
             }
         };
-        let (_, mailed) = tokio::join!(unlinking, deliver_due(wallet, route));
+        let (_, mailed, _) = tokio::join!(
+            unlinking,
+            deliver_due(wallet, route),
+            bridge::top_up_due(wallet, json)
+        );
         for r in &received {
             show(
                 json,

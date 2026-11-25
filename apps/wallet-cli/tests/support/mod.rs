@@ -3,6 +3,7 @@
 //! deposit gateway or an index of silent payment tweaks if asked, and a
 //! payer outside any wallet.
 
+pub mod bridge;
 #[path = "../../../hub/tests/chain/mod.rs"]
 mod chain;
 #[path = "../../../hub/tests/esplora/mod.rs"]

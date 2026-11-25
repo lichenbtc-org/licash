@@ -6,7 +6,7 @@ use licash::{address::Address, spend::lock_hash};
 use licash_api::Fee;
 use licash_hub_service::lightning::{fake::Outcome, HeldState};
 use serde_json::Value;
-use support::{swaps::Swaps, sweep, wallet, Server, DEPOSIT_TIMEOUT};
+use support::{bridge::Bridged, swaps::Swaps, sweep, wallet, Server, DEPOSIT_TIMEOUT};
 
 const FEE: Fee = Fee { base: 1, ppm: 0 };
 
@@ -2308,4 +2308,78 @@ fn recover_takes_a_hubs_address_and_deposit_root_by_url_or_by_name() {
     assert!(!wallet(&alice, &["recover", "--chain", &chain], None)
         .status
         .success());
+}
+
+#[test]
+fn owners_top_up_a_bridge_and_connect_apps_on_the_command_line() {
+    let hub = Server::with_lightning(FEE);
+    let bridged = Bridged::start(&hub);
+    let url = bridged.url();
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = party(dir.path(), "alice", Some(&hub));
+    let asked = wallet(&alice, &["invoice", "80"], None);
+    let stderr = String::from_utf8_lossy(&asked.stderr).into_owned();
+    hub.pay_held(stderr.trim().strip_prefix("invoice ").unwrap());
+    assert_eq!(
+        json(&alice, &["resume"])["invoices"][0]["state"],
+        "received"
+    );
+
+    // Its owner's alone: only with the code its operator was given.
+    failed(
+        wallet(&alice, &["bridge", "add", &url], None),
+        1,
+        "pairing code",
+    );
+    let added = json(
+        &alice,
+        &["bridge", "add", &url, "--pairing", &bridged.pairing],
+    );
+    assert_eq!(added["account"]["balance"], 0);
+    assert_eq!(json(&alice, &["bridge", "list"])[0]["url"], url.as_str());
+
+    // 30 paid in, the hub's 1 on receiving out of it.
+    let topped = json(&alice, &["bridge", "top-up", "30"]);
+    assert_eq!(topped["invoice"]["credits"], 29_000);
+    let mut balance = Value::Null;
+    for _ in 0..50 {
+        hub.round();
+        balance = json(&alice, &["bridge", "show"])["balance"].clone();
+        if balance == 29_000 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(balance, 29_000);
+    assert_eq!(bridged.bridge.status().unwrap().owed, 29_000);
+
+    let connected = json(&alice, &["bridge", "connect", "Stacker News", "--receive"]);
+    let uri = connected["uri"].as_str().unwrap();
+    assert!(uri.starts_with("nostr+walletconnect://"), "{uri}");
+    assert_eq!(
+        connected["connection"]["permissions"],
+        serde_json::json!(["receive"])
+    );
+    failed(
+        wallet(&alice, &["bridge", "connect", "Nothing"], None),
+        1,
+        "--pay, --receive",
+    );
+    let text = ok(wallet(&alice, &["bridge", "show"], None));
+    assert!(text.contains("Stacker News (receives)"), "{text}");
+    assert!(text.contains("Balance  29 sat"), "{text}");
+
+    // Below 40, up to 50, but 45 a day, 30 of it topped up already.
+    let ruled = json(
+        &alice,
+        &[
+            "bridge", "rules", "--below", "40", "--up-to", "50", "--daily", "45",
+        ],
+    );
+    assert_eq!(ruled["rules"]["below"], 40);
+    let run = json(&alice, &["bridge", "run"]);
+    assert_eq!(run["invoice"]["amount"], 15_000);
+    let key = connected["connection"]["key"].as_str().unwrap();
+    let revoked = json(&alice, &["bridge", "revoke", key]);
+    assert_eq!(revoked["revoked"], true);
 }
