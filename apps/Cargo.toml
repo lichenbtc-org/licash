@@ -2,7 +2,7 @@
 # their runtime dependencies stay out of the SDK's.
 [workspace]
 resolver = "2"
-members = ["chain-client", "contracts", "dashboard", "e2e", "hub", "mobile/core", "nostr", "notify", "observatory", "swaps", "tor", "transport", "wallet-cli"]
+members = ["chain-client", "contracts", "dashboard", "e2e", "hub", "mobile/core", "nostr", "notify", "observatory", "swaps", "tor", "transport", "wallet-cli", "witness"]
 
 [profile.dev]
 debug = 0

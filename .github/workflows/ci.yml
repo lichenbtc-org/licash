@@ -68,6 +68,8 @@ jobs:
         run: docker build -f apps/swaps/Dockerfile .
       - name: Observatory image
         run: docker build -f apps/observatory/Dockerfile .
+      - name: Witness image
+        run: docker build -f apps/witness/Dockerfile .
   # The hub's prover (r0/host), its CPU build: the CUDA build is the hub
   # image's.
   r0:
