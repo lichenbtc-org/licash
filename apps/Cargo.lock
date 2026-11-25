@@ -3593,6 +3593,7 @@ dependencies = [
  "bitcoin",
  "bitcoincore-rpc",
  "clap",
+ "futures-util",
  "hex",
  "http-body-util",
  "ipnet",

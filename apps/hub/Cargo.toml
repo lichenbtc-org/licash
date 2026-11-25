@@ -29,6 +29,7 @@ licash-transport = { workspace = true, features = ["tor"] }
 licash-wallet.workspace = true
 anyhow.workspace = true
 axum.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 bitcoin = { version = "=0.32.102", default-features = false, features = ["std", "secp-recovery"] }
 clap.workspace = true
 hex = "0.4"

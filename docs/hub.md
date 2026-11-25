@@ -402,7 +402,9 @@ are outside those 256, under budgets and times of their own.
 
 Contract HTTP requests have separate admission budgets for new openings,
 progress and instance downloads; excess requests receive 503 before body
-buffering or node RPC. Four concurrent instance downloads remain supported.
+buffering or node RPC. One source (an onion circuit, an address, or a trusted
+proxy's client) has at most 8 contract requests in flight at once; more
+receive 503 at once. Four concurrent instance downloads remain supported.
 Admission lasts through response delivery, with a five-minute deadline for
 request handling. Requests about a contract opened (folds, evidence,
 proofs) take bodies of at most 256 KiB, which must arrive within 30

@@ -309,7 +309,12 @@ pub fn router(hub: Arc<Hub>, services: Services) -> Router {
     if let Some(openings) = contracts {
         // Its own body limit, budgets and times: an opening's messages are
         // large, and arrive slowly over Tor.
-        api = api.merge(licash_contracts::hub::router(openings));
+        let contracts =
+            licash_contracts::hub::router(openings).layer(axum::middleware::from_fn_with_state(
+                Arc::new(admission::InFlight::default()),
+                admission::contracts_per_source,
+            ));
+        api = api.merge(contracts);
     }
     // Each request's source, resolved once, before any handler admits by it.
     api.layer(axum::middleware::from_fn_with_state(
