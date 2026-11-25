@@ -339,6 +339,31 @@ and each payment on runs on a circuit and connection of its own (see
 below), but a hub can still link a code to the wallet by the amount paid
 on and its timing, more easily when payments are few.
 
+### Connected apps
+
+Settings, "Connected apps", keeps accounts at NWC bridges
+([docs/bridge.md](bridge.md)), for apps to pay and be paid through Nostr
+Wallet Connect: a bridge added by its URL, with the pairing code its
+operator printed if it is its owner's only. Each bridge's page shows the
+balance in sat, tops it up from the hub holding the most or withdraws to
+it, and sets the top-up rules (below so much, up to so much, at most so
+much a day, the most fee), which each sync applies after moving notes,
+a failure logged without failing the sync. An app connected gets a
+`nostr+walletconnect://` URI, as a QR code on a screen that cannot be
+captured, shown once, with what it may do (pay, receive), the most one
+payment may be and a budget per period; it can be revoked. A bridge with
+a public URL gives the account a Lightning Address, which Receive shows
+under "More". Custodial: the bridge holds what the account does.
+
+Should the bridge's hub stop cooperating, "Freeze and export its notes"
+freezes an owner bridge for good and imports its notes; those an open
+bridge's operator exported to the app's key there are pasted under "Notes
+imported". They
+are never in the balance nor spent: a recovery contract at their hub
+claims them only within the cap the app's own notes, locks and funding
+leave. They can be discarded, unless a recovery claims them, for the
+operator to unfreeze the bridge.
+
 ### Tor
 
 Over the app's own Tor client, every operation you start (a payment, an
