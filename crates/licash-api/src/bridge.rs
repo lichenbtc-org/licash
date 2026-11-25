@@ -28,6 +28,11 @@ pub const TOP_UP: &str = "/v1/bridge/top-up";
 pub const WITHDRAW: &str = "/v1/bridge/withdraw";
 /// [`Username`]: the account named, [`Account`].
 pub const USERNAME: &str = "/v1/bridge/username";
+/// [`Empty`]: the bridge frozen for good, paying nothing out, and its
+/// notes sealed to the signing key, its owner's, for its wallet to claim
+/// in a recovery should its hub stop cooperating: [`Exported`]. Of a
+/// bridge for its owner alone.
+pub const EXPORT: &str = "/v1/bridge/export";
 
 /// How far a [`Signed`] request's time may be from the bridge's, in
 /// seconds, either way.
@@ -304,6 +309,15 @@ pub struct Withdraw {
     pub invoice: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_fee: Option<u64>,
+}
+
+/// The notes of a frozen bridge, sealed to a wallet's key there
+/// ([`EXPORT`]): what they are worth, in sat.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Exported {
+    pub export: Hex,
+    pub notes: u64,
+    pub amount: u64,
 }
 
 /// A payment out of an account, as it stands.
