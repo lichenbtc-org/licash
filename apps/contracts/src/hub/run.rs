@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use bitcoin::{OutPoint, TxOut};
 use licash::base::Base;
-use licash_contract::opening::{Context, Hub, Input, Out, Quote};
+use licash_contract::opening::{Context, Hub, HubPhase, Input, Out, Quote};
 use licash_contract::wire::{self, Envelope, Kind, Writer};
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
@@ -142,6 +142,22 @@ impl Openings {
         }
         let patient = envelope.kind == Kind::Instance;
         self.take(id, message, Start::Stored, patient).await
+    }
+
+    /// Refused, as stepping it would refuse it, unless opening `id` waits
+    /// for her kept instances, or took them already (one sent again): told
+    /// before an upload's body, 25 MB, is read.
+    pub fn awaits_instances(&self, id: &[u8; 32]) -> Result<(), Refused> {
+        let row = self.store().row(id).map_err(Refused::unavailable)?;
+        let row = row.ok_or_else(not_found)?;
+        if row.abandoned {
+            return Err(Refused::bad("an opening given up"));
+        }
+        let peek = Hub::peek(&row.state).map_err(Refused::unavailable)?;
+        match peek.phase {
+            HubPhase::Chosen | HubPhase::Offered => Ok(()),
+            phase => Err(Refused::bad(format!("no instance awaited at {phase:?}"))),
+        }
     }
 
     /// Refused unless `quote` is the hub's: its terms surcharged at one of

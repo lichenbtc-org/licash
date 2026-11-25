@@ -397,7 +397,11 @@ Contract HTTP requests have separate admission budgets for new openings,
 progress and instance downloads; excess requests receive 503 before body
 buffering or node RPC. Four concurrent instance downloads remain supported.
 Admission lasts through response delivery, with a five-minute deadline for
-request handling. A holder turned away as unavailable asks again after a
+request handling. Requests about a contract opened (folds, evidence,
+proofs) take bodies of at most 256 KiB, which must arrive within 30
+seconds. An instance upload is read only once its opening is known to
+await instances: of an opening unknown or past them, it is refused unread.
+A holder turned away as unavailable asks again after a
 jittered wait that doubles from about 2 seconds to 30, for up to 3 minutes:
 in place for an opening under way (an instance upload cut short too, which
 a 25 MB body learns of as its connection closed rather than as the 503;
