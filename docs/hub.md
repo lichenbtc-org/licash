@@ -677,8 +677,11 @@ coin gone is kept on, and taken back should its funding confirm after all.
 A funding refused by the node's policy (its fee, a full mempool), or for a
 reason it does not tell, or one the wallet no longer knows (restored older
 than `hub.sqlite`) while the coin is in no block or mempool, is not proven
-gone: the hub funds no other for it and waits, its operator told, and
-told again 12 blocks before the transaction's deadline. Each coin is
+gone: the hub funds no other for it and waits, its operator told, until
+12 blocks before the transaction's deadline, when it funds another lest
+the transaction miss it. A contract ends only once the fee coins it left
+in a block (a smaller one a larger replaced, one gone that confirmed after
+all) are swept back to the hub's wallet. Each coin is
 funded under a tag of its own, the wallet's comment of its funding, so a
 hub stopped between funding one and keeping it finds it again in its
 wallet's last 1000 transactions rather than fund another. A contract ended 6 blocks deep is

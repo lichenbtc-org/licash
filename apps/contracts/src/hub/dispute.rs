@@ -257,7 +257,7 @@ impl Openings {
                 && r.output == default.tx.output
         {
             // Each party's share went to its wallet: nothing left to play.
-            self.end_if_deep(id, r_at, tip)?;
+            self.end_if_deep(id, hub, r_at, tip).await?;
             return Ok(Played::Idle);
         }
         let request = presign(&o.set, "request")?;
@@ -2496,7 +2496,7 @@ impl Openings {
             .owned(payout, value_key, signer, amount, Role::Hub)?;
         if owned.is_empty() {
             self.note_once(id, "nothing", "nothing of the payout is the hub's");
-            self.end_if_deep(id, paid_at, tip)?;
+            self.end_if_deep(id, hub, paid_at, tip).await?;
             return Ok(Played::Idle);
         }
         // Swept, in a block: ended once the payout is deep. The sweep pays
@@ -2507,7 +2507,7 @@ impl Openings {
             swept &= !self.unspent(out.op, false).await?;
         }
         if swept {
-            self.end_if_deep(id, paid_at, tip)?;
+            self.end_if_deep(id, hub, paid_at, tip).await?;
             return Ok(Played::Idle);
         }
         let to = self.payout_script().await?;
@@ -2729,9 +2729,26 @@ impl Openings {
     ) -> bool {
         let why = match self.funding(id, name, coin).await {
             Funding::Stands => return false,
+            // Not told as its deadline nears: funded again, lest what
+            // spends it miss it. Should it confirm after all, it is the
+            // hub's still, swept once the contract ends.
             Funding::Waits(why) => {
-                self.unknown_coin(id, name, &why, by);
-                return false;
+                if !funded_again_unknown(by) {
+                    self.unknown_coin(id, name, &why, by);
+                    return false;
+                }
+                let left = by.map_or(0, |(deadline, tip)| deadline.saturating_sub(tip));
+                tracing::warn!(id = %crate::hex_id(id), %coin, "a fee coin of {name} of unknown state near its deadline: funded again: {why}");
+                if self.once(id, "fee coin funded again near") {
+                    self.alert(&format!(
+                        "contract {}: a fee coin of its {name} is of unknown state {left} blocks \
+                         before its deadline ({why}): another is funded, lest it miss it. Should \
+                         the first confirm after all, it is swept back to the hub's wallet once \
+                         the contract ends.",
+                        crate::hex_id(id)
+                    ));
+                }
+                return true;
             }
             Funding::Gone(why) => why,
         };
@@ -2865,9 +2882,10 @@ impl Openings {
             tracing::warn!(id = %crate::hex_id(id), "a fee coin of {name} of unknown state: {why}");
             self.alert(&format!(
                 "contract {}: the state of a fee coin of its {name} is not told ({why}){more}. \
-                 It is not funded again while it may yet confirm, and what spends it may not be \
-                 in a block in time: check the hub's node and wallet (a wallet restored older \
-                 than hub.sqlite knows not what it funded).",
+                 It is not funded again while it may yet confirm, until {UNKNOWN_NEAR} blocks \
+                 before its deadline, and what spends it may not be in a block in time: check \
+                 the hub's node and wallet (a wallet restored older than hub.sqlite knows not \
+                 what it funded).",
                 crate::hex_id(id)
             ));
         }
@@ -2900,14 +2918,51 @@ impl Openings {
         }
     }
 
-    /// Opening `id` ended at block `at`: not looked at again once that
-    /// block is [`ENDED_DEPTH`] deep at `tip`.
-    fn end_if_deep(&self, id: &[u8; 32], at: u32, tip: u32) -> Result<()> {
-        if tip.saturating_sub(at) + 1 >= ENDED_DEPTH {
+    /// Opening `id` of `hub` ended at block `at`: not looked at again once
+    /// that block is [`ENDED_DEPTH`] deep at `tip`, and its fee coins left
+    /// in a block swept to the hub's wallet ([`Self::swept_fee_coins`]).
+    async fn end_if_deep(&self, id: &[u8; 32], hub: &Hub, at: u32, tip: u32) -> Result<()> {
+        if tip.saturating_sub(at) + 1 >= ENDED_DEPTH && self.swept_fee_coins(id, hub).await? {
             self.store().end(id, at)?;
             tracing::info!(id = %crate::hex_id(id), at, "contract ended");
         }
         Ok(())
+    }
+
+    /// Whether no fee coin of opening `id` is left unspent in a block: each
+    /// left is the hub's, paying its fee key, which none but the hub spends.
+    /// Those left are swept to the hub's wallet, and the contract ends once
+    /// the sweep is in a block. One funded and in no block is not waited
+    /// for. Left worth less than their sweep, they are left.
+    async fn swept_fee_coins(&self, id: &[u8; 32], hub: &Hub) -> Result<bool> {
+        let mut left: Vec<(OutPoint, TxOut)> = Vec::new();
+        let kept = self.store().all_fee_coins(id)?;
+        for coin in kept {
+            if !left.iter().any(|l| l.0 == coin.0) && self.unspent(coin.0, false).await? {
+                left.push(coin);
+            }
+        }
+        if left.is_empty() {
+            return Ok(true);
+        }
+        let to = self.payout_script().await?;
+        let rate = self.fee_rate().await;
+        let Some(sweep) = fee_sweep(&hub.keys().party.payment, &left, to, rate)? else {
+            self.note_once(
+                id,
+                "fee coins left",
+                "its fee coins left are worth less than a sweep",
+            );
+            return Ok(true);
+        };
+        if self.post(&sweep).await && self.once(id, "fee coins swept") {
+            let value: Amount = left.iter().map(|c| c.1.value).sum();
+            tracing::info!(
+                id = %crate::hex_id(id), coins = left.len(), %value,
+                txid = %sweep.compute_txid(), "fee coins left swept to the hub's wallet"
+            );
+        }
+        Ok(false)
     }
 
     /// The first spend of `coin` (paying `out`) in blocks `from..=tip`,
@@ -3098,6 +3153,50 @@ fn terminal_coin(
     (coin, fund)
 }
 
+/// A sweep of fee coins `coins`, each paying `key`'s fee script, to `to`
+/// at `rate`: none if they are worth less than its fee and a change of
+/// dust.
+fn fee_sweep(
+    key: &bitcoin::secp256k1::Keypair,
+    coins: &[(OutPoint, TxOut)],
+    to: ScriptBuf,
+    rate: FeeRate,
+) -> Result<Option<Transaction>> {
+    let prevouts: Vec<TxOut> = coins.iter().map(|c| c.1.clone()).collect();
+    let value: Amount = prevouts.iter().map(|o| o.value).sum();
+    let dust = to.minimal_non_dust();
+    let make = |fee: Amount| -> Result<Option<Transaction>> {
+        let Some(pays) = value.checked_sub(fee).filter(|pays| *pays >= dust) else {
+            return Ok(None);
+        };
+        let mut tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: (coins.iter())
+                .map(|c| bitcoin::TxIn {
+                    previous_output: c.0,
+                    sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    ..Default::default()
+                })
+                .collect(),
+            output: vec![TxOut {
+                value: pays,
+                script_pubkey: to.clone(),
+            }],
+        };
+        for i in 0..coins.len() {
+            dispute::sign_fee_input(key, &mut tx, i, &prevouts)?;
+        }
+        Ok(Some(tx))
+    };
+    let Some(free) = make(Amount::ZERO)? else {
+        return Ok(None);
+    };
+    let size = free.vsize() as u64;
+    let fee = (rate.fee_vb(size).context("fee overflow")?).max(Amount::from_sat(size));
+    make(fee)
+}
+
 /// What the state of a fee coin's funding is, as [`Openings::funding`]
 /// tells it.
 #[derive(Debug)]
@@ -3158,8 +3257,16 @@ fn refusal(e: &anyhow::Error) -> Refusal {
     }
 }
 
+/// Whether a fee coin of unknown state is funded again, `by` its deadline
+/// and the tip if it has one: once fewer than [`UNKNOWN_NEAR`] blocks are
+/// left, as missing the deadline costs more than a coin too many.
+fn funded_again_unknown(by: Option<(u32, u32)>) -> bool {
+    by.is_some_and(|(deadline, tip)| deadline.saturating_sub(tip) < UNKNOWN_NEAR)
+}
+
 /// Blocks before its deadline under which a fee coin of unknown state is
-/// told its operator once more ([`Openings::unknown_coin`]).
+/// told its operator once more ([`Openings::unknown_coin`]), and funded
+/// again ([`Openings::gone`]).
 const UNKNOWN_NEAR: u32 = 12;
 
 /// The code of a node's JSON-RPC error, as its message ends: `(-25)`.
@@ -3461,6 +3568,51 @@ mod tests {
             contested_disclose_deadline(&o, 200) + depth + NEAR,
             assert_deadline(&o, 200)
         );
+    }
+
+    /// A coin of unknown state waits while its deadline is far, and is
+    /// funded again once near, or past; never one of no deadline.
+    #[test]
+    fn a_coin_of_unknown_state_is_funded_again_only_near_its_deadline() {
+        assert!(!funded_again_unknown(None));
+        assert!(!funded_again_unknown(Some((200, 100))));
+        assert!(!funded_again_unknown(Some((100 + UNKNOWN_NEAR, 100))));
+        assert!(funded_again_unknown(Some((100 + UNKNOWN_NEAR - 1, 100))));
+        assert!(funded_again_unknown(Some((100, 100))));
+        assert!(funded_again_unknown(Some((90, 100))));
+    }
+
+    /// Fee coins left are swept whole to one output, at the rate asked;
+    /// none worth less than the sweep's fee and dust.
+    #[test]
+    fn fee_coins_left_are_swept_unless_worth_less_than_the_sweep() {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let key = bitcoin::secp256k1::Keypair::from_seckey_slice(&secp, &[3; 32]).unwrap();
+        let script = dispute::fee_script(&key).unwrap();
+        let coin = |n: u8, sat: u64| {
+            (
+                OutPoint::new(bitcoin::Txid::from_byte_array([n; 32]), 0),
+                TxOut {
+                    value: Amount::from_sat(sat),
+                    script_pubkey: script.clone(),
+                },
+            )
+        };
+        let to = ScriptBuf::new_p2tr_tweaked(
+            bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(key.x_only_public_key().0),
+        );
+        let rate = FeeRate::from_sat_per_vb_u32(2);
+        let coins = [coin(1, 5_000), coin(2, 20_000)];
+        let tx = fee_sweep(&key, &coins, to.clone(), rate).unwrap().unwrap();
+        assert_eq!(tx.input.len(), 2);
+        assert_eq!(tx.output.len(), 1);
+        assert_eq!(tx.output[0].script_pubkey, to);
+        let fee = Amount::from_sat(25_000) - tx.output[0].value;
+        assert_eq!(fee, rate.fee_vb(tx.vsize() as u64).unwrap());
+        assert!(tx.input.iter().all(|i| !i.witness.is_empty()));
+        assert!(fee_sweep(&key, &[coin(1, 400)], to, rate)
+            .unwrap()
+            .is_none());
     }
 
     /// A funding broadcast again is gone only on a conflict or inputs

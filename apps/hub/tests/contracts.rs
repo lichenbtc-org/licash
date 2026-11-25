@@ -5006,11 +5006,12 @@ async fn a_hub_stopped_between_funding_a_fee_coin_and_keeping_it_funds_no_other(
 /// Its wallet then forgets the funding of the child's coin (as one
 /// restored older than `hub.sqlite`) and spends its inputs otherwise: the
 /// coin in no block or mempool, and nothing proves it gone. The hub funds
-/// no other for it, waiting as its operator is told, rather than fund one
-/// for a coin that may yet confirm.
+/// no other for it while its deadline is far, waiting as its operator is
+/// told, rather than fund one for a coin that may yet confirm; near it,
+/// it funds another, lest the response miss it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs bitcoind and a release build"]
-async fn a_hub_funds_no_other_fee_coin_for_one_its_wallet_forgot() -> Result<()> {
+async fn a_hub_funds_again_a_fee_coin_its_wallet_forgot_only_near_its_deadline() -> Result<()> {
     use bitcoin::OutPoint;
     use licash_contracts::holder::recovery::{self, Stage};
     use serde_json::json;
@@ -5070,25 +5071,35 @@ async fn a_hub_funds_no_other_fee_coin_for_one_its_wallet_forgot() -> Result<()>
         before == vec![bitcoin::consensus::serialize(&coin)],
         "{before:?}"
     );
-    for _ in 0..3 {
+    // Waits, its operator told, while its deadline is far; funded again
+    // once near, lest it miss it. Never told it is gone.
+    let mut again = false;
+    for _ in 0..200 {
         let round = s.openings.answer_requests().await?;
         ensure!(round.failed == 0, "{round:?}");
+        let alerted = alerts.lock().unwrap().clone();
         ensure!(
-            kept()? == before,
-            "funded again for a coin not proven gone: {:?}",
-            alerts.lock().unwrap()
+            alerted.iter().all(|a| !a.contains("is gone, in no block")),
+            "{alerted:?}"
+        );
+        if kept()?.len() > before.len() {
+            ensure!(
+                alerted
+                    .iter()
+                    .any(|a| a.contains("another is funded, lest it miss it")),
+                "funded again, its deadline not near: {alerted:?}"
+            );
+            again = true;
+            break;
+        }
+        // Waiting: told why, with the blocks left.
+        ensure!(
+            alerted.iter().any(|a| a.contains("is not told")),
+            "{alerted:?}"
         );
         s.rt.mine(1)?;
     }
-    let alerted = alerts.lock().unwrap().clone();
-    ensure!(
-        alerted.iter().any(|a| a.contains("is not told")),
-        "{alerted:?}"
-    );
-    ensure!(
-        alerted.iter().all(|a| !a.contains("is gone, in no block")),
-        "{alerted:?}"
-    );
+    ensure!(again, "never funded again: {:?}", alerts.lock().unwrap());
     Ok(())
 }
 
@@ -5157,7 +5168,47 @@ async fn a_hub_posts_again_with_more_fee_a_disclosure_no_block_takes() -> Result
             .any(|a| a.contains("disclosure is in no block by")),
         "{alerted:?}"
     );
+    // Its first disclosure's coin, left: swept to its wallet as it ends.
+    let left = fee_coins_swept(&s).await?;
+    ensure!(left >= 1, "no fee coin left to sweep");
     Ok(())
+}
+
+/// Rounds of `s`'s hub, a block each, until its contract ends: then each
+/// fee coin it kept is spent in a block, those left swept to its wallet.
+/// How many were left in a block when it began.
+async fn fee_coins_swept(s: &Stale) -> Result<usize> {
+    let db = rusqlite::Connection::open(s._dir.path().join("hub").join("hub.sqlite"))?;
+    let coins: Vec<bitcoin::OutPoint> = {
+        let mut stmt = db.prepare("SELECT outpoint FROM opening_fee_coins")?;
+        let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+        let rows: Vec<Vec<u8>> = rows.collect::<rusqlite::Result<_>>()?;
+        (rows.iter())
+            .map(|op| bitcoin::consensus::deserialize(op))
+            .collect::<Result<_, _>>()?
+    };
+    let mut left = 0;
+    for coin in &coins {
+        left += usize::from(s.rt.is_unspent(coin)?);
+    }
+    let ended = || -> Result<bool> {
+        Ok(db.query_row("SELECT count(*) FROM opening_ended", [], |r| {
+            r.get::<_, i64>(0)
+        })? > 0)
+    };
+    for _ in 0..60 {
+        if ended()? {
+            break;
+        }
+        s.rt.mine(1)?;
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+    }
+    ensure!(ended()?, "the contract never ended");
+    for coin in &coins {
+        ensure!(!s.rt.is_unspent(coin)?, "fee coin {coin} left unspent");
+    }
+    Ok(left)
 }
 
 /// Her stale claim at a hub whose chain is apart from its wallet's node

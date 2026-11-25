@@ -387,6 +387,22 @@ impl Store {
         self.fee_coin(id, name)?.context("no fee coin kept")
     }
 
+    /// Every fee coin kept for opening `id`, of any transaction, in the
+    /// order kept.
+    pub fn all_fee_coins(&self, id: &[u8; 32]) -> Result<Vec<(OutPoint, TxOut)>> {
+        let mut stmt = self.0.prepare(
+            "SELECT outpoint, output FROM opening_fee_coins WHERE id = ?1 ORDER BY rowid",
+        )?;
+        let rows = stmt.query_map(params![id], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        rows.map(|row| {
+            let (op, out) = row?;
+            Ok((deserialize(&op)?, deserialize(&out)?))
+        })
+        .collect()
+    }
+
     /// How many fee coins are kept for transaction `name` of opening `id`:
     /// its first and its extra ones. Each kept adds one, so that each
     /// funded is of a count of its own ([`super::Openings`]'s tags).
