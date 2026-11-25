@@ -913,6 +913,22 @@ enum Log {
     Json,
 }
 
+/// Who the hub admits deposits and receipts by, behind a proxy.
+#[derive(Args)]
+struct IngressArgs {
+    /// A reverse proxy in front of `--listen` whose `X-Forwarded-For`
+    /// the hub believes, as an address or a CIDR block; repeat (or
+    /// separate by commas) for more. Deposits and receipts asked and
+    /// not paid are bounded by client address: without it, every
+    /// client behind the proxy is the proxy's one address. The proxy
+    /// must replace the header its clients send, and nothing else may
+    /// reach `--listen`.
+    #[arg(long = "trusted-proxy", env = "LICASH_HUB_TRUSTED_PROXY",
+          value_name = "CIDR", value_delimiter = ',',
+          value_parser = licash_hub_service::admission::trusted_proxy)]
+    trusted_proxies: Vec<ipnet::IpNet>,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Create the hub: a fresh seed and an empty ledger. Never replaces
@@ -926,6 +942,8 @@ enum Command {
     Run {
         #[arg(long, env = "LICASH_HUB_LISTEN", default_value = "127.0.0.1:8338")]
         listen: SocketAddr,
+        #[command(flatten)]
+        ingress: Box<IngressArgs>,
         #[command(flatten)]
         policy: PolicyArgs,
         #[command(flatten)]
@@ -1081,6 +1099,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
         Command::Init { max_pow } => init(&cli.data, &seed, &db, max_pow, cli.log),
         Command::Run {
             listen,
+            ingress,
             policy,
             chain,
             notify,
@@ -1395,6 +1414,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 contracts,
                 swaps,
                 urls: urls.clone(),
+                ingress: Arc::new(licash_hub_service::Ingress::new(ingress.trusted_proxies)),
             };
             let router = licash_hub_service::router(hub.clone(), services);
             // Served until the hub stops.
@@ -1866,8 +1886,9 @@ async fn serve(
             }
         }
     };
-    // Each request knows its connection: deposits and receipts are capped
-    // by it (licash_hub_service::Socket).
+    // Each request knows its peer: deposits and receipts are capped by its
+    // address, or its client's behind a trusted proxy
+    // (licash_hub_service::AdmissionSource).
     axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),

@@ -854,14 +854,40 @@ circuit to it then costs work, and the hub caps the deposits and receipts
 asked and unpaid over one circuit (see below). Licash's own clients solve
 it, as do Tor clients from 0.4.8 on.
 
-Over one connection (a TCP connection, or an onion service's circuit), the
-hub takes at most 8 deposits asked and not paid, and apart 8 Lightning
-receipts: past them it refuses as unavailable, until one is paid or its
-window ends, or the client asks over another connection. Asking for many
-thus costs many connections: over Tor, many proofs of work while the
-service is under load. Behind a reverse proxy, every client shares the
-proxy's few connections to the hub, so serve deposits and receipts
-directly or over `--onion`.
+From one source, the hub takes at most 8 deposits asked and not paid, and
+apart 8 Lightning receipts: past them it refuses as unavailable, until one
+is paid or its window ends. A source is an onion service's circuit (every
+stream of one rendezvous shares it, another circuit is another source), or
+else a client's IP address, whatever its ports: an IPv4 address over IPv6
+is that IPv4 address, an IPv6 address is taken exactly. Clients behind one
+NAT share a source. Asking for many thus costs many circuits (over Tor,
+many proofs of work while the service is under load) or many addresses.
+Since addresses are cheap to a botnet or an IPv6 block, the global caps
+(`--deposit-max-open`, and the gateway's for receipts) remain the bound on
+everything asked and not paid.
+
+Behind a reverse proxy, the hub's TCP peer is the proxy: every client
+would share its one address. Name the proxy with `--trusted-proxy`
+(`LICASH_HUB_TRUSTED_PROXY`), an address or a CIDR block, repeated or
+comma separated. From a trusted peer only, the hub reads
+`X-Forwarded-For`, from the right while each address is trusted: the
+first that is not is the client (the leftmost if all are). It ignores the
+header from any other peer. A trusted proxy's header that does not parse
+(an entry that is not a bare IP address, such as one with a port, or more
+than 16 entries) has deposits and receipts refused as invalid, so a
+misconfigured proxy shows at once. For Traefik:
+
+- set the entry point's `forwardedHeaders.trustedIPs` to nothing (the
+  default), so Traefik replaces any `X-Forwarded-For` its clients send
+  with the address it saw, rather than appending to theirs;
+- run `licash-hub run --listen <private address>:8338 --trusted-proxy
+  <Traefik's address or network>`;
+- firewall `--listen` so only Traefik reaches it: a client reaching the
+  hub directly from within a trusted block could name any source.
+
+Deposits and receipts recorded by an older release keep the source it
+stored, its peer's address and port: they count against that address
+until paid or ended.
 
 Notification targets are Apprise URLs (`gotify[s]://`, `tgram://`,
 `ntfy[s]://`, `json[s]://`, `apprise[s]://`); `test-notify` checks them.

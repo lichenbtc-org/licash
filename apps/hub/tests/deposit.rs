@@ -31,7 +31,7 @@ use licash_hub::{Hub, Policy, Timing};
 use licash_hub_service::{
     deposit,
     lightning::{self, fake::Fake, HeldState},
-    peer, Services, Socket, PER_SOCKET,
+    peer, AdmissionSource, Services, PER_SOURCE,
 };
 use licash_wallet::{DepositState, Transport, Wallet};
 use serde_json::json;
@@ -1513,6 +1513,75 @@ async fn call(net: &Net, method: Method, path: &str, body: Option<String>) -> (u
     (status, serde_json::from_slice(&body).unwrap())
 }
 
+/// Behind a trusted proxy, a deposit is asked from the client it forwards
+/// for, resolved by the router before the gateway: one forwarded for
+/// otherwise than it parses is refused as invalid, unrecorded; a peer not
+/// trusted is its own client, whatever it forwards for.
+#[tokio::test]
+async fn a_trusted_proxys_client_asks_the_deposit_and_a_malformed_chain_is_refused() {
+    let net = Net::new().await;
+    let trusted = licash_hub_service::admission::trusted_proxy("10.0.0.2").unwrap();
+    let services = Services {
+        deposits: Some(net.deposits.clone()),
+        ingress: Arc::new(licash_hub_service::Ingress::new(vec![trusted])),
+        ..Default::default()
+    };
+    let app = licash_hub_service::router(net.hub.clone(), services);
+    let ask = |peer: &str, xff: &str, body: &licash_api::Deposit| {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(licash_api::DEPOSIT)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-forwarded-for", xff)
+            .extension(axum::extract::ConnectInfo(
+                peer.parse::<std::net::SocketAddr>().unwrap(),
+            ))
+            .body(Body::from(serde_json::to_string(body).unwrap()))
+            .unwrap();
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status().as_u16();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            (status, body)
+        }
+    };
+    let db = rusqlite::Connection::open(net.dir.path().join("hub.sqlite")).unwrap();
+    let source = |hash: [u8; 32]| -> Option<Vec<u8>> {
+        db.query_row("SELECT source FROM deposits WHERE hash = ?1", [hash], |r| {
+            r.get(0)
+        })
+        .unwrap_or(None)
+    };
+    let alice = net.wallet("alice");
+    let mut asked = Vec::new();
+    for _ in 0..3 {
+        let deposit = alice.deposit(HUB, 3_000).await.unwrap();
+        let (_, body) = net.asked("alice", &deposit.hash);
+        let hash = bytes(&deposit.hash);
+        db.execute("DELETE FROM deposits WHERE hash = ?1", [hash])
+            .unwrap();
+        asked.push((hash, body));
+    }
+    let (status, body) = ask("10.0.0.2:4000", "198.51.100.7:443", &asked[0].1).await;
+    let problem: Problem = serde_json::from_slice(&body).unwrap();
+    assert_eq!((status, problem.code), (400, Code::Invalid), "{problem:?}");
+    assert!(problem.message.contains("X-Forwarded-For"), "{problem:?}");
+    assert_eq!(source(asked[0].0), None);
+    let (status, _) = ask("10.0.0.2:4000", "1.1.1.1, 198.51.100.7", &asked[1].1).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        source(asked[1].0).as_deref(),
+        Some(b"ip 198.51.100.7".as_slice())
+    );
+    let (status, _) = ask("[::ffff:192.0.2.1]:4000", "198.51.100.7", &asked[2].1).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        source(asked[2].0).as_deref(),
+        Some(b"ip 192.0.2.1".as_slice())
+    );
+}
+
 #[tokio::test]
 async fn deposits_asked_and_not_paid_are_bounded_retries_aside() {
     let net = Net::new().await;
@@ -1539,14 +1608,15 @@ async fn deposits_asked_and_not_paid_are_bounded_retries_aside() {
     assert_eq!(gateway.deposit(&bodies[0], None).await.unwrap(), first);
 }
 
-/// Over one connection, only so many deposits are asked and not paid:
-/// over another, more.
+/// From one address, whatever its ports, only so many deposits are asked
+/// and not paid, one an older release stored under it and a port counted:
+/// from another, more.
 #[tokio::test]
-async fn deposits_asked_and_not_paid_over_one_connection_are_bounded() {
+async fn deposits_asked_and_not_paid_from_one_source_are_bounded() {
     let net = Net::new().await;
     let alice = net.wallet("alice");
     let mut bodies = Vec::new();
-    for _ in 0..=PER_SOCKET {
+    for _ in 0..=PER_SOURCE {
         let deposit = alice.deposit(HUB, 3_000).await.unwrap();
         bodies.push(net.asked("alice", &deposit.hash).1);
     }
@@ -1562,15 +1632,24 @@ async fn deposits_asked_and_not_paid_over_one_connection_are_bounded() {
         &path,
     )
     .unwrap();
-    let peer = |port: u16| Socket::of_peer(([127, 0, 0, 1], port).into());
-    let (one, other) = (peer(1), peer(2));
+    let ip = |s: &str| AdmissionSource::of_ip(s.parse().unwrap());
+    let (one, other) = (ip("127.0.0.1"), ip("127.0.0.2"));
     let (last, asked) = bodies.split_last().unwrap();
-    for body in asked {
+    // The first as an older release stored it: by its peer and port.
+    gateway.deposit(&asked[0], None).await.unwrap();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let (_, _, first) = asked[0].receive.terms().unwrap();
+    db.execute(
+        "UPDATE deposits SET source = ?2 WHERE hash = ?1",
+        rusqlite::params![first, b"tcp 127.0.0.1:41000".as_slice()],
+    )
+    .unwrap();
+    for body in &asked[1..] {
         gateway.deposit(body, Some(&one)).await.unwrap();
     }
     let refused = gateway.deposit(last, Some(&one)).await.unwrap_err().0;
     assert_eq!(refused.code, Code::Unavailable, "{refused:?}");
-    assert!(refused.message.contains("connection"), "{refused:?}");
+    assert!(refused.message.contains("source"), "{refused:?}");
     // One asked, asked again over it: the same.
     gateway.deposit(&asked[0], Some(&one)).await.unwrap();
     gateway.deposit(last, Some(&other)).await.unwrap();

@@ -1,6 +1,7 @@
 //! The hub service: a [`Hub`] behind the v1 HTTP API of [`licash_api`],
 //! and the [`Services`] it runs beside it.
 
+pub mod admission;
 pub mod announce;
 pub mod dashboard;
 pub mod deposit;
@@ -26,14 +27,16 @@ pub(crate) mod testing {
     }
 }
 
-use std::{convert::Infallible, net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 
+use admission::Admission;
+pub use admission::{AdmissionSource, Ingress, PER_SOURCE};
 use axum::{
     extract::{
         rejection::{JsonRejection, QueryRejection},
-        ConnectInfo, DefaultBodyLimit, OptionalFromRequestParts, Path, Query, State,
+        DefaultBodyLimit, Path, Query, State,
     },
-    http::{header, request::Parts, StatusCode},
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -229,6 +232,8 @@ pub struct Services {
     /// The URLs wallets reach it at, named in its info: those it
     /// announces, and its onion service's once that runs.
     pub urls: Arc<std::sync::RwLock<Vec<String>>>,
+    /// The proxies in front of it whose clients it admits by.
+    pub ingress: Arc<Ingress>,
 }
 
 /// The API of `hub`, with the paths of its `services`.
@@ -240,6 +245,7 @@ pub fn router(hub: Arc<Hub>, services: Services) -> Router {
         inbox,
         contracts,
         swaps,
+        ingress,
         ..
     } = services.clone();
     let info_of = Router::new()
@@ -305,7 +311,12 @@ pub fn router(hub: Arc<Hub>, services: Services) -> Router {
         // large, and arrive slowly over Tor.
         api = api.merge(licash_contracts::hub::router(openings));
     }
-    api.layer(TraceLayer::new_for_http())
+    // Each request's source, resolved once, before any handler admits by it.
+    api.layer(axum::middleware::from_fn_with_state(
+        ingress,
+        admission::resolve,
+    ))
+    .layer(TraceLayer::new_for_http())
 }
 
 /// `router`, serving at most `most` requests at once but its [`HEALTH`]:
@@ -547,61 +558,20 @@ async fn ln_pay(
 
 async fn ln_receive(
     State(gateway): State<Arc<Gateway>>,
-    socket: Option<Socket>,
+    Admission(source): Admission,
     body: Result<Json<Receive>, JsonRejection>,
 ) -> Answer<Receiving> {
     let Json(body) = body?;
-    Ok(Json(gateway.receive(&body, socket.as_ref()).await?))
+    Ok(Json(gateway.receive(&body, source.as_ref()).await?))
 }
 
 async fn deposit(
     State(deposits): State<Arc<deposit::Gateway>>,
-    socket: Option<Socket>,
+    Admission(source): Admission,
     body: Result<Json<Deposit>, JsonRejection>,
 ) -> Answer<Depositing> {
     let Json(body) = body?;
-    Ok(Json(deposits.deposit(&body, socket.as_ref()).await?))
-}
-
-/// The deposits, and apart the Lightning receipts, asked and not paid over
-/// one [`Socket`] that the hub takes at most.
-pub const PER_SOCKET: u32 = 8;
-
-/// The connection a request came over: an onion service's circuit, or a
-/// TCP connection, by its peer's address and port. Asking for deposits or
-/// receipts past [`PER_SOCKET`] then costs another connection: over Tor,
-/// another circuit, which the onion service prices with a proof of work
-/// while it is under load. Behind a proxy, every client shares its few
-/// connections; served in process, a request comes over none.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Socket(Vec<u8>);
-
-impl Socket {
-    pub fn of_circuit(circuit: &licash_tor::Circuit) -> Self {
-        Self([b"onion ".as_slice(), &circuit.0].concat())
-    }
-
-    pub fn of_peer(peer: SocketAddr) -> Self {
-        Self(format!("tcp {peer}").into_bytes())
-    }
-
-    pub(crate) fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl<S: Send + Sync> OptionalFromRequestParts<S> for Socket {
-    type Rejection = Infallible;
-
-    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Option<Self>, Infallible> {
-        if let Some(circuit) = parts.extensions.get::<licash_tor::Circuit>() {
-            return Ok(Some(Self::of_circuit(circuit)));
-        }
-        Ok(parts
-            .extensions
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|ConnectInfo(peer)| Self::of_peer(*peer)))
-    }
+    Ok(Json(deposits.deposit(&body, source.as_ref()).await?))
 }
 
 async fn deposit_state(
@@ -757,43 +727,6 @@ async fn inbox_acks(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A request's socket: its onion circuit if any, else its TCP peer;
-    /// none in process.
-    #[tokio::test]
-    async fn a_request_knows_the_connection_it_came_over() {
-        let socket = |circuit: Option<[u8; 16]>, peer: Option<&str>| {
-            let mut request = axum::http::Request::builder();
-            if let Some(id) = circuit {
-                request = request.extension(licash_tor::Circuit(id));
-            }
-            if let Some(peer) = peer {
-                request = request.extension(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
-            }
-            let (mut parts, ()) = request.body(()).unwrap().into_parts();
-            async move {
-                <Socket as OptionalFromRequestParts<()>>::from_request_parts(&mut parts, &())
-                    .await
-                    .unwrap()
-            }
-        };
-        let (a, b) = ("127.0.0.1:1", "127.0.0.1:2");
-        assert_eq!(socket(None, None).await, None);
-        assert_eq!(
-            socket(None, Some(a)).await,
-            Some(Socket::of_peer(a.parse().unwrap()))
-        );
-        assert_ne!(socket(None, Some(a)).await, socket(None, Some(b)).await);
-        let circuit = licash_tor::Circuit([7; 16]);
-        assert_eq!(
-            socket(Some([7; 16]), Some(a)).await,
-            Some(Socket::of_circuit(&circuit))
-        );
-        assert_ne!(
-            socket(Some([7; 16]), None).await,
-            socket(Some([8; 16]), None).await
-        );
-    }
 
     #[test]
     fn a_claim_of_a_lock_waits_for_the_scan_of_its_block() {

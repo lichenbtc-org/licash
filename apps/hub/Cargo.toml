@@ -31,6 +31,7 @@ axum.workspace = true
 bitcoin = { version = "=0.32.102", default-features = false, features = ["std", "secp-recovery"] }
 clap.workspace = true
 hex = "0.4"
+ipnet = "2"
 lightning-invoice = { version = "0.34", features = ["std"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 rusqlite = { version = "0.40", features = ["bundled"] }

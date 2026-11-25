@@ -179,7 +179,7 @@ CREATE TABLE deposits (
     state TEXT NOT NULL CHECK (state IN ('open', 'locked', 'settled', 'canceled')),
     created_at INTEGER NOT NULL,
     done_at INTEGER,
-    -- The connection it was asked over (crate::Socket), if any.
+    -- Where it was asked from (crate::AdmissionSource), if known.
     source BLOB
 ) STRICT;
 CREATE INDEX live_deposits ON deposits (state) WHERE done_at IS NULL;
@@ -292,8 +292,8 @@ struct New<'a> {
     fund_by: u32,
     /// Whether it returns a contract's reserve.
     close: bool,
-    /// The connection it is asked over, if any.
-    source: Option<&'a crate::Socket>,
+    /// Where it is asked from, if known.
+    source: Option<&'a crate::AdmissionSource>,
 }
 
 /// Where a deposit that returns a contract's reserve stands.
@@ -323,39 +323,43 @@ enum Kept {
     RefundTaken,
     /// As many as the hub takes are asked and not paid.
     Full,
-    /// As many as the hub takes over one connection are asked over its
-    /// own and not paid.
-    SocketFull,
+    /// As many as the hub takes from one source are asked from its own
+    /// and not paid.
+    SourceFull,
 }
 
 /// The deposits asked and not paid, as many as `--deposit-max-open`
-/// bounds: over `source` alone, if any. Those bound to a contract are paid
+/// bounds: from `source` alone, if any, those an older release stored
+/// under its address and a port too. Those bound to a contract are paid
 /// for by it.
-fn unpaid(conn: &Connection, source: Option<&crate::Socket>) -> rusqlite::Result<u32> {
+fn unpaid(conn: &Connection, source: Option<&crate::AdmissionSource>) -> rusqlite::Result<u32> {
+    let [v4, v6] = source.map_or([None, None], crate::AdmissionSource::legacy_prefixes);
     conn.query_row(
         "SELECT count(*) FROM deposits d
          WHERE d.state = 'open' AND d.done_at IS NULL
-           AND (?1 IS NULL OR d.source = ?1)
+           AND (?1 IS NULL OR d.source = ?1
+                OR substr(d.source, 1, length(?2)) = ?2
+                OR substr(d.source, 1, length(?3)) = ?3)
            AND NOT EXISTS (SELECT 1 FROM deposit_closes c
                            WHERE c.hash = d.hash AND c.contract IS NOT NULL)",
-        [source.map(crate::Socket::as_bytes)],
+        params![source.map(crate::AdmissionSource::as_bytes), v4, v6],
         |r| r.get(0),
     )
 }
 
-/// Why a new deposit asked over `source` is refused, if as one too many:
-/// past `most` asked and not paid, or past [`crate::PER_SOCKET`] over
+/// Why a new deposit asked from `source` is refused, if as one too many:
+/// past `most` asked and not paid, or past [`crate::PER_SOURCE`] from
 /// `source`.
 fn full(
     conn: &Connection,
     most: u32,
-    source: Option<&crate::Socket>,
+    source: Option<&crate::AdmissionSource>,
 ) -> rusqlite::Result<Option<Kept>> {
     if unpaid(conn, None)? >= most {
         return Ok(Some(Kept::Full));
     }
-    if source.is_some() && unpaid(conn, source)? >= crate::PER_SOCKET {
-        return Ok(Some(Kept::SocketFull));
+    if source.is_some() && unpaid(conn, source)? >= crate::PER_SOURCE {
+        return Ok(Some(Kept::SourceFull));
     }
     Ok(None)
 }
@@ -517,7 +521,7 @@ impl Store {
                 fund_by,
                 htlc.script_pubkey().as_bytes(),
                 sql(now())?,
-                source.map(crate::Socket::as_bytes),
+                source.map(crate::AdmissionSource::as_bytes),
             ],
         )?;
         if close {
@@ -530,9 +534,13 @@ impl Store {
         Ok(Kept::Recorded)
     }
 
-    /// Whether a new deposit asked over `source` would be refused as one
+    /// Whether a new deposit asked from `source` would be refused as one
     /// too many: checked again as it is recorded.
-    fn full(&self, most: u32, source: Option<&crate::Socket>) -> rusqlite::Result<Option<Kept>> {
+    fn full(
+        &self,
+        most: u32,
+        source: Option<&crate::AdmissionSource>,
+    ) -> rusqlite::Result<Option<Kept>> {
         full(&self.conn(), most, source)
     }
 
@@ -830,9 +838,7 @@ fn store_gone() -> Failure {
 /// The refusal of a deposit `kept` as one too many.
 fn unkept(kept: Kept) -> Failure {
     let detail = match kept {
-        Kept::SocketFull => {
-            "too many deposits asked over this connection and not paid: retry later"
-        }
+        Kept::SourceFull => "too many deposits asked from this source and not paid: retry later",
         _ => "too many deposits asked and not paid: retry later",
     };
     Failure(Problem::new(Code::Unavailable, detail))
@@ -914,7 +920,7 @@ impl Gateway {
     pub async fn deposit(
         &self,
         body: &Deposit,
-        source: Option<&crate::Socket>,
+        source: Option<&crate::AdmissionSource>,
     ) -> Result<Depositing, Failure> {
         let outputs = body.receive.outputs()?;
         let (keyset, ephemeral, hash) = body.receive.terms()?;
@@ -1040,7 +1046,7 @@ impl Gateway {
                 Kept::RefundTaken => {
                     return Err(refused("another deposit under this refund key"));
                 }
-                kept @ (Kept::Full | Kept::SocketFull) => return Err(unkept(kept)),
+                kept @ (Kept::Full | Kept::SourceFull) => return Err(unkept(kept)),
             }
         }
         drop(turn);
