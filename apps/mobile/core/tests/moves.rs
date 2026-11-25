@@ -126,6 +126,7 @@ impl Hubs {
                 contracts: None,
                 swaps: None,
                 urls: Default::default(),
+                ingress: Default::default(),
             };
             let app = licash_hub_service::router(hub.clone(), services);
             let listener = runtime

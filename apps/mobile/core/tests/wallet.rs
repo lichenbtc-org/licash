@@ -181,6 +181,7 @@ impl Net {
             contracts: None,
             swaps: None,
             urls: Default::default(),
+            ingress: Default::default(),
         };
         let down = net.down.clone();
         let app = licash_hub_service::router(net.hub.clone(), services).layer(

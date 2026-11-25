@@ -441,6 +441,7 @@ impl Server {
                             contracts: None,
                             swaps: None,
                             urls: Default::default(),
+                            ingress: Default::default(),
                         },
                     ),
                 )
