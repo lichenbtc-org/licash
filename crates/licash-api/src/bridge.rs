@@ -26,6 +26,8 @@ pub const REVOKE: &str = "/v1/bridge/revoke";
 pub const TOP_UP: &str = "/v1/bridge/top-up";
 /// [`Withdraw`]: an invoice paid out of the account, [`Payment`].
 pub const WITHDRAW: &str = "/v1/bridge/withdraw";
+/// [`Username`]: the account named, [`Account`].
+pub const USERNAME: &str = "/v1/bridge/username";
 
 /// How far a [`Signed`] request's time may be from the bridge's, in
 /// seconds, either way.
@@ -315,6 +317,15 @@ pub struct Payment {
     pub preimage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+}
+
+/// Name the account's Lightning Address `username`, at a bridge serving
+/// them ([`Info::lightning_address`]), or none. Of `a-z`, `0-9`, `-`, `_`
+/// and `.`, at most 64.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Username {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
 }
 
 /// A refusal for an account's reasons: not registered, not its

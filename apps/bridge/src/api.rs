@@ -67,8 +67,10 @@ pub fn router<T: Transport + 'static>(bridge: Arc<Bridge<T>>) -> Router {
         .route(bridge::REVOKE, post(revoke::<T>))
         .route(bridge::TOP_UP, post(top_up::<T>))
         .route(bridge::WITHDRAW, post(withdraw::<T>))
+        .route(bridge::USERNAME, post(username::<T>))
         .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(shared)
+        .with_state(shared.clone())
+        .merge(crate::lnurl::router(shared.bridge.clone()))
 }
 
 impl<T> Shared<T> {
@@ -146,4 +148,12 @@ async fn withdraw<T: Transport>(
 ) -> Answer<bridge::Payment> {
     let (key, withdraw): (_, bridge::Withdraw) = s.open(bridge::WITHDRAW, body)?;
     json(s.bridge.withdraw(&key, &withdraw).await)
+}
+
+async fn username<T: Transport>(
+    State(s): State<Arc<Shared<T>>>,
+    body: Result<Json<Signed>, JsonRejection>,
+) -> Answer<bridge::Account> {
+    let (key, named): (_, bridge::Username) = s.open(bridge::USERNAME, body)?;
+    json(s.bridge.set_username(&key, named.username.as_deref()))
 }

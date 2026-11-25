@@ -754,3 +754,143 @@ async fn top_ups_count_against_the_daily_limit_whatever_the_bridge_answers() {
 fn wallet_top_up(wallet: &Wallet<Both>) -> Arc<std::sync::Mutex<Option<Vec<u8>>>> {
     wallet.transport().top_up.clone()
 }
+
+async fn get_json(app: &Router, path: &str) -> serde_json::Value {
+    let r = call(app, path, None).await;
+    assert_eq!(
+        r.status,
+        200,
+        "{path}: {}",
+        String::from_utf8_lossy(&r.body)
+    );
+    serde_json::from_slice(&r.body).unwrap()
+}
+
+/// `text` percent-encoded, as a query's value.
+fn encoded(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            b => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    use bitcoin::hashes::{sha256, Hash};
+    sha256::Hash::hash(bytes).to_string()
+}
+
+fn committed(invoice: &lightning_invoice::Bolt11Invoice) -> String {
+    match invoice.description() {
+        lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(h) => h.0.to_string(),
+        lightning_invoice::Bolt11InvoiceDescriptionRef::Direct(d) => panic!("says {d}"),
+    }
+}
+
+#[tokio::test]
+async fn a_lightning_address_is_paid_and_zapped() {
+    use nostr::prelude::{EventBuilder, FinalizeEvent, Keys, Kind, Tag};
+    let net = Net::with(Config {
+        public_url: Some("https://Pay.test/".into()),
+        ..Config::default()
+    })
+    .await;
+    let owner = net.owner(0).await;
+    let app = licash_bridge::router(net.bridge.clone());
+    assert_eq!(
+        get_json(&app, "/.well-known/lnurlp/alice").await["status"],
+        "ERROR"
+    );
+    assert!(net.bridge.set_username(&owner, Some("not ok!")).is_err());
+    let account = net.bridge.set_username(&owner, Some("Alice")).unwrap();
+    assert_eq!(account.lightning_address.as_deref(), Some("alice@pay.test"));
+
+    let pay = get_json(&app, "/.well-known/lnurlp/alice").await;
+    assert_eq!(pay["tag"], "payRequest");
+    assert_eq!(pay["callback"], "https://Pay.test/lnurlp/alice/callback");
+    // 1 sat of notes at least, the hub's 1 on top.
+    assert_eq!(
+        (pay["minSendable"].as_u64(), pay["allowsNostr"].as_bool()),
+        (Some(2_000), Some(true))
+    );
+    assert_eq!(pay["nostrPubkey"], net.bridge.keys().public_key().to_hex());
+    let metadata = pay["metadata"].as_str().unwrap();
+    assert!(metadata.contains("alice@pay.test"));
+
+    let refused = get_json(&app, "/lnurlp/alice/callback?amount=1000").await;
+    assert_eq!(refused["status"], "ERROR");
+    let paid = get_json(&app, "/lnurlp/alice/callback?amount=21000&comment=Thanks").await;
+    let invoice: lightning_invoice::Bolt11Invoice = paid["pr"].as_str().unwrap().parse().unwrap();
+    assert_eq!(invoice.amount_milli_satoshis(), Some(21_000));
+    assert_eq!(committed(&invoice), sha256(metadata.as_bytes()));
+    let hash = hex::encode(invoice.payment_hash().as_ref() as &[u8]);
+    let verify = paid["verify"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("https://Pay.test")
+        .unwrap()
+        .to_owned();
+    assert_eq!(get_json(&app, &verify).await["settled"], false);
+    net.pay_in(&hash).await;
+    assert_eq!(get_json(&app, &verify).await["settled"], true);
+    assert_eq!(balance(&net, &owner), 20_000);
+    let activity = &net.bridge.account(&owner).unwrap().activity[0];
+    assert_eq!(activity.description.as_deref(), Some("Thanks"));
+
+    // Zapped: the invoice commits to the zap request, whose receipt is
+    // published once paid, to the relays it names.
+    let (zapper, recipient) = (Keys::generate(), Keys::generate());
+    let request = EventBuilder::new(Kind::ZapRequest, "Great post")
+        .tags([
+            Tag::public_key(recipient.public_key()),
+            Tag::custom("relays", ["wss://zaps.test"]),
+            Tag::custom("amount", ["5000"]),
+        ])
+        .finalize(&zapper)
+        .unwrap();
+    let json = request.as_json();
+    let wrong = format!(
+        "/lnurlp/alice/callback?amount=6000&nostr={}",
+        encoded(&json)
+    );
+    assert_eq!(get_json(&app, &wrong).await["status"], "ERROR");
+    let zap = format!(
+        "/lnurlp/alice/callback?amount=5000&nostr={}",
+        encoded(&json)
+    );
+    let zapped = get_json(&app, &zap).await;
+    let pr = zapped["pr"].as_str().unwrap();
+    let invoice: lightning_invoice::Bolt11Invoice = pr.parse().unwrap();
+    assert_eq!(committed(&invoice), sha256(json.as_bytes()));
+    assert!(net.bridge.zap_receipts().unwrap().is_empty());
+    net.pay_in(&hex::encode(invoice.payment_hash().as_ref() as &[u8]))
+        .await;
+    let receipts = net.bridge.zap_receipts().unwrap();
+    assert_eq!(receipts.len(), 1);
+    let receipt = &receipts[0];
+    assert_eq!(receipt.event.kind, Kind::ZapReceipt);
+    assert_eq!(receipt.event.pubkey, net.bridge.keys().public_key());
+    assert!(receipt.event.verify().is_ok());
+    let tag = |kind: &str| {
+        receipt
+            .event
+            .tags
+            .iter()
+            .find(|t| t.as_slice()[0] == kind)
+            .map(|t| t.as_slice()[1].clone())
+    };
+    assert_eq!(tag("description").as_deref(), Some(json.as_str()));
+    assert_eq!(tag("bolt11").as_deref(), Some(pr));
+    assert_eq!(tag("p"), Some(recipient.public_key().to_hex()));
+    assert_eq!(tag("P"), Some(zapper.public_key().to_hex()));
+    assert_eq!(
+        receipt.relays[0].as_str().trim_end_matches('/'),
+        "wss://zaps.test"
+    );
+    net.bridge.zap_published(&receipt.hash).unwrap();
+    assert!(net.bridge.zap_receipts().unwrap().is_empty());
+    assert_eq!(balance(&net, &owner), 24_000);
+}

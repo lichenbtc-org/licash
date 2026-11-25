@@ -370,15 +370,28 @@ pub async fn run<T: Transport + 'static>(bridge: Arc<Bridge<T>>) -> anyhow::Resu
     client.subscribe(filter).await?;
     tracing::info!(nostr = %me.to_hex(), relays = relays.len(), "serving NWC");
     let answered = Arc::new(Mutex::new(Answered::default()));
+    let publishing = Arc::new(Mutex::new(HashSet::new()));
     let mut published = tokio::time::Instant::now();
-    while let Some(notification) = notifications.next().await {
-        // Some relays drop replaceable events in time: published again.
-        if published.elapsed() > Duration::from_secs(3600) {
-            published = tokio::time::Instant::now();
-            let client = client.clone();
-            let info = info.clone();
-            tokio::spawn(async move { client.send_event(&info).await });
-        }
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        let notification = tokio::select! {
+            notification = notifications.next() => match notification {
+                Some(notification) => notification,
+                None => break,
+            },
+            _ = tick.tick() => {
+                publish_zaps(&bridge, &publishing);
+                // Some relays drop replaceable events in time: published
+                // again.
+                if published.elapsed() > Duration::from_secs(3600) {
+                    published = tokio::time::Instant::now();
+                    let client = client.clone();
+                    let info = info.clone();
+                    tokio::spawn(async move { client.send_event(&info).await });
+                }
+                continue;
+            }
+        };
         let ClientNotification::Event { event, .. } = notification else {
             continue;
         };
@@ -402,4 +415,65 @@ pub async fn run<T: Transport + 'static>(bridge: Arc<Bridge<T>>) -> anyhow::Resu
         });
     }
     anyhow::bail!("the Nostr relays' notifications ended")
+}
+
+/// Publish the zap receipts due, each once at a time, alongside: given up
+/// on a day after its zap was paid.
+fn publish_zaps<T: Transport + 'static>(
+    bridge: &Arc<Bridge<T>>,
+    publishing: &Arc<Mutex<HashSet<[u8; 32]>>>,
+) {
+    let receipts = match bridge.zap_receipts() {
+        Ok(receipts) => receipts,
+        Err(e) => {
+            tracing::warn!("zap receipts: {e}");
+            return;
+        }
+    };
+    for zap in receipts {
+        let first = publishing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(zap.hash);
+        if !first {
+            continue;
+        }
+        let (bridge, publishing) = (bridge.clone(), publishing.clone());
+        tokio::spawn(async move {
+            let sent = publish(&zap).await;
+            let stale = licash_store::now() - zap.settled_at > 86_400;
+            if sent || stale {
+                if !sent {
+                    tracing::warn!(hash = %hex::encode(zap.hash), "a zap receipt given up on");
+                }
+                if let Err(e) = bridge.zap_published(&zap.hash) {
+                    tracing::warn!("a zap receipt published: {e}");
+                }
+            }
+            publishing
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&zap.hash);
+        });
+    }
+}
+
+/// Whether a relay of those `zap` names took it.
+async fn publish(zap: &crate::lnurl::ZapReceipt) -> bool {
+    let client = Client::builder().build();
+    for relay in &zap.relays {
+        if let Err(e) = client.add_relay(relay.as_str()).await {
+            tracing::debug!(%relay, "a zap receipt's relay: {e}");
+        }
+    }
+    client.connect().and_wait(Duration::from_secs(5)).await;
+    let sent = client.send_event(&zap.event).await;
+    client.disconnect().await;
+    match sent {
+        Ok(output) => !output.success.is_empty(),
+        Err(e) => {
+            tracing::debug!("publishing a zap receipt: {e}");
+            false
+        }
+    }
 }

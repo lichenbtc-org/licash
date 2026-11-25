@@ -84,8 +84,10 @@ CREATE TABLE bridge_invoices (
     credits INTEGER NOT NULL CHECK (credits >= 0),
     description TEXT,
     description_hash BLOB CHECK (length(description_hash) = 32),
-    -- The Nostr zap request it pays, as JSON, for its receipt.
+    -- The Nostr zap request it pays, as JSON, for its receipt, and when
+    -- the receipt was published, or given up on.
     zap TEXT,
+    zap_sent_at INTEGER,
     state TEXT NOT NULL CHECK (state IN ('pending', 'settled', 'expired')),
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
@@ -217,6 +219,35 @@ pub(crate) fn account_of(c: &Connection, key: &[u8; 32]) -> Result<Option<Accoun
         c.query_row(&format!("{ACCOUNT} WHERE key = ?1"), [key], account_row)
             .optional()?,
     )
+}
+
+/// The account of the Lightning Address `username`.
+pub(crate) fn account_named(c: &Connection, username: &str) -> Result<Option<Account>, Error> {
+    Ok(c.query_row(
+        &format!("{ACCOUNT} WHERE username = ?1"),
+        [username],
+        account_row,
+    )
+    .optional()?)
+}
+
+/// Name the Lightning Address of account `id` `username`, or none: refused
+/// if another account's.
+pub(crate) fn set_username(
+    tx: &Transaction<'_>,
+    id: i64,
+    username: Option<&str>,
+) -> Result<(), Error> {
+    if let Some(name) = username {
+        if account_named(tx, name)?.is_some_and(|a| a.id != id) {
+            return Err(Error::Invalid(format!("{name} is taken")));
+        }
+    }
+    tx.execute(
+        "UPDATE bridge_accounts SET username = ?2 WHERE id = ?1",
+        params![id, username],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn account(c: &Connection, id: i64) -> Result<Account, Error> {
@@ -592,6 +623,26 @@ pub(crate) fn receipts_of(c: &Connection, account: i64, limit: u32) -> Result<Ve
     ))?;
     let rows = stmt.query_map(params![account, limit], receipt_row)?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The invoices paid by a zap request whose receipt is not published yet.
+pub(crate) fn zaps_due(c: &Connection) -> Result<Vec<Receipt>, Error> {
+    let mut stmt = c.prepare(&format!(
+        "{RECEIPT} WHERE state = 'settled' AND zap IS NOT NULL AND zap_sent_at IS NULL
+         ORDER BY settled_at"
+    ))?;
+    let rows = stmt.query_map([], receipt_row)?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The receipt of the zap paying the invoice of `hash` published, or
+/// given up on.
+pub(crate) fn zap_sent(tx: &Transaction<'_>, hash: &[u8; 32]) -> Result<(), Error> {
+    tx.execute(
+        "UPDATE bridge_invoices SET zap_sent_at = ?2 WHERE hash = ?1",
+        params![hash, licash_store::now()],
+    )?;
+    Ok(())
 }
 
 /// What the invoices of account `id` still open would credit it.

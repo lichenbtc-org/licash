@@ -17,6 +17,7 @@
 //! may register one, within [`Config::max_balance`].
 
 mod api;
+pub mod lnurl;
 pub mod nwc;
 mod store;
 
@@ -129,8 +130,9 @@ pub struct Config {
     pub max_balance: Option<u64>,
     /// The most one payment may be, in msat.
     pub max_payment: Option<u64>,
-    /// The domain of its Lightning Addresses, if it serves them.
-    pub lightning_address: Option<String>,
+    /// Where it is reached publicly, `https://domain`, if it serves
+    /// Lightning Addresses there: at `name@domain`.
+    pub public_url: Option<String>,
 }
 
 /// What the bridge owes and holds, for its operator.
@@ -265,7 +267,7 @@ impl<T: Transport> Bridge<T> {
             max_balance: self.config.max_balance,
             max_payment: self.config.max_payment,
             receive_fee,
-            lightning_address: self.config.lightning_address.clone(),
+            lightning_address: self.lightning_domain(),
         })
     }
 
@@ -382,7 +384,7 @@ impl<T: Transport> Bridge<T> {
                 reserved: store::reserved(c, id)?,
                 connections,
                 activity,
-                lightning_address: match (&account.username, &self.config.lightning_address) {
+                lightning_address: match (&account.username, &self.lightning_domain()) {
                     (Some(name), Some(domain)) => Some(format!("{name}@{domain}")),
                     _ => None,
                 },
@@ -430,7 +432,7 @@ impl<T: Transport> Bridge<T> {
             store::insert_link(tx, &link)?;
             Ok(store::account(tx, account)?.username)
         })?;
-        let lud16 = match (lud16, &self.config.lightning_address) {
+        let lud16 = match (lud16, &self.lightning_domain()) {
             (Some(name), Some(domain)) if link.receive => Some(format!("{name}@{domain}")),
             _ => None,
         };

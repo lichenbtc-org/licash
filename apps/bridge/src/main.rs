@@ -67,6 +67,10 @@ enum Command {
         /// The most one payment may be, in sat.
         #[arg(long)]
         max_payment: Option<u64>,
+        /// Where the bridge is reached publicly, https://domain: it serves
+        /// its accounts' Lightning Addresses, name@domain, and zaps there.
+        #[arg(long, env = "LICASH_BRIDGE_PUBLIC_URL")]
+        public_url: Option<String>,
         /// Seconds between rounds following payments and invoices.
         #[arg(long, default_value_t = 5)]
         interval: u64,
@@ -144,6 +148,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             name,
             max_balance,
             max_payment,
+            public_url,
             interval,
         } => {
             let wallet =
@@ -159,7 +164,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 relays,
                 max_balance: max_balance.map(|sat| sat.saturating_mul(1000)),
                 max_payment: max_payment.map(|sat| sat.saturating_mul(1000)),
-                lightning_address: None,
+                public_url,
             };
             let bridge = Arc::new(Bridge::open(wallet, config)?);
             runtime.block_on(serve(bridge, listen, Duration::from_secs(interval.max(1))))
