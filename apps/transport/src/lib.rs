@@ -331,6 +331,23 @@ impl Transport for Http {
     }
 }
 
+/// What went wrong of a request, with why, which reqwest tells apart: a
+/// timeout, a connection refused or reset ("error sending request" alone
+/// says none of it). Without its URL, which the caller names.
+fn failed(e: reqwest::Error) -> String {
+    let e = e.without_url();
+    let mut said = e.to_string();
+    let mut source = std::error::Error::source(&e);
+    while let Some(why) = source {
+        let told = why.to_string();
+        if !said.contains(&told) {
+            said = format!("{said}: {told}");
+        }
+        source = why.source();
+    }
+    said
+}
+
 impl Http {
     /// `body` POSTed to `url`, or a GET: an answer of at most `max` bytes,
     /// in `timeout` if given rather than the client's own. Over Tor on
@@ -392,17 +409,10 @@ impl Http {
             request = request.timeout(timeout);
         }
         let direct = async move {
-            let mut response = request
-                .send()
-                .await
-                .map_err(|e| e.without_url().to_string())?;
+            let mut response = request.send().await.map_err(failed)?;
             let status = response.status().as_u16();
             let mut body = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|e| e.without_url().to_string())?
-            {
+            while let Some(chunk) = response.chunk().await.map_err(failed)? {
                 if body.len() + chunk.len() > max {
                     return Err(format!("an answer over {max} bytes"));
                 }
