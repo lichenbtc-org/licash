@@ -579,6 +579,127 @@ async fn an_assertion_a_reorganization_puts_below_her_scan_is_found() {
     assert_eq!(w.state().assertion_height, Some(asserted_at));
 }
 
+/// Her claim answered `amount` and proven, P confirmed with her fee coin
+/// worth `fee`: the hub's `success` (no fee coin of hers) mined instead
+/// of hers, then advanced until her sweep is posted, if any. What she
+/// was at last, and the sweep.
+async fn the_hub_pays_success(amount: u32, fee: u64) -> (World, Recovery, Option<Transaction>) {
+    let w = World::new();
+    let o = w.holder.signed().unwrap();
+    let ho = w.hub.signed().unwrap();
+    let response = ho.respond(w.hub.keys(), amount).unwrap();
+    let contest = o.contest(&w.keys).unwrap();
+    let proof = lichen_babe::statement::mock_prove(&licash_contract::graph::journal(&o.base));
+    let assertion = ho.assert(w.hub.keys(), &proof).unwrap();
+    let mut p = w.p();
+    p.output[1].value = Amount::from_sat(fee);
+    w.chain.mine(Some(response.clone()));
+    w.chain.mine(Some(contest.clone()));
+    w.start(
+        Stage::Contested,
+        &State {
+            amount: 4096,
+            reduced: Some(amount),
+            r: Some(w.r()),
+            r_height: Some(0),
+            response: Some(response),
+            response_height: Some(1),
+            contest: Some(contest),
+            contest_height: Some(2),
+            p: Some(p),
+            p_height: Some(0),
+            from: Some(2),
+            ..State::default()
+        },
+    );
+    let asserted_at = w.chain.mine(Some(assertion));
+    assert_eq!(w.advance().await[0].stage, Stage::Asserted);
+    let delay = blocks(presign(&o.set, "success").unwrap().tx.input[0].sequence).unwrap();
+    w.chain.to(asserted_at + delay - 1);
+    assert_eq!(w.advance().await[0].stage, Stage::Succeeding);
+    // The hub's, its own fee coin paying it: none of hers spent.
+    let hubs = o.finish("success", vec![]).unwrap();
+    let paid_at = w.chain.mine(Some(hubs.clone()));
+    let mut progressed = w.advance().await.remove(0);
+    if progressed.stage != Stage::Sweeping && !progressed.stage.over() {
+        w.chain
+            .to(progressed.next_at.unwrap_or(paid_at + 6).saturating_sub(1));
+        progressed = w.advance().await.remove(0);
+    }
+    assert_eq!(w.state().payout, Some(hubs));
+    let sweep = (progressed.stage == Stage::Sweeping).then(|| w.chain.last());
+    (w, progressed, sweep)
+}
+
+/// The hub's terminal paying her, not hers: the fee coin P left her for
+/// it is swept with her payout, not left on an address her wallet never
+/// looks at (1,338 sat of a Mutinynet claim were).
+#[tokio::test]
+async fn the_fee_coin_left_by_the_hubs_terminal_is_swept_with_her_payout() {
+    let (w, progressed, sweep) = the_hub_pays_success(4096, 4096).await;
+    assert_eq!(progressed.stage, Stage::Sweeping, "{progressed:?}");
+    let sweep = sweep.unwrap();
+    let p = w.state().p.unwrap();
+    let fee_coin = OutPoint {
+        txid: p.compute_txid(),
+        vout: 1,
+    };
+    assert_eq!(sweep.input.last().unwrap().previous_output, fee_coin);
+    assert!(sweep.output[0].value.to_sat() > 4096, "{sweep:?}");
+    let received = sweep.output[0].value.to_sat();
+    w.chain.mine(Some(sweep));
+    let done = w.advance().await.remove(0);
+    assert_eq!(done.stage, Stage::Done, "{done:?}");
+    assert_eq!(done.received, Some(received));
+}
+
+/// Owed nothing, the hub's terminal pays her nothing: her fee coin is
+/// swept alone, and the sweep followed as any.
+#[tokio::test]
+async fn her_fee_coin_alone_is_swept_when_the_hubs_terminal_pays_her_nothing() {
+    let (w, progressed, sweep) = the_hub_pays_success(0, 4096).await;
+    assert_eq!(progressed.stage, Stage::Sweeping, "{progressed:?}");
+    let sweep = sweep.unwrap();
+    assert_eq!(sweep.input.len(), 1);
+    assert_eq!(
+        sweep.input[0].previous_output.txid,
+        w.state().p.unwrap().compute_txid()
+    );
+    let received = sweep.output[0].value.to_sat();
+    assert!(received < 4096 && received > 3_000, "{received}");
+    // The payout's block replaced, the payout in a later one: the same
+    // sweep posted again, as a block may hold it.
+    w.edit(|s| s.sweep = Some(marked(&sweep)));
+    let payout = w.state().payout.unwrap();
+    let paid_at = w.state().payout_height.unwrap();
+    let tip = w.tip();
+    w.chain.reorg(paid_at - 1);
+    w.chain.mine(None);
+    w.chain.mine(Some(payout));
+    w.chain.to(tip);
+    let mut progressed = w.advance().await.remove(0);
+    if progressed.stage != Stage::Sweeping {
+        w.chain.to(progressed.next_at.unwrap() - 1);
+        progressed = w.advance().await.remove(0);
+    }
+    assert_eq!(progressed.stage, Stage::Sweeping, "{progressed:?}");
+    assert_eq!(w.state().sweep, Some(marked(&sweep)));
+    w.chain.mine(Some(sweep));
+    let done = w.advance().await.remove(0);
+    assert_eq!(done.stage, Stage::Done, "{done:?}");
+    assert_eq!(done.received, Some(received));
+}
+
+/// A fee coin worth more than its input's fee but too little to sweep
+/// alone: nothing posted, done as before, not stuck trying.
+#[tokio::test]
+async fn a_fee_coin_too_small_to_sweep_alone_is_left_and_the_recovery_done() {
+    let (_w, progressed, sweep) = the_hub_pays_success(0, 400).await;
+    assert_eq!(progressed.stage, Stage::Done, "{progressed:?}");
+    assert_eq!(sweep, None);
+    assert_eq!(progressed.received, Some(0));
+}
+
 fn observed_challenge(store: &Store, id: &[u8; 32]) -> Transaction {
     State::decode(&store.recovery(id).unwrap().unwrap())
         .unwrap()

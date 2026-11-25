@@ -3018,22 +3018,40 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
             payout.amount,
             Role::User,
         )?;
-        let left = left_in_request(state, self.rate)?;
-        if owned.is_empty() && left.is_empty() {
+        let left = left_over(state, self.rate)?;
+        let to = self.wallet.fallback_address()?.script_pubkey();
+        let key = &self.keys.party.payment;
+        let sweep = |left: &[(OutPoint, TxOut)]| {
+            let payout = Payout { ..payout };
+            dispute::sweep_with(
+                &self.o.babe,
+                key,
+                payout,
+                Role::User,
+                to.clone(),
+                self.rate,
+                left,
+            )
+        };
+        let sweep = match owned.is_empty() && left.is_empty() {
+            true => None,
+            false => match sweep(&left) {
+                Ok(sweep) => Some(sweep),
+                // What is left her is worth less than its fee: the payout's
+                // swept alone, if hers is any.
+                Err(e) if !left.is_empty() => {
+                    tracing::debug!(id = %crate::hex_id(&self.id), "left over not swept: {e:#}");
+                    (!owned.is_empty()).then(|| sweep(&[])).transpose()?
+                }
+                Err(e) => return Err(e),
+            },
+        };
+        let Some(sweep) = sweep else {
             // Nothing of the payout is hers (a corrected zero): done.
             state.swept_height = Some(height);
             state.next_at = None;
             return Ok(Next::To(Stage::Done));
-        }
-        let sweep = dispute::sweep_with(
-            &self.o.babe,
-            &self.keys.party.payment,
-            payout,
-            Role::User,
-            self.wallet.fallback_address()?.script_pubkey(),
-            self.rate,
-            &left,
-        )?;
+        };
         let delay = sweep
             .input
             .iter()
@@ -3047,10 +3065,13 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
         if tip.saturating_add(1) < due {
             return Ok(Next::Save);
         }
-        // One made before of the same payout, its block since replaced:
-        // the same again, as a block may hold it.
-        let made = (state.sweep.take())
-            .filter(|old| (old.input.iter()).any(|i| i.previous_output.txid == paid));
+        // One made before of the same payout, or of what is left her alone,
+        // its block since replaced: the same again, as a block may hold it.
+        let leftover = |op: &OutPoint| left.iter().any(|(o, _)| o == op);
+        let made = (state.sweep.take()).filter(|old| {
+            (old.input.iter()).any(|i| i.previous_output.txid == paid)
+                || (old.input.first()).is_some_and(|i| leftover(&i.previous_output))
+        });
         state.sweep = Some(made.unwrap_or(sweep));
         state.from = Some(height);
         state.next_at = None;
@@ -3060,10 +3081,12 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
         let sweep = state.sweep.as_ref().context("no pinned sweep")?;
         let payout = state.payout.as_ref().context("no payout")?;
         let coin = sweep.input.first().context("empty sweep")?.previous_output;
-        // A payout's output, or her request's left to her (its purse).
+        // A payout's output, or her request's left to her (its purse), or
+        // P's fee coin.
         let r = state.r.as_ref().context("no R")?;
-        let from_tx = [payout, r]
+        let from_tx = [Some(payout), Some(r), state.p.as_ref()]
             .into_iter()
+            .flatten()
             .find(|tx| tx.compute_txid() == coin.txid)
             .context("unknown sweep input")?;
         let script = &from_tx
@@ -3264,29 +3287,41 @@ fn blocks(sequence: Sequence) -> Result<u32> {
         Some(other) => bail!("a relative lock of {other}, not in blocks"),
     }
 }
-/// Her request's anchor and purse, if her claim's slot was reclaimed, P
-/// never published to spend them, and her payout spent neither as its
-/// fee coin: hers alone, swept with her payout. Each worth more than its
-/// input's fee at `rate`.
-fn left_in_request(state: &State, rate: FeeRate) -> Result<Vec<(OutPoint, TxOut)>> {
-    if !state.reclaimed {
-        return Ok(Vec::new());
-    }
-    let r = state.r.as_ref().context("no R")?;
+/// What is left hers alone once her payout confirmed, swept with it, each
+/// worth more than its input's fee at `rate`: her request's anchor and
+/// purse, if her claim's slot was reclaimed, P never published to spend
+/// them, or else P's fee coin, unless her payout spent it (hers, as its
+/// fee coin). Only her terminals spend P's, each spending the dispute's
+/// coin the confirmed payout spent: once the hub's terminal pays her, it
+/// was left hers, up to half her reserve on Mutinynet. Her links'
+/// anchors are not: a fee child of hers no longer kept may still
+/// confirm.
+fn left_over(state: &State, rate: FeeRate) -> Result<Vec<(OutPoint, TxOut)>> {
     let payout = state.payout.as_ref().context("no payout")?;
     let spent: Vec<OutPoint> = payout.input.iter().map(|i| i.previous_output).collect();
-    Ok([1, PURSE_VOUT]
+    let coins: Vec<(OutPoint, TxOut)> = match state.reclaimed {
+        true => {
+            let r = state.r.as_ref().context("no R")?;
+            ([1, PURSE_VOUT].into_iter())
+                .filter_map(|vout| {
+                    let op = OutPoint {
+                        txid: r.compute_txid(),
+                        vout,
+                    };
+                    Some((op, r.output.get(vout as usize)?.clone()))
+                })
+                .collect()
+        }
+        false if state.p_height.is_some() => vec![fee_coin(state)?],
+        false => Vec::new(),
+    };
+    Ok(coins
         .into_iter()
-        .filter_map(|vout| {
-            let op = OutPoint {
-                txid: r.compute_txid(),
-                vout,
-            };
-            let out = r.output.get(vout as usize)?;
+        .filter(|(op, out)| {
             // Its fee leaf spent: a signature, the script and a control
             // block, about 75 vB.
             let worth = rate.fee_vb(75).is_some_and(|fee| out.value > fee);
-            (worth && !spent.contains(&op)).then(|| (op, out.clone()))
+            worth && !spent.contains(op)
         })
         .collect())
 }

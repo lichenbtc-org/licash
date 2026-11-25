@@ -459,7 +459,10 @@ shows, or the wallet's timeout pays the whole claim. `recoveries` shows
 what the hub said was owed and, once `done`, what the wallet received
 (`corrected` and `received` with `--json`): its sweep's output, after
 the sweep's fee, besides the wallet's reserve, which is paid to it
-directly. The wallet proves nothing: it checks the hub's proof once
+directly. Should the hub post the payout, the fee coin the publication
+kept for the wallet's own (up to half its reserve) is swept with it; the
+330 sat anchors of the wallet's contest or challenge stay unspent, a
+cost of contesting. The wallet proves nothing: it checks the hub's proof once
 asserted (`asserted`), challenges one that does not verify (`challenging`,
 `challenged`), and carries the payout on to `done` (`succeeding`, `paid`,
 `sweeping`), collecting what the outcome pays it and its reserve. From the
