@@ -4729,6 +4729,216 @@ async fn a_hub_funds_again_a_fee_coin_its_wallet_spent_otherwise_and_pays_what_i
     Ok(())
 }
 
+/// The fee coins `rt`'s `harness` wallet (the hub's) funded, by the tag
+/// each was funded under, with the txid of its funding: in the order sent.
+async fn fee_tags(rt: &Regtest) -> Result<Vec<(String, String)>> {
+    use serde_json::{json, Value};
+    let wallet = rpc_of(rt, Some("harness"))?;
+    let listed: Vec<Value> = wallet
+        .rpc("listtransactions", json!(["*", 1000, 0, true]))
+        .await?;
+    let mut tags: Vec<(String, String)> = Vec::new();
+    for t in listed {
+        let (Some(tag), Some(txid)) = (t["comment"].as_str(), t["txid"].as_str()) else {
+            continue;
+        };
+        if tag.starts_with("licash fee coin ") && !tags.iter().any(|(_, id)| id == txid) {
+            tags.push((tag.to_owned(), txid.to_owned()));
+        }
+    }
+    Ok(tags)
+}
+
+/// The hub of `s` as it starts again on its data: its openings opened
+/// anew, nothing of them kept in memory.
+async fn restarted(s: &Stale) -> Result<Arc<Openings>> {
+    let url = format!(
+        "{}/wallet/harness?cookie={}",
+        s.rt.rpc_url(),
+        s.rt.cookie().display()
+    );
+    let source: Source = url.parse()?;
+    let keyset = s.hub.info().keysets[0].clone();
+    let dir = s._dir.path().join("hub");
+    let openings =
+        Openings::with_wallet(&dir, source.clone(), source, keyset, Some(STALE_RANGE)).await?;
+    witnessed(&openings, &s.hub).await?;
+    licash_hub_service::answer_from(&openings, s.hub.clone());
+    Ok(openings)
+}
+
+/// Her stale claim; the hub's wallet funds its response's fee coin and
+/// the hub stops before keeping it. Started again, it finds that coin by
+/// the tag it was funded under and pays with it: no fee coin is funded
+/// twice, and she is paid what is left.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_hub_stopped_between_funding_a_fee_coin_and_keeping_it_funds_no_other() -> Result<()> {
+    use bitcoin::OutPoint;
+    use licash_contracts::holder::recovery::{self, Stage};
+
+    let s = stale_claim([26; 32]).await?;
+    let db = s.mine.join("wallet.sqlite");
+    let advance = || recovery::advance(&s.wallet, &s.chain, &db, s.rate);
+    s.openings.lose_next_fee_coin();
+    // Until the first coin is funded, and lost.
+    let mut lost = None;
+    for _ in 0..200 {
+        s.openings.answer_requests().await?;
+        let r = advance().await?[0].clone();
+        ensure!(!matches!(r.stage, Stage::Lost | Stage::Done), "{r:?}");
+        if let Some(first) = fee_tags(&s.rt).await?.first() {
+            lost = Some(first.clone());
+            break;
+        }
+        s.rt.mine(1)?;
+    }
+    let (tag, txid) = lost.context("no fee coin funded")?;
+    ensure!(tag.ends_with(" 0"), "{tag}");
+    let openings = restarted(&s).await?;
+    let alerts = told(&openings);
+    let mut spent = false;
+    for _ in 0..200 {
+        let round = openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        let r = advance().await?[0].clone();
+        ensure!(!matches!(r.stage, Stage::Lost | Stage::Done), "{r:?}");
+        let funding = s.rt.get_tx(&txid.parse()?)?;
+        let coin = (0..funding.output.len() as u32)
+            .map(|vout| OutPoint::new(funding.compute_txid(), vout))
+            .find(|c| {
+                spending_in_mempool(&s.rt, *c)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|tx| tx.input.len() > 1)
+            });
+        if coin.is_some() {
+            spent = true;
+            break;
+        }
+        s.rt.mine(1)?;
+    }
+    ensure!(spent, "the coin funded and lost never paid a fee");
+    let tags = fee_tags(&s.rt).await?;
+    for (i, (a, _)) in tags.iter().enumerate() {
+        ensure!(
+            tags[i + 1..].iter().all(|(b, _)| b != a),
+            "funded twice under {a}: {tags:?}"
+        );
+    }
+    let mut done = None;
+    for _ in 0..800 {
+        s.rt.mine(1)?;
+        let round = openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        let r = advance().await?[0].clone();
+        ensure!(r.stage != Stage::Lost, "{r:?}");
+        if r.stage == Stage::Done {
+            done = Some(r);
+            break;
+        }
+    }
+    let done = done.context("never paid")?;
+    ensure!(done.corrected == Some(98_304), "{done:?}");
+    ensure!(done.payout.is_some() && done.timeout.is_none(), "{done:?}");
+    let alerted = alerts.lock().unwrap().clone();
+    ensure!(
+        alerted.iter().all(|a| !a.contains("is gone, in no block")),
+        "{alerted:?}"
+    );
+    Ok(())
+}
+
+/// Her stale claim, the hub's response and its fee child in the mempool.
+/// Its wallet then forgets the funding of the child's coin (as one
+/// restored older than `hub.sqlite`) and spends its inputs otherwise: the
+/// coin in no block or mempool, and nothing proves it gone. The hub funds
+/// no other for it, waiting as its operator is told, rather than fund one
+/// for a coin that may yet confirm.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_hub_funds_no_other_fee_coin_for_one_its_wallet_forgot() -> Result<()> {
+    use bitcoin::OutPoint;
+    use licash_contracts::holder::recovery::{self, Stage};
+    use serde_json::json;
+
+    let s = stale_claim([27; 32]).await?;
+    let alerts = told(&s.openings);
+    let db = s.mine.join("wallet.sqlite");
+    let advance = || recovery::advance(&s.wallet, &s.chain, &db, s.rate);
+    let mut child = None;
+    for _ in 0..200 {
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        let r = advance().await?[0].clone();
+        ensure!(!matches!(r.stage, Stage::Lost | Stage::Done), "{r:?}");
+        if let Some(request) = r.request {
+            if let Some(x) = spending_in_mempool(&s.rt, OutPoint::new(request, 0))? {
+                let xid = x.compute_txid();
+                // Its child: of an output not the disclose slot (2).
+                let found = (0..x.output.len() as u32)
+                    .filter(|v| *v != 2)
+                    .filter_map(|v| spending_in_mempool(&s.rt, OutPoint::new(xid, v)).transpose())
+                    .find(|c| c.as_ref().is_ok_and(|c| c.input.len() > 1));
+                if let Some(found) = found {
+                    child = Some((xid, found?));
+                    break;
+                }
+            }
+        }
+        s.rt.mine(1)?;
+    }
+    let (xid, child) = child.context("the response went without a fee child")?;
+    let coin = (child.input.iter().map(|i| i.previous_output))
+        .find(|c| c.txid != xid)
+        .context("a child of no fee coin")?;
+    let tags = fee_tags(&s.rt).await?;
+    let (tag, _) = (tags.iter())
+        .find(|(_, txid)| *txid == coin.txid.to_string())
+        .context("the coin funded under no tag")?
+        .clone();
+    let wallet = rpc_of(&s.rt, Some("harness"))?;
+    let _: Option<serde_json::Value> = wallet
+        .rpc_optional("removeprunedfunds", json!([coin.txid.to_string()]))
+        .await?;
+    replace_funding(&s.rt, coin).await?;
+    ensure!(tag.contains(" respond "), "{tag}");
+    // The response's fee coins as kept: none added for the one forgotten.
+    let hub_db = rusqlite::Connection::open(s._dir.path().join("hub").join("hub.sqlite"))?;
+    let kept = || -> Result<Vec<Vec<u8>>> {
+        let mut stmt = hub_db.prepare(
+            "SELECT outpoint FROM opening_fee_coins WHERE name LIKE 'respond/%' ORDER BY rowid",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    };
+    let before = kept()?;
+    ensure!(
+        before == vec![bitcoin::consensus::serialize(&coin)],
+        "{before:?}"
+    );
+    for _ in 0..3 {
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        ensure!(
+            kept()? == before,
+            "funded again for a coin not proven gone: {:?}",
+            alerts.lock().unwrap()
+        );
+        s.rt.mine(1)?;
+    }
+    let alerted = alerts.lock().unwrap().clone();
+    ensure!(
+        alerted.iter().any(|a| a.contains("is not told")),
+        "{alerted:?}"
+    );
+    ensure!(
+        alerted.iter().all(|a| !a.contains("is gone, in no block")),
+        "{alerted:?}"
+    );
+    Ok(())
+}
+
 /// Her stale claim, the hub's disclosure in the mempool paying too little
 /// for any block (prioritized below nothing, as a fee market that rose
 /// would leave it). The hub, its response in a block, posts it again with

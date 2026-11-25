@@ -130,6 +130,10 @@ pub(super) struct Watch {
     /// ([`Openings::fund_no_fee_coins`]).
     #[cfg(feature = "faults")]
     no_coins: std::sync::atomic::AtomicBool,
+    /// The next fee coin the hub's wallet funds is lost before it is kept,
+    /// as by a crash between the two ([`Openings::lose_next_fee_coin`]).
+    #[cfg(feature = "faults")]
+    lose_coin: std::sync::atomic::AtomicBool,
 }
 
 /// A fold offered a holder: the hub's secret nonce, its holder's public
@@ -659,6 +663,16 @@ impl Openings {
             .store(none, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// The next fee coin funded is lost before it is kept, as by a crash
+    /// between its funding and its keeping: for tests that the hub finds
+    /// it again rather than funding another.
+    #[cfg(feature = "faults")]
+    pub fn lose_next_fee_coin(&self) {
+        self.watch
+            .lose_coin
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Assert proofs of another statement from now on, as a dishonest hub
     /// would: for tests of the holder's challenge.
     #[cfg(feature = "faults")]
@@ -676,7 +690,7 @@ impl Openings {
         }
         let prevout = presign(&o.set, "default")?.prevout.clone();
         let tx = self
-            .with_fee(id, hub, "default", o.default_close()?, prevout)
+            .with_fee(id, hub, "default", o.default_close()?, prevout, None)
             .await?;
         if self.post(&tx).await && self.once(id, "default") {
             return Ok(Played::Posted("default"));
@@ -785,7 +799,7 @@ impl Openings {
                 let prevout = r.output[slot.vout as usize].clone();
                 let tx = o.reclaim(hub.keys())?;
                 let tx = self
-                    .with_fee(id, hub, "reclaim", tx, prevout.clone())
+                    .with_fee(id, hub, "reclaim", tx, prevout.clone(), None)
                     .await?;
                 let tx = self.sealed(id, hub, o, "reclaim", tx, prevout)?;
                 if self.post(&tx).await {
@@ -1836,7 +1850,7 @@ impl Openings {
         }
         let prevout = terminal.prevout.clone();
         let tx = o.finish(name, vec![])?;
-        let tx = self.with_fee(id, hub, name, tx, prevout).await?;
+        let tx = self.with_fee(id, hub, name, tx, prevout, None).await?;
         if self.post(&tx).await && self.once(id, name) {
             return Ok(Played::Posted(name));
         }
@@ -1901,7 +1915,9 @@ impl Openings {
     /// The one-input `tx` named `name`, spending `prevout`, with an exact
     /// fee coin of the hub's wallet appended: made once, kept in
     /// the hub's database before it is used, and made again only once
-    /// that one is gone ([`Self::gone`]).
+    /// that one is gone ([`Self::gone`]), `by` its deadline and the tip if
+    /// it has one. Then one gone before it, its funding in a block or the
+    /// mempool after all, is taken in its place before another is funded.
     async fn with_fee(
         &self,
         id: &[u8; 32],
@@ -1909,13 +1925,23 @@ impl Openings {
         name: &str,
         tx: Transaction,
         prevout: TxOut,
+        by: Option<(u32, u32)>,
     ) -> Result<Transaction> {
         let key = &hub.keys().party.payment;
         let script = dispute::fee_script(key)?;
         let cached = self.store().fee_coin(id, name)?;
         let coin = match cached {
-            Some(c) if !self.gone(id, name, c.0).await => c,
-            cached => {
+            Some(c) if !self.gone(id, name, c.0, by).await => c,
+            cached => 'coin: {
+                if let Some(gone) = &cached {
+                    if let Some(back) = self.standing_extra(id, name, gone).await {
+                        tracing::warn!(
+                            id = %crate::hex_id(id), gone = %gone.0, back = %back.0,
+                            "{name}'s fee coin taken back in place of one gone"
+                        );
+                        break 'coin self.store().replace_fee_coin(id, name, gone, &back)?;
+                    }
+                }
                 let dummy = TxOut {
                     value: Amount::from_sat(330),
                     script_pubkey: script.clone(),
@@ -1928,7 +1954,7 @@ impl Openings {
                     .fee_vb(size * 2)
                     .context("fee overflow")?
                     .max(Amount::from_sat(330));
-                let funded = self.fund_coin(id, &script, value).await;
+                let funded = self.fund_coin(id, name, &script, value).await;
                 // Kept at once: a restart pays with this one, not another.
                 match (cached, funded) {
                     (None, funded) => self.store().keep_fee_coin(id, name, &funded?)?,
@@ -1946,6 +1972,24 @@ impl Openings {
             }
         };
         dispute::add_fee(tx, prevout, coin, key)
+    }
+
+    /// A fee coin of `name` kept beside `gone`, its first, that stands: in
+    /// a block or the mempool, and spent by neither. One gone before it
+    /// whose funding confirmed after all, as a replaced one may.
+    async fn standing_extra(
+        &self,
+        id: &[u8; 32],
+        name: &str,
+        gone: &(OutPoint, TxOut),
+    ) -> Option<(OutPoint, TxOut)> {
+        let extra = self.store().extra_coins(id, name).ok()?;
+        for coin in extra.into_iter().rev() {
+            if coin.0 != gone.0 && self.unspent(coin.0, true).await.unwrap_or(false) {
+                return Some(coin);
+            }
+        }
+        None
     }
 
     /// `tx` named `name`, its slot's input spending `prevout`, its fee coin
@@ -1993,8 +2037,9 @@ impl Openings {
         (deadline, stake): (u32, Amount),
         tip: u32,
     ) -> Result<Transaction> {
+        let by = Some((deadline, tip));
         let first = self
-            .with_fee(id, hub, name, tx.clone(), prevout.clone())
+            .with_fee(id, hub, name, tx.clone(), prevout.clone(), by)
             .await?;
         let first_coin = self.store().fee_coin(id, name)?.context("no fee coin")?;
         let mut extra = Vec::new();
@@ -2003,8 +2048,8 @@ impl Openings {
             // In a block and unspent, else in the mempool, unspent. Not
             // told which: as one in the mempool, neither spent yet nor
             // funded again.
-            let waits = |e| {
-                unknown_coin(id, name, &e);
+            let waits = |e: anyhow::Error| {
+                self.unknown_coin(id, name, &format!("{e:#}"), by);
                 Some(false)
             };
             let state = match self.unspent(c.0, false).await {
@@ -2017,7 +2062,7 @@ impl Openings {
             };
             // Neither: spent, or gone, its funding then abandoned.
             if state.is_none() {
-                self.gone(id, name, c.0).await;
+                self.gone(id, name, c.0, by).await;
             }
             extra.push((c, state));
         }
@@ -2038,7 +2083,7 @@ impl Openings {
             // has, which is better than not posted.
             let funded = async {
                 let more = self
-                    .fund_coin(id, &dispute::fee_script(key)?, value)
+                    .fund_coin(id, name, &dispute::fee_script(key)?, value)
                     .await?;
                 self.store().keep_extra_coin(id, name, &more)
             };
@@ -2062,13 +2107,36 @@ impl Openings {
     /// coins, locked, not loaded) is told its operator, once a contract:
     /// its links are posted at their presigned fee and no more, and its
     /// terminals, which pay no fee of their own, are not posted at all.
+    ///
+    /// Each is funded under a tag of its own, the contract's, `name`'s and
+    /// how many coins of `name` are kept, the wallet's comment of its
+    /// funding: one funded and not kept (the hub stopped between the two,
+    /// or its wallet's answer lost) is found again by it, not funded twice.
     async fn fund_coin(
         &self,
         id: &[u8; 32],
+        name: &str,
         script: &ScriptBuf,
         value: Amount,
     ) -> Result<(OutPoint, TxOut)> {
-        let funded = self.funded_coin(script, value).await;
+        let tag = format!(
+            "licash fee coin {} {name} {}",
+            crate::hex_id(id),
+            self.store().fee_coins_kept(id, name)?
+        );
+        let funded = match self.tagged_coin(&tag, script).await {
+            Ok(Some(coin)) => {
+                tracing::warn!(id = %crate::hex_id(id), coin = %coin.0, "{name}'s fee coin funded before and not kept: taken");
+                Ok(coin)
+            }
+            Ok(None) => self.funded_coin(script, value, &tag).await,
+            // Not told: funded, as a coin too many costs less than a
+            // transaction not posted in time.
+            Err(e) => {
+                tracing::warn!(id = %crate::hex_id(id), "{name}'s fee coins funded before not listed: {e:#}");
+                self.funded_coin(script, value, &tag).await
+            }
+        };
         if let Err(e) = &funded {
             if self.once(id, "unfunded") {
                 self.alert(&format!(
@@ -2083,7 +2151,33 @@ impl Openings {
         funded
     }
 
-    async fn funded_coin(&self, script: &ScriptBuf, value: Amount) -> Result<(OutPoint, TxOut)> {
+    /// The coin paying `script` the hub's wallet funded under `tag`
+    /// ([`Self::fund_coin`]), if it is among its last transactions.
+    async fn tagged_coin(
+        &self,
+        tag: &str,
+        script: &ScriptBuf,
+    ) -> Result<Option<(OutPoint, TxOut)>> {
+        let listed: Vec<serde_json::Value> = self
+            .wallet
+            .rpc("listtransactions", serde_json::json!(["*", 1000, 0, true]))
+            .await?;
+        let Some(txid) = (listed.iter())
+            .rev()
+            .filter(|t| t["comment"].as_str() == Some(tag))
+            .find_map(|t| t["txid"].as_str())
+        else {
+            return Ok(None);
+        };
+        self.coin_of(txid, script).await.map(Some)
+    }
+
+    async fn funded_coin(
+        &self,
+        script: &ScriptBuf,
+        value: Amount,
+        tag: &str,
+    ) -> Result<(OutPoint, TxOut)> {
         #[cfg(feature = "faults")]
         if self
             .watch
@@ -2098,10 +2192,24 @@ impl Openings {
             .wallet
             .rpc(
                 "sendtoaddress",
-                serde_json::json!([address.to_string(), value.to_btc()]),
+                serde_json::json!([address.to_string(), value.to_btc(), tag]),
             )
             .await
             .context("fund a fee coin")?;
+        #[cfg(feature = "faults")]
+        if self
+            .watch
+            .lose_coin
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            bail!("a fee coin funded and lost, for a test");
+        }
+        self.coin_of(&txid, script).await
+    }
+
+    /// The coin paying `script` of the hub's wallet's transaction `txid`,
+    /// handed to the chain it posts to.
+    async fn coin_of(&self, txid: &str, script: &ScriptBuf) -> Result<(OutPoint, TxOut)> {
         let funded: serde_json::Value = self
             .wallet
             .rpc("gettransaction", serde_json::json!([txid, false, true]))
@@ -2116,7 +2224,7 @@ impl Openings {
             .context("no fee coin output")?;
         // Handed to the chain the hub posts to as well, which may be
         // another node than its wallet's: else what spends the coin is
-        // refused there. Once more each round it waits ([`Self::why_gone`]).
+        // refused there. Once more each round it waits ([`Self::funding`]).
         if let Err(e) = self.source.broadcast(&raw).await {
             tracing::debug!(%txid, "a fee coin's funding not taken by the chain: {e:#}");
         }
@@ -2183,7 +2291,7 @@ impl Openings {
         let mut gone = HashSet::new();
         let coins = self.store().extra_coins(id, name)?;
         for coin in coins {
-            if self.gone(id, name, coin.0).await {
+            if self.gone(id, name, coin.0, Some((deadline, tip))).await {
                 gone.insert(coin.0);
             } else {
                 kept.push(coin);
@@ -2212,7 +2320,7 @@ impl Openings {
             let confirmed = || async {
                 let confirmed = self.unspent(coin.0, false).await;
                 confirmed.unwrap_or_else(|e| {
-                    unknown_coin(id, name, &e);
+                    self.unknown_coin(id, name, &format!("{e:#}"), Some((deadline, tip)));
                     false
                 })
             };
@@ -2263,7 +2371,7 @@ impl Openings {
             // goes with what it has.
             let funded = async {
                 let coin = self
-                    .fund_coin(id, &dispute::fee_script(key)?, value)
+                    .fund_coin(id, name, &dispute::fee_script(key)?, value)
                     .await?;
                 self.store().keep_extra_coin(id, name, &coin)?;
                 anyhow::Ok(coin)
@@ -2605,35 +2713,50 @@ impl Openings {
     }
 
     /// Whether fee coin `coin` of transaction `name` of contract `id` is
-    /// gone ([`Self::why_gone`]): what spends it never relays, so it is to
-    /// be funded again. The operator is told, once a contract.
-    async fn gone(&self, id: &[u8; 32], name: &str, coin: OutPoint) -> bool {
-        let Some(why) = self.why_gone(id, name, coin).await else {
-            return false;
+    /// gone ([`Self::funding`]): what spends it never relays, so it is to
+    /// be funded again. The operator is told, once a contract. One not
+    /// told waits, its operator told as [`Self::unknown_coin`] says, `by`
+    /// its deadline and the tip if it has one.
+    async fn gone(
+        &self,
+        id: &[u8; 32],
+        name: &str,
+        coin: OutPoint,
+        by: Option<(u32, u32)>,
+    ) -> bool {
+        let why = match self.funding(id, name, coin).await {
+            Funding::Stands => return false,
+            Funding::Waits(why) => {
+                self.unknown_coin(id, name, &why, by);
+                return false;
+            }
+            Funding::Gone(why) => why,
         };
         tracing::debug!(id = %crate::hex_id(id), %coin, "a fee coin of {name} is gone: {why}");
         if self.once(id, "fee coin gone") {
             tracing::warn!(id = %crate::hex_id(id), %coin, "a fee coin of {name} is gone: {why}");
             self.alert(&format!(
                 "contract {}: a fee coin of its {name} is gone, in no block and in no \
-                 mempool of the hub's node ({why}), as after a reorg, another spend of its \
-                 wallet's coins or a wallet restored older than it: what spends it never \
-                 relays, so the hub's wallet is asked for another",
+                 mempool of the hub's node ({why}), as after a reorg or another spend of its \
+                 wallet's coins: what spends it never relays, so the hub's wallet is asked \
+                 for another. Should the one gone confirm after all, it is taken back",
                 crate::hex_id(id)
             ));
         }
         true
     }
 
-    /// Why fee coin `coin` is gone, if it is: the hub's wallet's
-    /// transaction that funded it in no block and refused by its node when
-    /// broadcast again (a reorg left it out, another spend of its inputs
-    /// replaced it, the mempool dropped it), then abandoned, its inputs
-    /// free again; or, unknown to the wallet (one restored older than it),
-    /// the coin in no block and its funding in no mempool. A state not
-    /// told is not gone: one coin too many costs the hub more than a
-    /// round's wait.
-    async fn why_gone(&self, id: &[u8; 32], name: &str, coin: OutPoint) -> Option<String> {
+    /// The state of fee coin `coin`'s funding, by the hub's wallet and its
+    /// node: in a block or the mempool, it stands; gone only on their
+    /// affirmative word, its inputs spent by another transaction in a
+    /// block (the wallet's negative confirmations) or refused when
+    /// broadcast again as spending inputs spent or missing ([`refusal`]),
+    /// then abandoned, its inputs free again. Refused by policy (its fee,
+    /// a full mempool), or for a reason not told, or unknown to the
+    /// wallet (one restored older), it waits: one coin too many funded for
+    /// a funding that confirms after all costs the hub more than a round's
+    /// wait.
+    async fn funding(&self, id: &[u8; 32], name: &str, coin: OutPoint) -> Funding {
         let txid = coin.txid.to_string();
         let funding: Result<serde_json::Value> = self
             .wallet
@@ -2641,37 +2764,55 @@ impl Openings {
             .await;
         let funding = match funding {
             Ok(funding) => funding,
-            Err(e) if rpc_code(&e) == Some(-5) => return self.gone_unknown(id, name, coin).await,
-            Err(e) => {
-                unknown_coin(id, name, &e);
-                return None;
-            }
+            Err(e) if rpc_code(&e) == Some(-5) => return self.funding_unknown(coin).await,
+            Err(e) => return Funding::Waits(format!("its wallet not asked: {e:#}")),
         };
-        if funding["confirmations"].as_i64().is_none_or(|c| c > 0) {
-            return None;
+        match funding["confirmations"].as_i64() {
+            Some(c) if c > 0 => return Funding::Stands,
+            Some(c) if c < 0 => {
+                return Funding::Gone(format!(
+                    "its funding {txid} conflicts with a transaction {} blocks deep",
+                    -c
+                ))
+            }
+            Some(_) => {}
+            None => return Funding::Waits(format!("its wallet tells no depth of {txid}")),
         }
         let tx = funding["hex"]
             .as_str()
-            .and_then(|hex| bitcoin::consensus::encode::deserialize_hex::<Transaction>(hex).ok())?;
+            .and_then(|hex| bitcoin::consensus::encode::deserialize_hex::<Transaction>(hex).ok());
+        let Some(tx) = tx else {
+            return Funding::Waits(format!("its wallet holds no transaction {txid}"));
+        };
         let refused = match self.wallet.broadcast(&tx).await {
             Ok(_) => {
                 self.relay_funding(id, name, &tx).await;
-                return None;
+                return Funding::Stands;
             }
             Err(e) => e,
         };
-        if !matches!(rpc_code(&refused), Some(-25 | -26)) {
-            unknown_coin(id, name, &refused);
-            return None;
+        match refusal(&refused) {
+            Refusal::Taken => {
+                self.relay_funding(id, name, &tx).await;
+                Funding::Stands
+            }
+            Refusal::Policy => Funding::Waits(format!(
+                "its funding {txid} refused by its node's policy, to be taken later: {refused:#}"
+            )),
+            Refusal::Unknown => Funding::Waits(format!(
+                "its funding {txid} refused, for a reason not told: {refused:#}"
+            )),
+            Refusal::Conflict => {
+                let abandoned: Result<Option<serde_json::Value>> = self
+                    .wallet
+                    .rpc_optional("abandontransaction", serde_json::json!([txid]))
+                    .await;
+                if let Err(e) = abandoned {
+                    tracing::debug!(%txid, "a fee coin's funding not abandoned: {e:#}");
+                }
+                Funding::Gone(format!("{refused:#}"))
+            }
         }
-        let abandoned: Result<Option<serde_json::Value>> = self
-            .wallet
-            .rpc_optional("abandontransaction", serde_json::json!([txid]))
-            .await;
-        if let Err(e) = abandoned {
-            tracing::debug!(%txid, "a fee coin's funding not abandoned: {e:#}");
-        }
-        Some(format!("{refused:#}"))
     }
 
     /// Hand `funding`, of a fee coin of transaction `name` of contract
@@ -2698,16 +2839,45 @@ impl Openings {
         }
     }
 
-    /// [`Self::why_gone`] of a coin whose funding the hub's wallet does
-    /// not know.
-    async fn gone_unknown(&self, id: &[u8; 32], name: &str, coin: OutPoint) -> Option<String> {
+    /// Say that the state of a fee coin of `name` of contract `id` is not
+    /// told (`why`): it is neither spent by another nor funded again. Each
+    /// poll at debug; its operator told once a contract, and once more as
+    /// `by`, its deadline and the tip, leaves fewer than [`UNKNOWN_NEAR`]
+    /// blocks.
+    fn unknown_coin(&self, id: &[u8; 32], name: &str, why: &str, by: Option<(u32, u32)>) {
+        tracing::debug!(id = %crate::hex_id(id), "a fee coin of {name} of unknown state: {why}");
+        let left = by.map(|(deadline, tip)| deadline.saturating_sub(tip));
+        let (what, more) = match left {
+            Some(left) if left < UNKNOWN_NEAR => (
+                "fee coin unknown near",
+                format!(", {left} blocks before its deadline"),
+            ),
+            Some(left) => (
+                "fee coin unknown",
+                format!(", {left} blocks before its deadline"),
+            ),
+            None => ("fee coin unknown", String::new()),
+        };
+        if self.once(id, what) {
+            tracing::warn!(id = %crate::hex_id(id), "a fee coin of {name} of unknown state: {why}");
+            self.alert(&format!(
+                "contract {}: the state of a fee coin of its {name} is not told ({why}){more}. \
+                 It is not funded again while it may yet confirm, and what spends it may not be \
+                 in a block in time: check the hub's node and wallet (a wallet restored older \
+                 than hub.sqlite knows not what it funded).",
+                crate::hex_id(id)
+            ));
+        }
+    }
+
+    /// [`Self::funding`] of a coin whose funding the hub's wallet does not
+    /// know: it stands in a block or in its node's mempool, else waits, as
+    /// nothing proves it gone. It may be in another's mempool, and confirm.
+    async fn funding_unknown(&self, coin: OutPoint) -> Funding {
         match self.unspent(coin, false).await {
+            Ok(true) => return Funding::Stands,
             Ok(false) => {}
-            Ok(true) => return None,
-            Err(e) => {
-                unknown_coin(id, name, &e);
-                return None;
-            }
+            Err(e) => return Funding::Waits(format!("its node not asked: {e:#}")),
         }
         let entry: Result<serde_json::Value> = self
             .wallet
@@ -2717,14 +2887,13 @@ impl Openings {
             )
             .await;
         match entry {
-            Ok(_) => None,
-            Err(e) if rpc_code(&e) == Some(-5) => {
-                Some("its funding unknown to the hub's wallet, in no block or mempool".into())
-            }
-            Err(e) => {
-                unknown_coin(id, name, &e);
-                None
-            }
+            Ok(_) => Funding::Stands,
+            Err(e) if rpc_code(&e) == Some(-5) => Funding::Waits(format!(
+                "its funding {} unknown to the hub's wallet, as one restored older than \
+                 hub.sqlite, and in no block or mempool of its node: nothing proves it gone",
+                coin.txid
+            )),
+            Err(e) => Funding::Waits(format!("its node not asked: {e:#}")),
         }
     }
 
@@ -2926,11 +3095,69 @@ fn terminal_coin(
     (coin, fund)
 }
 
-/// Say that the hub's node did not tell the state of a fee coin of `name`,
-/// of the contract `id` (`why`): each poll, so at debug.
-fn unknown_coin(id: &[u8; 32], name: &str, why: &anyhow::Error) {
-    tracing::debug!(id = %crate::hex_id(id), "a fee coin of {name} of unknown state: {why:#}");
+/// What the state of a fee coin's funding is, as [`Openings::funding`]
+/// tells it.
+#[derive(Debug)]
+enum Funding {
+    /// In a block or its node's mempool.
+    Stands,
+    /// Proven never to be in a block: why.
+    Gone(String),
+    /// Neither told: why. Neither spent by another nor funded again.
+    Waits(String),
 }
+
+/// What a node's refusal of a fee coin's funding, broadcast again, proves
+/// ([`refusal`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Refusal {
+    /// In a block already, or its mempool: the coin stands.
+    Taken,
+    /// Refused by policy (its fee, a full mempool, a chain too long, not
+    /// final yet): it may be taken later.
+    Policy,
+    /// Its inputs spent by another transaction, in a block or its
+    /// mempool, or missing: it never relays.
+    Conflict,
+    /// Anything else: nothing told.
+    Unknown,
+}
+
+/// What node refusal `e` proves of a transaction broadcast again: only
+/// a conflict or inputs missing or spent prove it gone. Any other refusal
+/// of mempool policy (-26) waits.
+fn refusal(e: &anyhow::Error) -> Refusal {
+    let message = format!("{e:#}");
+    let says = |words: &[&str]| words.iter().any(|w| message.contains(w));
+    match rpc_code(e) {
+        Some(-27) => Refusal::Taken,
+        Some(-25) if says(&["missingorspent", "missing-inputs"]) => Refusal::Conflict,
+        Some(-26)
+            if says(&[
+                "txn-already-known",
+                "txn-already-in-mempool",
+                "txn-same-nonwitness-data-in-mempool",
+            ]) =>
+        {
+            Refusal::Taken
+        }
+        Some(-26)
+            if says(&[
+                "txn-mempool-conflict",
+                "rejecting replacement",
+                "missingorspent",
+            ]) =>
+        {
+            Refusal::Conflict
+        }
+        Some(-26) => Refusal::Policy,
+        _ => Refusal::Unknown,
+    }
+}
+
+/// Blocks before its deadline under which a fee coin of unknown state is
+/// told its operator once more ([`Openings::unknown_coin`]).
+const UNKNOWN_NEAR: u32 = 12;
 
 /// The code of a node's JSON-RPC error, as its message ends: `(-25)`.
 /// None for a failure to ask it.
@@ -3231,6 +3458,45 @@ mod tests {
             contested_disclose_deadline(&o, 200) + depth + NEAR,
             assert_deadline(&o, 200)
         );
+    }
+
+    /// A funding broadcast again is gone only on a conflict or inputs
+    /// missing or spent; refused by policy, or otherwise, it waits.
+    #[test]
+    fn a_funding_is_gone_only_as_its_node_proves_it() {
+        let of = |m: &str| refusal(&anyhow!("sendrawtransaction: http://n: {m}"));
+        for gone in [
+            "bad-txns-inputs-missingorspent (-25)",
+            "txn-mempool-conflict (-26)",
+            "insufficient fee, rejecting replacement 00ab; new feerate 0.00001 <= old \
+             feerate 0.00002 (-26)",
+        ] {
+            assert_eq!(of(gone), Refusal::Conflict, "{gone}");
+        }
+        for waits in [
+            "mempool min fee not met, 100 < 200 (-26)",
+            "min relay fee not met, 100 < 110 (-26)",
+            "mempool full (-26)",
+            "too-long-mempool-chain, too many unconfirmed ancestors [limit: 25] (-26)",
+            "non-BIP68-final (-26)",
+        ] {
+            assert_eq!(of(waits), Refusal::Policy, "{waits}");
+        }
+        for taken in [
+            "Transaction outputs already in utxo set (-27)",
+            "txn-already-known (-26)",
+            "txn-same-nonwitness-data-in-mempool (-26)",
+        ] {
+            assert_eq!(of(taken), Refusal::Taken, "{taken}");
+        }
+        for unknown in [
+            "Fee exceeds maximum configured by user (-25)",
+            "error sending request",
+            "HTTP 500 (internal)",
+            "Work queue depth exceeded (-32603)",
+        ] {
+            assert_eq!(of(unknown), Refusal::Unknown, "{unknown}");
+        }
     }
 
     /// A node's error is told by its code, a failure to ask it by none.

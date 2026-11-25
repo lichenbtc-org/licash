@@ -358,7 +358,9 @@ impl Store {
 
     /// Keep `new` as terminal `name`'s fee coin of opening `id` in place of
     /// `old`, gone from the chain and the mempool: the one kept, `old`'s
-    /// unless that was replaced already.
+    /// unless that was replaced already. `old` is kept on as an extra coin
+    /// ([`Store::extra_coins`]), in one transaction: should its funding
+    /// confirm after all, it is the hub's still.
     pub fn replace_fee_coin(
         &self,
         id: &[u8; 32],
@@ -366,7 +368,8 @@ impl Store {
         old: &(OutPoint, TxOut),
         new: &(OutPoint, TxOut),
     ) -> Result<(OutPoint, TxOut)> {
-        self.0.execute(
+        let tx = self.0.unchecked_transaction()?;
+        let replaced = tx.execute(
             "UPDATE opening_fee_coins SET outpoint = ?3, output = ?4
              WHERE id = ?1 AND name = ?2 AND outpoint = ?5",
             params![
@@ -377,7 +380,19 @@ impl Store {
                 serialize(&old.0)
             ],
         )?;
+        if replaced == 1 {
+            self.keep_extra_coin(id, name, old)?;
+        }
+        tx.commit()?;
         self.fee_coin(id, name)?.context("no fee coin kept")
+    }
+
+    /// How many fee coins are kept for transaction `name` of opening `id`:
+    /// its first and its extra ones. Each kept adds one, so that each
+    /// funded is of a count of its own ([`super::Openings`]'s tags).
+    pub fn fee_coins_kept(&self, id: &[u8; 32], name: &str) -> Result<usize> {
+        let first = self.fee_coin(id, name)?.is_some();
+        Ok(usize::from(first) + self.extra_coins(id, name)?.len())
     }
 
     /// The extra fee coins kept for transaction `name` of opening `id`, in
@@ -732,6 +747,11 @@ mod tests {
         ensure!(store.replace_fee_coin(&[1; 32], "success", &coin(7), &coin(9))? == coin(8));
         ensure!(store.replace_fee_coin(&[1; 32], "success", &coin(8), &coin(9))? == coin(9));
         ensure!(store.replace_fee_coin(&[1; 32], "success", &coin(8), &coin(10))? == coin(9));
+        // The one gone kept on beside it, once: should it confirm after all.
+        ensure!(store.extra_coins(&[1; 32], "success")? == vec![coin(8)]);
+        ensure!(store.fee_coins_kept(&[1; 32], "success")? == 2);
+        ensure!(store.fee_coins_kept(&[1; 32], "default")? == 1);
+        ensure!(store.fee_coins_kept(&[1; 32], "reclaim")? == 0);
         ensure!(store.fee_coin(&[1; 32], "default")? == Some(coin(7)));
         store.end(&[1; 32], 100)?;
         store.end(&[1; 32], 101)?;
@@ -739,6 +759,7 @@ mod tests {
         let store = Store::open(&crate::testing::hub_data(data.path()))?;
         ensure!(store.fee_coin(&[1; 32], "default")? == Some(coin(7)));
         ensure!(store.fee_coin(&[1; 32], "success")? == Some(coin(9)));
+        ensure!(store.extra_coins(&[1; 32], "success")? == vec![coin(8)]);
         ensure!(store.signed_ids()? == vec![[2; 32]]);
         Ok(())
     }

@@ -503,7 +503,7 @@ A Core login of the hub's own (`-rpcauth`) can be limited to the calls it
 makes with `-rpcwhitelist=USER:CALLS`. Without contracts:
 `getblockchaininfo,getblockhash,getblockheader,getblock,estimatesmartfee,sendrawtransaction`.
 With `--contracts`, also
-`submitpackage,gettxout,getbalances,fundrawtransaction,signrawtransactionwithwallet,gettransaction,lockunspent,sendtoaddress,getnewaddress`.
+`submitpackage,gettxout,getbalances,fundrawtransaction,signrawtransactionwithwallet,gettransaction,lockunspent,sendtoaddress,getnewaddress,listtransactions,getmempoolentry,abandontransaction`.
 The payout wallet's login, if another:
 `getwalletinfo,getnewaddress,getblockchaininfo,getblockhash`. A call left
 out is refused by the node (HTTP 403). This limits the calls, not the wallet: a login that funds contracts still spends its
@@ -653,11 +653,20 @@ key-path spend of a contract output is such a fold, and ends the contract.
 A contract no one exited ends at its close: the hub posts its
 default, which pays the holder her reserve and the hub its collateral back,
 to its wallet. The fee coins its wallet funds for these transactions are
-kept in `hub.sqlite` before use, and funded again only once one is gone
-(its funding in no block and refused by the hub's node when broadcast
-again, as after a reorg or another spend of the wallet's coins): the
-operator is told, once a contract, and the wallet's funding abandoned so
-its coins are free. A contract ended 6 blocks deep is
+kept in `hub.sqlite` before use, and funded again only once one is gone:
+its funding in conflict with a block, or refused by the hub's node when
+broadcast again as spending inputs spent or missing (after a reorg, or
+another spend of the wallet's coins). The operator is told, once a
+contract, and the wallet's funding abandoned so its coins are free; the
+coin gone is kept on, and taken back should its funding confirm after all.
+A funding refused by the node's policy (its fee, a full mempool), or for a
+reason it does not tell, or one the wallet no longer knows (restored older
+than `hub.sqlite`) while the coin is in no block or mempool, is not proven
+gone: the hub funds no other for it and waits, its operator told, and
+told again 12 blocks before the transaction's deadline. Each coin is
+funded under a tag of its own, the wallet's comment of its funding, so a
+hub stopped between funding one and keeping it finds it again in its
+wallet's last 1000 transactions rather than fund another. A contract ended 6 blocks deep is
 not looked at again. The same database pins the evidence each response is
 decided on and each one-time signature (the response, the assertion) before
 it is made, with the openings, so that one copy holds both as of one moment:
