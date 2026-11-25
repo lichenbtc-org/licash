@@ -148,6 +148,24 @@ fn described(invoice: &Bolt11Invoice) -> Option<String> {
     .filter(|d| !d.is_empty())
 }
 
+/// The hash of the description `invoice` commits to, if it says none in
+/// words.
+fn committed(invoice: &Bolt11Invoice) -> Option<[u8; 32]> {
+    use bitcoin::hashes::Hash as _;
+    match invoice.description() {
+        lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(h) => Some(h.0.to_byte_array()),
+        lightning_invoice::Bolt11InvoiceDescriptionRef::Direct(_) => None,
+    }
+}
+
+/// An invoice's exact total, in millisatoshis, and the description hash it
+/// commits to ([`Wallet::invoice_exact`]).
+#[derive(Clone, Copy)]
+struct Exact {
+    msat: u64,
+    description_hash: Option<[u8; 32]>,
+}
+
 /// The invoice `text` carries, decoded.
 fn read(text: &str) -> Result<Bolt11Invoice, Error> {
     invoice_in(text)
@@ -883,6 +901,27 @@ impl<T: Transport> Wallet<T> {
         self.invoice_with(url, amount, protected, memo).await
     }
 
+    /// An invoice from the hub at `url` asking exactly `msat`, the hub's
+    /// fee taken from it: this wallet is paid the most whole notes the rest
+    /// comes to, and the hub keeps the under 2 sat beyond. Committing to
+    /// `description_hash`, if given, instead of saying a memo, as LNURL-pay
+    /// and Nostr zaps want. Refused at a hub not naming
+    /// [`licash_api::FEATURE_LNURL`], and checked in the invoice it
+    /// answers.
+    pub async fn invoice_exact(
+        &self,
+        url: &str,
+        msat: u64,
+        description_hash: Option<[u8; 32]>,
+    ) -> Result<Invoice, Error> {
+        let exact = Exact {
+            msat,
+            description_hash,
+        };
+        self.invoice_asking(url, None, false, None, Some(exact))
+            .await
+    }
+
     /// [`Wallet::invoice`], its lock's preimage revealed only with
     /// [`crate::PROTECTED_MARGIN`] blocks left at the higher of its hub's
     /// height and the chain's as the wallet knows it of itself
@@ -917,6 +956,19 @@ impl<T: Transport> Wallet<T> {
         protected: bool,
         memo: Option<&str>,
     ) -> Result<Invoice, Error> {
+        self.invoice_asking(url, Some(amount), protected, memo, None)
+            .await
+    }
+
+    /// An invoice for `amount`, or for what `exact` leaves of its total.
+    async fn invoice_asking(
+        &self,
+        url: &str,
+        amount: Option<u64>,
+        protected: bool,
+        memo: Option<&str>,
+        exact: Option<Exact>,
+    ) -> Result<Invoice, Error> {
         let memo = memo
             .map(licash_api::memo)
             .transpose()
@@ -933,6 +985,23 @@ impl<T: Transport> Wallet<T> {
                 "hub {url} puts no memo in its invoices"
             )));
         }
+        let amount = match (amount, exact) {
+            (Some(amount), _) => amount,
+            (None, Some(exact)) => {
+                if !info.features.iter().any(|f| f == licash_api::FEATURE_LNURL) {
+                    return Err(Error::Invalid(format!(
+                        "hub {url} makes no invoices of an exact amount"
+                    )));
+                }
+                licash_api::receivable(exact.msat, &lightning.receive).ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "hub {url} takes all of {} msat in fees",
+                        exact.msat
+                    ))
+                })?
+            }
+            (None, None) => return Err(Error::Invalid("an invoice of no amount".into())),
+        };
         if amount < lightning.min_receive || amount > lightning.max_receive {
             return Err(Error::Invalid(format!(
                 "hub {url} takes {} to {} over Lightning",
@@ -951,7 +1020,12 @@ impl<T: Transport> Wallet<T> {
         let mut preimage = [0; 32];
         OsRng.fill_bytes(&mut preimage);
         let hash = lock_hash(&preimage);
-        let body = Receive::new(keyset.id(), &ephemeral.public(), &outputs, &hash).with_memo(memo);
+        let body = Receive::new(keyset.id(), &ephemeral.public(), &outputs, &hash)
+            .with_memo(memo)
+            .with_lnurl(
+                exact.map(|e| e.msat),
+                exact.and_then(|e| e.description_hash),
+            );
         let body = serde_json::to_string(&body).map_err(invalid)?;
         self.store.write(|tx| {
             tx.execute(
@@ -1071,6 +1145,21 @@ impl<T: Transport> Wallet<T> {
                 if described(&invoice).as_ref() != Some(memo) {
                     return self.cancel_invoice(hash, "its hub left the memo out of the invoice");
                 }
+            }
+            // Never handed out: its payer, an LNURL service, would refuse it.
+            if body
+                .msat
+                .is_some_and(|msat| invoice.amount_milli_satoshis() != Some(msat))
+            {
+                return self.cancel_invoice(hash, "its hub's invoice asks another amount");
+            }
+            if body
+                .description_hash
+                .as_ref()
+                .is_some_and(|asked| committed(&invoice).map(Vec::from) != Some(asked.0.clone()))
+            {
+                return self
+                    .cancel_invoice(hash, "its hub's invoice commits to another description");
             }
             self.store.write(|tx| {
                 tx.execute(

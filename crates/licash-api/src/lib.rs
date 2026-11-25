@@ -153,6 +153,24 @@ impl Fee {
         let rate = (u128::from(amount) * u128::from(self.ppm)).div_ceil(1_000_000);
         u64::try_from(rate).map_or(u64::MAX, |rate| rate.saturating_add(self.base))
     }
+
+    /// The most an amount moved may be for it and its fee to come to at
+    /// most `total`: none if not even nothing does.
+    pub fn most_within(&self, total: u64) -> Option<u64> {
+        let with_fee = |amount: u64| amount.checked_add(self.due(amount));
+        // It and its fee only grow with it: the last at most `total`,
+        // found halving.
+        with_fee(0).filter(|paid| *paid <= total)?;
+        let (mut low, mut high) = (0, total);
+        while low < high {
+            let mid = low + (high - low).div_ceil(2);
+            match with_fee(mid) {
+                Some(paid) if paid <= total => low = mid,
+                _ => high = mid - 1,
+            }
+        }
+        Some(low)
+    }
 }
 
 /// What a hub charges, in outputs to [`Info::address`]: a spend's fee in
@@ -799,6 +817,26 @@ pub fn memo(text: &str) -> Result<String, Problem> {
     Ok(memo)
 }
 
+/// The [`Info::features`] of a hub whose invoices ask a
+/// [`Receive::msat`] and commit to a [`Receive::description_hash`], as
+/// LNURL-pay and Nostr zaps want them. Older hubs ignore both: a wallet
+/// asks for them only of a hub naming this.
+pub const FEATURE_LNURL: &str = "lnurl";
+
+/// The most a [`Receive::msat`] may ask beyond what a receipt's outputs
+/// and the hub's fee on them come to, in millisatoshis: under 2 sat, all
+/// a payee choosing whole notes for a total in millisatoshis needs.
+pub const MAX_RECEIVE_SURPLUS: u64 = 1_999;
+
+/// The most notes, in satoshis, an invoice asking exactly `msat` pays at a
+/// hub charging `fee` on what it receives ([`Receive::msat`]): none if the
+/// fee takes it all.
+pub fn receivable(msat: u64, fee: &Fee) -> Option<u64> {
+    let notes = fee.most_within(msat / 1000).filter(|notes| *notes > 0)?;
+    let least = (notes + fee.due(notes)) * 1000;
+    (msat - least <= MAX_RECEIVE_SURPLUS).then_some(notes)
+}
+
 /// Ask for an invoice whose payment locks the hub's own notes to
 /// `outputs`, under `keyset`, derived with `ephemeral`, on the preimage of
 /// `hash`. The invoice asks for their value and the hub's receive fee, and
@@ -812,6 +850,17 @@ pub struct Receive {
     /// As [`memo`] makes it, at a hub naming [`FEATURE_MEMO`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memo: Option<String>,
+    /// What the invoice asks, in millisatoshis, at a hub naming
+    /// [`FEATURE_LNURL`]: at least the outputs' value and the hub's fee on
+    /// them, at most [`MAX_RECEIVE_SURPLUS`] more, which is the hub's.
+    /// Without, the invoice asks exactly those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msat: Option<u64>,
+    /// The SHA-256 hash of a description given elsewhere (LNURL-pay's
+    /// metadata, a Nostr zap request), which the invoice commits to
+    /// instead of saying a memo, at a hub naming [`FEATURE_LNURL`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_hash: Option<Hex>,
 }
 
 impl Receive {
@@ -830,12 +879,54 @@ impl Receive {
             outputs,
             hash: Hex(hash.to_vec()),
             memo: None,
+            msat: None,
+            description_hash: None,
         }
     }
 
     /// The same, saying `memo` to its payer.
     pub fn with_memo(self, memo: Option<String>) -> Self {
         Self { memo, ..self }
+    }
+
+    /// The same, its invoice asking `msat` and committing to
+    /// `description_hash`, if given ([`FEATURE_LNURL`]).
+    pub fn with_lnurl(self, msat: Option<u64>, description_hash: Option<[u8; 32]>) -> Self {
+        Self {
+            msat,
+            description_hash: description_hash.map(|h| Hex(h.to_vec())),
+            ..self
+        }
+    }
+
+    /// What its invoice asks, in millisatoshis, for outputs worth `amount`
+    /// at a hub charging `fee` on them: its [`Receive::msat`], refused
+    /// unless it is within [`MAX_RECEIVE_SURPLUS`] above those, or exactly
+    /// those without one.
+    pub fn asks(&self, amount: u64, fee: &Fee) -> Result<u64, Problem> {
+        let least = amount
+            .checked_add(fee.due(amount))
+            .and_then(|sat| sat.checked_mul(1000))
+            .ok_or_else(|| Problem::invalid("the amount overflows"))?;
+        match self.msat {
+            None => Ok(least),
+            Some(msat) if msat >= least && msat - least <= MAX_RECEIVE_SURPLUS => Ok(msat),
+            Some(_) => Err(Problem::invalid(format!(
+                "an invoice of {least} to {} msat for these notes",
+                least + MAX_RECEIVE_SURPLUS
+            ))),
+        }
+    }
+
+    /// Its description hash, if it commits to one: never with a memo.
+    pub fn checked_description_hash(&self) -> Result<Option<[u8; 32]>, Problem> {
+        match &self.description_hash {
+            None => Ok(None),
+            Some(_) if self.memo.is_some() => {
+                Err(Problem::invalid("a memo or a description hash, not both"))
+            }
+            Some(hash) => Ok(Some(hash.array("description hash")?)),
+        }
     }
 
     /// Its memo, if it says one, checked as [`memo`] makes it.
@@ -1144,18 +1235,7 @@ impl Deposits {
     /// reserve, locks, the rest of it the hub's. None if not even none are
     /// covered.
     pub fn most_for(&self, pays: u64) -> Option<u64> {
-        // It and its fee only grow with it: the last at most `pays`, found
-        // halving.
-        self.pays(0).filter(|paid| *paid <= pays)?;
-        let (mut low, mut high) = (0, pays);
-        while low < high {
-            let mid = low + (high - low).div_ceil(2);
-            match self.pays(mid) {
-                Some(paid) if paid <= pays => low = mid,
-                _ => high = mid - 1,
-            }
-        }
-        Some(low)
+        self.fee.most_within(pays)
     }
 }
 
