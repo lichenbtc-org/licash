@@ -95,6 +95,11 @@ enum Command {
         /// mutinynet.
         #[arg(long, env = "LICASH_WALLET_NETWORK", default_value_t = ChainProfile::Core30Mainnet)]
         network: ChainProfile,
+        /// A chain source (as `onchain --chain`): the wallet, of a new
+        /// seed, looks for its coins on Bitcoin from its tip, not from the
+        /// first block its hubs serve tweaks of.
+        #[arg(long, env = "LICASH_WALLET_CHAIN")]
+        chain: Option<String>,
     },
     /// Where others pay this wallet.
     Address {
@@ -780,7 +785,9 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
     let (transport, tor) = transport_at(&path, cli.tor, cli.proxy.as_deref())?;
     let json = cli.json;
     match cli.command {
-        Command::Init { network } => return init(&path, network, transport, json),
+        Command::Init { network, chain } => {
+            return init(&path, network, chain.as_deref(), transport, json).await
+        }
         Command::Discover {
             relays,
             network,
@@ -1829,7 +1836,13 @@ fn is_onion(url: &str) -> bool {
     host.ends_with(".onion")
 }
 
-fn init(path: &Path, network: ChainProfile, transport: Http, json: bool) -> anyhow::Result<()> {
+async fn init(
+    path: &Path,
+    network: ChainProfile,
+    chain: Option<&str>,
+    transport: Http,
+    json: bool,
+) -> anyhow::Result<()> {
     if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         let mut create = std::fs::DirBuilder::new();
         create.recursive(true);
@@ -1841,17 +1854,54 @@ fn init(path: &Path, network: ChainProfile, transport: Http, json: bool) -> anyh
     }
     let mut seed = [0; 32];
     OsRng.fill_bytes(&mut seed);
+    let source = chain.map(payout::source).transpose()?;
     let wallet = Wallet::create(path, &seed, network, transport)?;
+    // Its seed new, no coin of its is in an earlier block: looked for from
+    // the chain's tip. Unknown, from the first block its hubs serve tweaks
+    // of, as before.
+    let from = match source {
+        Some(source) => match born(&wallet, network, source).await {
+            Ok(tip) => Some(tip),
+            Err(e) => {
+                eprintln!(
+                    "warning: no chain tip ({e:#}): the first `onchain scan` looks from the \
+                     first block its hubs serve tweaks of"
+                );
+                None
+            }
+        },
+        None => None,
+    };
     let address = encode(&wallet.address());
+    let scans = from.map_or(String::new(), |tip| {
+        format!("\nlooks for its coins on Bitcoin from block {tip}")
+    });
     show(
         json,
-        json!({ "wallet": path, "address": address, "network": network.name() }),
+        json!({ "wallet": path, "address": address, "network": network.name(), "from": from }),
         format!(
-            "created {} for {network}\naddress {address}\nBack up this file: the seed alone does not restore its notes.",
+            "created {} for {network}\naddress {address}{scans}\nBack up this file: the seed alone does not restore its notes.",
             path.display()
         ),
     );
     Ok(())
+}
+
+/// The tip of `source`, which `wallet`, new, of `network`, watches for its
+/// coins from: refused, nothing kept, for a chain of another network, whose
+/// tip would hide every block of its own.
+async fn born(
+    wallet: &Wallet<Http>,
+    network: ChainProfile,
+    source: licash_chain_client::Source,
+) -> anyhow::Result<u32> {
+    let profile = source.profile().await?;
+    if profile.name() != network.name() {
+        bail!("a chain of {}, not {}", profile.name(), network.name());
+    }
+    let tip = source.tip().await?.height;
+    wallet.watch_silent(None, tip)?;
+    Ok(tip)
 }
 
 async fn resume(wallet: &Wallet<Http>, json: bool) -> anyhow::Result<()> {

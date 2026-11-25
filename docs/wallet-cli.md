@@ -225,7 +225,13 @@ answering within 10 s of another that served every block asked for is
 passed over. In blocks no
 hub trusted serves tweaks of, it finds what the fallback addresses are
 paid only, looking in them again for silent payments once a hub serves
-their tweaks; with no such hub, the first scan needs `--from <height>`.
+their tweaks; with no such hub, the first scan needs `--from <height>`,
+unless the wallet was made with `init --chain <url>` (or
+`LICASH_WALLET_CHAIN`). Such a wallet looks from that chain's tip, its
+seed new: its first scan reads no older block (one from a Mutinynet hub's
+first tweaks took 40 minutes). Should the chain not answer, or be of
+another network than `--network`, `init` warns and the wallet looks from
+the hubs' first tweaks, as one made without it.
 `onchain coins`
 lists the coins, `onchain send <to> <amount>` pays an address, a silent
 payment address or a code on Bitcoin, and `onchain move` deposits a coin

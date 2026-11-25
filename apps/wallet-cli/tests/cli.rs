@@ -1942,6 +1942,103 @@ fn values(coins: &Value) -> Vec<u64> {
     values
 }
 
+/// A wallet of a new seed made with a chain to read looks for its coins
+/// from the chain's tip: no earlier block holds any. On Mutinynet a first
+/// scan from the first block its hubs served tweaks of took 40 minutes.
+/// Made without one, or the chain not answering, it looks from there as
+/// before.
+#[test]
+fn a_new_wallet_made_with_a_chain_looks_for_its_coins_from_its_tip() {
+    let hub = Server::with_tweaks(FEE);
+    let dir = tempfile::tempdir().unwrap();
+    let chain = hub.esplora().to_owned();
+    let (bob, _) = party(dir.path(), "bob", Some(&hub));
+    let (fallback, sp, _) = on_bitcoin(&bob);
+    hub.pay_onchain(&fallback, 3_000, 1);
+    hub.pay_silent(&sp, 2_500, 2);
+    hub.round();
+    let scan = |file: &Path| -> Value {
+        let all = ["--json", "onchain", "--chain", &chain, "scan"];
+        serde_json::from_str(&ok(wallet(file, &all, None))).unwrap()
+    };
+    let carol = dir.path().join("carol").join("wallet.sqlite");
+    let created = json(&carol, &["init", "--chain", &chain]);
+    assert_eq!(created["from"], hub.height());
+    ok(wallet(&carol, &["add-hub", &hub.url()], None));
+    let dave = dir.path().join("dave").join("wallet.sqlite");
+    let unknown = wallet(
+        &dave,
+        &["--json", "init", "--chain", "http://127.0.0.1:9"],
+        None,
+    );
+    let stderr = String::from_utf8_lossy(&unknown.stderr).into_owned();
+    let created: Value = serde_json::from_str(&ok(unknown)).unwrap();
+    assert_eq!(created["from"], Value::Null);
+    assert!(stderr.contains("no chain tip"), "{stderr}");
+    ok(wallet(&dave, &["add-hub", &hub.url()], None));
+    for file in [&carol, &dave] {
+        let (_, sp, _) = on_bitcoin(file);
+        hub.pay_silent(&sp, 1_500, 3);
+    }
+    hub.round();
+    let (carols, daves) = (scan(&carol), scan(&dave));
+    assert_eq!(values(&carols["found"]), [1_500]);
+    assert_eq!(values(&daves["found"]), [1_500]);
+    let fetched = |scanned: &Value| scanned["fetched"].as_u64().unwrap();
+    assert!(fetched(&carols) < fetched(&daves), "{carols} {daves}");
+}
+
+/// A chain of another network than the wallet's, as `LICASH_WALLET_CHAIN`
+/// may name: its tip kept would hide every block of the wallet's own. None
+/// kept, warned; a chain not a URL refused, no wallet made.
+#[test]
+fn a_new_wallet_keeps_no_tip_of_another_networks_chain() {
+    let hub = Server::with_tweaks(FEE);
+    let dir = tempfile::tempdir().unwrap();
+    let chain = hub.esplora().to_owned();
+    let erin = dir.path().join("erin").join("wallet.sqlite");
+    let args = ["--json", "init", "--network", "signet", "--chain", &chain];
+    let made = wallet(&erin, &args, None);
+    let stderr = String::from_utf8_lossy(&made.stderr).into_owned();
+    let created: Value = serde_json::from_str(&ok(made)).unwrap();
+    assert_eq!(created["from"], Value::Null);
+    assert!(
+        stderr.contains("a chain of regtest, not signet"),
+        "{stderr}"
+    );
+    // No hub serving tweaks, nothing kept: the block to look from asked.
+    failed(
+        wallet(&erin, &["onchain", "--chain", &chain, "scan"], None),
+        1,
+        "--from",
+    );
+    let frank = dir.path().join("frank").join("wallet.sqlite");
+    failed(
+        wallet(&frank, &["init", "--chain", "nowhere"], None),
+        1,
+        "--chain",
+    );
+    assert!(!frank.exists());
+}
+
+/// A wallet made with a chain, paid at its fallback address before it
+/// trusts a hub: found from its tip, without tweaks.
+#[test]
+fn a_new_wallet_made_with_a_chain_finds_its_fallback_coin_before_any_hub() {
+    let hub = Server::with_tweaks(FEE);
+    let dir = tempfile::tempdir().unwrap();
+    let chain = hub.esplora().to_owned();
+    hub.mine(3, None);
+    let gina = dir.path().join("gina").join("wallet.sqlite");
+    let created = json(&gina, &["init", "--chain", &chain]);
+    assert_eq!(created["from"], hub.height());
+    let (fallback, _, _) = on_bitcoin(&gina);
+    hub.pay_onchain(&fallback, 3_000, 1);
+    let all = ["--json", "onchain", "--chain", &chain, "scan"];
+    let scanned: Value = serde_json::from_str(&ok(wallet(&gina, &all, None))).unwrap();
+    assert_eq!(values(&scanned["found"]), [3_000]);
+}
+
 #[test]
 fn coins_paid_on_bitcoin_are_found_spent_and_moved_to_notes() {
     let hub = Server::with_tweaks(FEE);
