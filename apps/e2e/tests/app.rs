@@ -162,6 +162,30 @@ async fn move_in(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The swap provider funded on Bitcoin, if need be, to pay out `at_least`
+/// sat: within its most, 200 000 sat.
+async fn provider_pays(eco: &Eco, at_least: u64) -> anyhow::Result<()> {
+    let pays = || async {
+        let chain = eco.swaps_info().await?.chain;
+        anyhow::Ok(
+            chain
+                .context("the provider pays nothing out on Bitcoin")?
+                .max,
+        )
+    };
+    if pays().await? >= at_least {
+        return Ok(());
+    }
+    let address = eco.exec("swaps", &["licash-swaps", "address"]).await?;
+    eco.send_to(String::from_utf8(address)?.trim(), 300_000)
+        .await?;
+    eco.mine(1).await?;
+    until("the provider's coins found", 120, || async {
+        Ok((pays().await? >= at_least).then_some(()))
+    })
+    .await
+}
+
 /// Wait for the balance Home shows to change from `from`: the new one.
 async fn changed(phone: &Phone, from: u64, secs: u64) -> anyhow::Result<u64> {
     until("the balance to change", secs, || async {
@@ -1038,17 +1062,19 @@ async fn cashed_out(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
 
 /// Protection at its hub, a recovery contract, set up as its user would:
 /// with no coin on Bitcoin to pay its price, offered a cover for what it
-/// holds there and the coin to cash out to itself first, the price and a
-/// small part of its own, the hub funding the rest; then, that coin cashed
+/// holds there and the coin to cash out to itself first, what is not
+/// protected there, the hub funding the rest of the smallest cover it
+/// fills (mostly the hub's, under More); then, that coin cashed
 /// out, of the length it chooses, that cover, taking the coin whole: its
 /// price itemized, the rest of the coin its own part, issued back as notes. Signed, confirmed and
 /// protecting the notes there, on credit no longer, nothing left on
 /// Bitcoin. Ending it, it is told to cash out instead.
 async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
-    // hub1's opening fee, and over it 1% a year of the part of the cover
-    // it funds (licash-hub's --contracts-rate by default), none of hers:
-    // the cost shown. Its reserve, hers, is paid beside it, apart.
-    const OPENING: u64 = 3_000;
+    // hub1's opening fee, and over it 20% a year of the part of the cover
+    // it funds (licash-hub's --contracts-fee and --contracts-rate by
+    // default), none of hers: the cost shown. Its reserve, hers, is paid
+    // beside it, apart.
+    const OPENING: u64 = 10_000;
     const RESERVE: u64 = 20_000;
     // Its sizes, 2^n - 1 sat: the least.
     const LEAST: u64 = 131_071;
@@ -1062,7 +1088,7 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     let cost = |cap: u64, funded: u64, blocks: u32| {
         OPENING
             + licash_api::rate(
-                10_000,
+                200_000,
                 u32::try_from(cap - funded).unwrap_or(u32::MAX),
                 blocks,
                 licash_api::YEAR_BLOCKS,
@@ -1074,10 +1100,19 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     let held = phone.balance().await?;
     eco.send_to(&fallback.assume_checked().to_string(), 100_000)
         .await?;
-    // Too little for protection worth its price: none offered, moved in
-    // with none.
+    // Worth protecting, its fee and interest well within half of it:
+    // offered once in a block, on the page of what is on Bitcoin (Home
+    // leads to the guide asked for, not to the offer). Moved in all the
+    // same, unprotected.
+    on_bitcoin(phone).await?;
+    until("protection offered for 100000", 300, || async {
+        mine(eco).await?;
+        Ok(phone.has("offer-protect").await?.then_some(()))
+    })
+    .await?;
+    phone.back_to("onchain").await?;
+    phone.back_to("receive").await?;
     move_in(eco, phone).await?;
-    ensure!(!phone.has("offer").await?, "protection offered for 100000");
     until("100000 moved into the balance", 300, || async {
         mine(eco).await?;
         // Home's one line of what is going on: gone once nothing is.
@@ -1087,10 +1122,10 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     .await?;
 
     // No coin on Bitcoin pays its price: offered a cover for what it holds
-    // at hub1, half again what is not protected there, a size; its cost
-    // and reserve, and the coin to cash out to itself first: the price and
-    // its own small part, the hub funding the rest. Nothing to pay or
-    // choose yet.
+    // at hub1 not protected there, of its own: those notes cashed out to
+    // itself first, the cost and reserve paid from them and the rest its
+    // part, in the smallest size that takes them, the hub funding the
+    // rest of it. Its cost and reserve. Nothing to pay or choose yet.
     at_hub(phone, eco.hub(1)).await?;
     phone.tap_id("open-contract").await?;
     let wanted = amount(&phone.by_id("quote-cap", 60).await?.text);
@@ -1099,17 +1134,14 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
         "a cover of {wanted} offered with no coin"
     );
     let first = amount(&phone.by_id("quote-price", 10).await?.text);
-    ensure!(
-        first == cost(wanted, PART, 1_000),
-        "{first} for {wanted} with {PART} of hers"
-    );
+    ensure!(first > OPENING, "{first} for {wanted}");
     phone.tagged("contract-reserve", "20,000 sat", 10).await?;
     phone.by_id("cash-out-first", 10).await?;
-    let asked = first + RESERVE + PART;
     let words = phone.scroll_to_text("Cash out ").await?;
+    let asked = amount(&words.text);
     ensure!(
-        words.text.ends_with(" to yourself") && amount(&words.text) == asked,
-        "{:?} for {asked}",
+        words.text.ends_with(" to yourself") && asked > first + RESERVE + PART,
+        "{:?} for {first} and its reserve",
         words.text
     );
     phone.tagged("worth", MOCK, 10).await?;
@@ -1118,12 +1150,24 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
         "contract-funded",
         "contract-cap",
         "contract-problem",
+        "cash-out-hubs",
     ] {
         ensure!(!phone.has(gone).await?, "{gone:?} with no coin");
     }
+    // Mostly the hub's under More: a larger cover, the hub funding nearly
+    // all of it, costing more.
+    phone.tap_id("contract-more").await?;
+    let dearer = amount(&phone.scroll_to_id("hubs-price").await?.text);
+    phone.scroll_to_id("cash-out-hubs").await?;
+    ensure!(dearer > first, "{dearer} mostly the hub's, {first} its own");
+    phone.back().await?;
+    phone.gone("cash-out-hubs", 10).await?;
     // Or paid for with the notes there, the same coin: quoted through a
     // provider found on Nostr, its fees on top. Not paid this way here: the
     // coin cashed out by hand is what the rest opens on.
+    provider_pays(eco, asked).await?;
+    phone.tap_id("open-contract").await?;
+    phone.by_id("cash-out-first", 60).await?;
     let words = phone.scroll_to_text("Pay ").await?;
     ensure!(
         words.text.ends_with(" from notes") && amount(&words.text) == asked,
@@ -1132,7 +1176,10 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     );
     phone.tap_id("pay-with-notes").await?;
     let paid_coin = amount(&phone.by_id("paid-coin", 120).await?.text);
-    ensure!(paid_coin == asked, "a coin of {paid_coin} paid for {asked}");
+    ensure!(
+        (asked..asked + DUST).contains(&paid_coin),
+        "a coin of {paid_coin} paid for {asked}"
+    );
     let paid_cap = amount(&phone.by_id("paid-cap", 10).await?.text);
     ensure!(
         paid_cap == wanted,
@@ -1143,8 +1190,8 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     phone.by_id("pay-paid", 10).await?;
     let total = amount(&phone.scroll_to_text("Pay ").await?.text);
     ensure!(
-        total == asked + fees,
-        "{total} to pay for {asked} and {fees} in fees"
+        total == paid_coin + fees,
+        "{total} to pay for {paid_coin} and {fees} in fees"
     );
     phone.back().await?;
     phone.gone("pay-paid", 10).await?;
@@ -1178,9 +1225,9 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     let before = phone.balance().await?;
     eprintln!("a coin of {coin} kept, {before} held, {credit} on credit");
 
-    // Paid from it now: the cover offered for it, its price as hub1
-    // prices it, all the rest of the coin her part, less than dust left.
-    // Smaller covers take it whole too: the cover is hers to choose.
+    // Paid from it now: the cover offered for it, the smallest it fills,
+    // its price as hub1 prices it, all the rest of the coin her part, less
+    // than dust left. Larger covers take it whole too: hers to choose.
     at_hub(phone, eco.hub(1)).await?;
     phone.tap_id("open-contract").await?;
     let cap = amount(&phone.by_id("quote-cap", 60).await?.text);
@@ -1227,13 +1274,13 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     eprintln!("{coin} pays {paid} and funds {funded} of {cap}");
     // Itemized: the hub's fee, its interest by the year on its own part.
     phone
-        .tagged("contract-opening-fee", "3,000 sat", 10)
+        .tagged("contract-opening-fee", "10,000 sat", 10)
         .await?;
     let interest = phone.by_id("contract-interest", 10).await?.text;
     let of = interest.rsplit("a year of").next().map(amount);
     ensure!(
         interest.starts_with(&format!("{} sat", paid - OPENING))
-            && interest.contains("1% a year of")
+            && interest.contains("20% a year of")
             && of == Some(cap - funded),
         "{interest:?} for its interest on {} of {cap}",
         cap - funded
