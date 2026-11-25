@@ -270,6 +270,10 @@ impl Openings {
         // Left alone for `w_X` blocks, her response pays what it says: the
         // hub posts that, and proves nothing.
         let Some((c_at, c)) = self.spend(main(&x), &x.output[0], x_at, tip).await? else {
+            // Not posted, the terminal is all the same.
+            if let Err(e) = self.redisclose(id, hub, o, &r, (&x, x_at), tip).await {
+                tracing::warn!(id = %crate::hex_id(id), "its disclosure not posted again: {e:#}");
+            }
             return self.settle(id, hub, o, "respond_timeout", x_at, tip).await;
         };
         let contest = presign(&o.set, "contest")?;
@@ -302,11 +306,7 @@ impl Openings {
         match self.spend(main(&z), &z.output[0], z_at, tip).await? {
             None => {
                 // Missing its deadline pays her claim and the hub's reserve.
-                let unit = Amount::from_sat(o.base.parts().graph.unit_sats);
-                let (b, _) = o.requested_b(&r)?;
-                let (responded, _) = HubProves::responded_b(&x)?;
-                let stake =
-                    unit * u64::from(b.saturating_sub(responded)) + o.babe.spec.terms.reserve_hub;
+                let stake = assert_stake(o, &r, &x)?;
                 let g = &o.base.parts().graph;
                 let deadline = z_at
                     .saturating_add(u32::from(g.answer_window))
@@ -919,8 +919,13 @@ impl Openings {
         self.post_link(id, hub, "respond", &response, prevout, window, stake, tip)
             .await?;
         // Its disclosure with it: the statement wants the contract's work
-        // on top of both, within the assertion window.
-        self.disclose(id, hub, o, &decided.disclosures).await?;
+        // on top of both, within the assertion window. In a block at the
+        // earliest the next, as its response.
+        let x_at = tip.saturating_add(1);
+        let reserve = o.babe.spec.terms.reserve_hub;
+        let by = (x_at, disclose_deadline(o, x_at)?, stake + reserve);
+        self.disclose(id, hub, o, &decided.disclosures, by, tip)
+            .await?;
         Ok(Played::Posted("respond"))
     }
 
@@ -1015,27 +1020,89 @@ impl Openings {
     }
 
     /// Post the disclosure of `disclosures` in the response's disclose
-    /// slot, with a fee coin of the hub's: nothing if there is none to
-    /// make. Whether it was broadcast.
+    /// slot, with a fee coin of the hub's, to be in a block by `by`'s
+    /// deadline, its fee `by`'s stake at most ([`Self::with_fee_by`]):
+    /// nothing if there is none to make. In no block halfway from `by`'s
+    /// first block it may be in to its deadline, and again past that
+    /// deadline, the operator is told, once each. Whether it was broadcast.
     async fn disclose(
         &self,
         id: &[u8; 32],
         hub: &Hub,
         o: &HubOpening,
         disclosures: &Disclosures,
+        (from, deadline, stake): (u32, u32, Amount),
+        tip: u32,
     ) -> Result<bool> {
         if *disclosures == Disclosures::empty() {
             return Ok(false);
         }
+        let halfway = from.saturating_add(deadline.saturating_sub(from) / 2);
+        if tip > from && tip >= halfway && tip <= deadline && self.once(id, "disclose slow") {
+            self.alert(&format!(
+                "contract {}: its disclosure is in no block yet, halfway to block {deadline} \
+                 (now {tip}), the last it is in time from: its fee rises as that nears; \
+                 check the hub's wallet funds its fee coins",
+                crate::hex_id(id)
+            ));
+        }
+        if tip > deadline && self.once(id, "disclose late") {
+            self.alert(&format!(
+                "contract {}: its disclosure is in no block by block {} (now {tip}), the \
+                 last it is in time from: she may contest its response, and then it must \
+                 prove what it responded",
+                crate::hex_id(id),
+                deadline
+            ));
+        }
+        let by = (deadline, stake);
         let respond = presign(&o.set, "respond")?;
         let prevout = respond.tx.output[SLOT as usize].clone();
         let bytes = disclosures.encode(licash::recovery::Format::of(&o.base).lean());
         let tx = o.disclosure(hub.keys(), &bytes, vec![])?;
         let tx = self
-            .with_fee(id, hub, "disclose", tx, prevout.clone())
+            .with_fee_by(id, hub, "disclose", tx, prevout.clone(), by, tip)
             .await?;
         let tx = self.sealed(id, hub, o, "disclose", tx, prevout)?;
         Ok(self.post(&tx).await)
+    }
+
+    /// Her response in a block at `x_at` and no contest in one yet: its
+    /// disclosure posted again, if its evidence needs one in none yet, to
+    /// be in a block before her wallet, finding none, contests it
+    /// ([`disclose_deadline`]).
+    async fn redisclose(
+        &self,
+        id: &[u8; 32],
+        hub: &Hub,
+        o: &HubOpening,
+        r: &Transaction,
+        (x, x_at): (&Transaction, u32),
+        tip: u32,
+    ) -> Result<()> {
+        // Her contest window over, none is needed.
+        if tip.saturating_add(1) >= x_at.saturating_add(waits(o, "respond_timeout")?) {
+            return Ok(());
+        }
+        let slot = OutPoint {
+            txid: x.compute_txid(),
+            vout: SLOT,
+        };
+        if (self
+            .spend(slot, &x.output[SLOT as usize], x_at, tip)
+            .await?)
+            .is_some()
+        {
+            return Ok(());
+        }
+        let Some(pinned) = Responses::open(&self.data)?.evidence(id)? else {
+            return Ok(());
+        };
+        let evidence = pinned_evidence(o, &pinned)?;
+        let disclosures = recovery::disclosures(&evidence).map_err(|e| anyhow!("{e}"))?;
+        let by = (x_at, disclose_deadline(o, x_at)?, assert_stake(o, r, x)?);
+        self.disclose(id, hub, o, &disclosures, by, tip).await?;
+        Ok(())
     }
 
     /// She contested the hub's response, `x` in a block at `x_at`, with `c`
@@ -1058,10 +1125,7 @@ impl Openings {
         let tag = tagged(id, b"assert");
         let pins = Responses::open(&self.data)?;
         // Missing its deadline pays her claim and the hub's reserve.
-        let (b, _) = o.requested_b(r)?;
-        let (responded, _) = HubProves::responded_b(x)?;
-        let unit = Amount::from_sat(o.base.parts().graph.unit_sats);
-        let stake = unit * u64::from(b.saturating_sub(responded)) + o.babe.spec.terms.reserve_hub;
+        let stake = assert_stake(o, r, x)?;
         let window = (c_at, assert_deadline(o, c_at));
         let post = |tx: Transaction| async move {
             self.post_link(id, hub, "assert", &tx, &c.output[0], window, stake, tip)
@@ -1229,7 +1293,7 @@ impl Openings {
                     return Ok(Err(Played::Idle));
                 }
                 let (input, receipt) = match self
-                    .input(id, hub, o, r, r_at, x, x_at, tip, &pinned)
+                    .input(id, hub, o, r, r_at, x, x_at, c_at, tip, &pinned)
                     .await?
                 {
                     Ok(input) => input,
@@ -1299,6 +1363,7 @@ impl Openings {
         r_at: u32,
         x: &Transaction,
         x_at: u32,
+        c_at: u32,
         tip: u32,
         pinned: &[u8],
     ) -> Result<std::result::Result<(licash_hp::HubInput, Option<std::path::PathBuf>), Played>>
@@ -1326,7 +1391,10 @@ impl Openings {
                 .await?
             {
                 None => {
-                    return Ok(Err(if self.disclose(id, hub, o, &disclosures).await? {
+                    let deadline = contested_disclose_deadline(o, c_at);
+                    let by = (c_at, deadline, assert_stake(o, r, x)?);
+                    let posted = self.disclose(id, hub, o, &disclosures, by, tip).await?;
+                    return Ok(Err(if posted {
                         Played::Posted("disclose")
                     } else {
                         Played::Idle
@@ -1480,10 +1548,7 @@ impl Openings {
         tip: u32,
     ) -> Result<Played> {
         let terminal = presign(&o.set, name)?;
-        let wait = match terminal.tx.input[0].sequence.to_relative_lock_time() {
-            Some(bitcoin::relative::LockTime::Blocks(h)) => u32::from(h.value()),
-            _ => bail!("{name} waits for no number of blocks"),
-        };
+        let wait = waits(o, name)?;
         if tip.saturating_add(1) < parent_at.saturating_add(wait) {
             return Ok(Played::Idle);
         }
@@ -1613,7 +1678,14 @@ impl Openings {
         mut tx: Transaction,
         prevout: TxOut,
     ) -> Result<Transaction> {
-        let (_, coin) = self.store().fee_coin(id, name)?.context("no fee coin")?;
+        // The coin it spends: the first kept, or a larger one since.
+        let spent = tx.input.last().context("no fee input")?.previous_output;
+        let store = self.store();
+        let kept = store.fee_coin(id, name)?.into_iter();
+        let (_, coin) = (kept.chain(store.extra_coins(id, name)?))
+            .find(|(c, _)| *c == spent)
+            .context("no fee coin")?;
+        drop(store);
         o.seal(hub.keys(), &mut tx, &[prevout, coin])?;
         Ok(tx)
     }
@@ -1661,6 +1733,10 @@ impl Openings {
                 },
                 Err(e) => waits(e),
             };
+            // Neither: spent, or gone, its funding then abandoned.
+            if state.is_none() {
+                self.gone(id, name, c.0).await;
+            }
             extra.push((c, state));
         }
         let left = deadline.saturating_sub(tip);
@@ -2686,6 +2762,51 @@ fn respond_deadline(o: &HubOpening, r_at: u32) -> u32 {
         .saturating_sub(g.deadline_margin)
 }
 
+/// The blocks terminal `name` of `o` waits after its parent (its CSV).
+fn waits(o: &HubOpening, name: &str) -> Result<u32> {
+    match presign(&o.set, name)?.tx.input[0]
+        .sequence
+        .to_relative_lock_time()
+    {
+        Some(bitcoin::relative::LockTime::Blocks(h)) => Ok(u32::from(h.value())),
+        _ => bail!("{name} waits for no number of blocks"),
+    }
+}
+
+/// The last tip at which the hub's disclosure, broadcast, still confirms
+/// before her wallet, finding it in no block, contests the response in a
+/// block at `x_at`: at tip `by - 1`, `by` the last tip her contest
+/// confirms in before `respond_timeout` (`answered` in
+/// `holder/recovery.rs`), so in a block by `by - 1`, broadcast by `by - 2`.
+fn disclose_deadline(o: &HubOpening, x_at: u32) -> Result<u32> {
+    let margin = o.base.parts().graph.deadline_margin;
+    Ok(x_at
+        .saturating_add(waits(o, "respond_timeout")?)
+        .saturating_sub(1)
+        .saturating_sub(margin)
+        .saturating_sub(2))
+}
+
+/// Her contest in a block at `c_at`, the last tip at which the hub's
+/// disclosure, broadcast, still leaves its proof [`NEAR`] blocks before
+/// its assertion's deadline once deep enough to prove on.
+fn contested_disclose_deadline(o: &HubOpening, c_at: u32) -> u32 {
+    let depth = o.base.parts().chain.work_depth;
+    assert_deadline(o, c_at)
+        .saturating_sub(depth)
+        .saturating_sub(NEAR)
+}
+
+/// What the hub's assertion missing its deadline costs it, her request
+/// `r` met with response `x`: her claim beyond what it responded, and its
+/// reserve.
+fn assert_stake(o: &HubOpening, r: &Transaction, x: &Transaction) -> Result<Amount> {
+    let unit = Amount::from_sat(o.base.parts().graph.unit_sats);
+    let (b, _) = o.requested_b(r)?;
+    let (responded, _) = HubProves::responded_b(x)?;
+    Ok(unit * u64::from(b.saturating_sub(responded)) + o.babe.spec.terms.reserve_hub)
+}
+
 /// The last tip at which the hub's assertion, broadcast, still confirms
 /// before her `contest_timeout`, `w_a` blocks after her contest at `c_at`
 /// (or, as a plan, after the response it would answer at the earliest):
@@ -2801,6 +2922,33 @@ mod tests {
         assert!(past_the_headers(100, 30, 131));
         assert!(!past_the_headers(u32::MAX, u32::MAX, u32::MAX));
         assert!(!past_the_headers(u32::MAX - 1, 5, u32::MAX));
+    }
+
+    /// The disclosure's deadlines. Uncontested: it is in a block by the
+    /// tip before the one her wallet contests a response with none at
+    /// (`by - 1`, `by` the last tip her contest confirms in before
+    /// `respond_timeout`), so broadcast a block earlier still. Contested:
+    /// deep enough to prove on, [`NEAR`] blocks before the assertion's.
+    #[test]
+    fn a_disclosure_is_due_before_she_contests_and_after_her_contest_in_time_to_prove() {
+        let ctx = licash_contract::opening::Context {
+            tip: 0,
+            trust: licash_contract::opening::Trust::mock(),
+        };
+        let o = Hub::load(&crate::testing::opened().hub, &ctx)
+            .unwrap()
+            .signed()
+            .unwrap();
+        let g = &o.base.parts().graph;
+        let wait = waits(&o, "respond_timeout").unwrap();
+        assert_eq!(wait, u32::from(g.contest_window));
+        let by = 100 + wait - 1 - g.deadline_margin;
+        assert_eq!(disclose_deadline(&o, 100).unwrap() + 2, by);
+        let depth = o.base.parts().chain.work_depth;
+        assert_eq!(
+            contested_disclose_deadline(&o, 200) + depth + NEAR,
+            assert_deadline(&o, 200)
+        );
     }
 
     /// A node's error is told by its code, a failure to ask it by none.

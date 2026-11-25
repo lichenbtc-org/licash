@@ -4596,6 +4596,74 @@ async fn a_hub_funds_again_a_fee_coin_its_wallet_spent_otherwise_and_pays_what_i
     Ok(())
 }
 
+/// Her stale claim, the hub's disclosure in the mempool paying too little
+/// for any block (prioritized below nothing, as a fee market that rose
+/// would leave it). The hub, its response in a block, posts it again with
+/// a larger fee coin before her wallet, finding none, contests it: the
+/// unlock is disclosed in time and she is paid what is left, uncontested.
+/// A hub that left it to the mempool was contested, and as it could not
+/// prove without it, her timeout paid her all she claimed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_hub_posts_again_with_more_fee_a_disclosure_no_block_takes() -> Result<()> {
+    use bitcoin::OutPoint;
+    use licash_contracts::holder::recovery::{self, Stage};
+    use serde_json::{json, Value};
+
+    let s = stale_claim([22; 32]).await?;
+    let alerts = told(&s.openings);
+    let db = s.mine.join("wallet.sqlite");
+    let mut stuck = None;
+    for _ in 0..200 {
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        let r = recovery::advance(&s.wallet, &s.chain, &db, s.rate).await?[0].clone();
+        ensure!(!matches!(r.stage, Stage::Lost | Stage::Done), "{r:?}");
+        let x = match r.request {
+            Some(request) => spending_in_mempool(&s.rt, OutPoint::new(request, 0))?
+                .map(|x| x.compute_txid())
+                .or(r.response),
+            None => None,
+        };
+        if let Some(xid) = x {
+            if let Some(d) = spending_in_mempool(&s.rt, OutPoint::new(xid, 2))? {
+                stuck = Some((xid, d));
+                break;
+            }
+        }
+        s.rt.mine(1)?;
+    }
+    let (xid, d) = stuck.context("the hub never disclosed")?;
+    let did = d.compute_txid();
+    let node = rpc_of(&s.rt, None)?;
+    let _: Value = node
+        .rpc(
+            "prioritisetransaction",
+            json!([did.to_string(), 0, -100_000_000]),
+        )
+        .await?;
+
+    let done = played(&s, |_| true).await?;
+    let slot = OutPoint::new(xid, 2);
+    ensure!(!s.rt.is_unspent(&slot)?, "never disclosed: {done:?}");
+    // Replaced: in no block, nor the mempool.
+    ensure!(s.rt.get_tx(&did).is_err(), "the first one mined");
+    ensure!(done.corrected == Some(98_304), "{done:?}");
+    ensure!(
+        done.assertion.is_none() && done.challenge.is_none(),
+        "{done:?}"
+    );
+    ensure!(done.payout.is_some() && done.timeout.is_none(), "{done:?}");
+    let alerted = alerts.lock().unwrap().clone();
+    ensure!(
+        !alerted
+            .iter()
+            .any(|a| a.contains("disclosure is in no block by")),
+        "{alerted:?}"
+    );
+    Ok(())
+}
+
 /// Her stale claim at a hub whose chain is apart from its wallet's node
 /// ([`apart`]): another node, or an Esplora, that its fee coins' funding
 /// never reaches but through the hub. The hub hands each funding to it,

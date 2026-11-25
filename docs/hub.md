@@ -592,7 +592,12 @@ then has not said whether it can prove the answer. Owed all it asks, the hub let
 the holder's timeout pay her. Owed less (a claim of notes that are not the
 keyset's, or spent), it responds with what is owed, publishes in the
 response's disclose slot what that evidence needs public (a granted spend's
-unlock, a preimage), and waits: the holder, shown that evidence at
+unlock, a preimage), and waits. Its disclosure is due before her wallet,
+finding none, contests the response (a block before the last she may, its
+margin aside), its fee rising as that nears and a larger fee coin funded
+when it pays too little, up to what a contest would put at stake; once
+contested, before the proof needs it deep enough. The operator is told
+when it is in no block halfway there, and again past it. The holder, shown that evidence at
 `/v1/contracts/openings/{id}/evidence` under a signature of the contract's
 claim key (nobody else is), checks it herself, and leaves the response
 alone if it bears out, which pays her what it says once her contest window
