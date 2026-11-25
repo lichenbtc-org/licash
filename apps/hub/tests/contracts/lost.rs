@@ -90,3 +90,116 @@ fn only_an_openings_start_and_steps_are_hushed() {
     assert!(!Hushing::steps(&format!("{at}/openings/ab12/funded")));
     assert!(!Hushing::steps(&format!("{at}/quote")));
 }
+
+/// [`Http`], but the first request to a route ending in `route` lost:
+/// before the hub had it, or, if `after`, its answer, once the hub had it.
+struct Losing {
+    http: Http,
+    route: &'static str,
+    after: bool,
+    lost: std::sync::atomic::AtomicBool,
+}
+
+impl Losing {
+    fn new(route: &'static str, after: bool) -> Result<Self> {
+        Ok(Self {
+            http: Http::new(None)?,
+            route,
+            after,
+            lost: Default::default(),
+        })
+    }
+}
+
+impl licash_wallet::Transport for Losing {
+    async fn request(
+        &self,
+        url: &str,
+        body: Option<Vec<u8>>,
+    ) -> Result<licash_wallet::Response, String> {
+        use std::sync::atomic::Ordering;
+        let losing = url.ends_with(self.route) && !self.lost.swap(true, Ordering::Relaxed);
+        if losing && !self.after {
+            return Err("no answer over Tor in 120 s".into());
+        }
+        let answer = self.http.request(url, body).await;
+        match losing {
+            true => Err("no answer over Tor in 120 s".into()),
+            false => answer,
+        }
+    }
+}
+
+/// Her close's fold, signed by her, its answer lost once the hub signed
+/// it, which the hub broadcasts: her close fails as one that may be
+/// signed, and her wallet, seeing the fold in a block, is paid by it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_fold_whose_signature_answer_was_lost_pays_her_as_it_confirms() -> Result<()> {
+    use licash_contracts::holder::recovery::{self, Stage};
+
+    let n = with_notes([34; 32], Losing::new("/fold/sign", true)?).await?;
+    let (rt, wallet, chain, mine) = (&n.rt, &n.wallet, &n.chain, &n.mine);
+    let file = mine.join("wallet.sqlite");
+    let before = scan(wallet, chain).await?;
+    let closed = holder::close(wallet, chain, &file, &n.contract.id).await;
+    ensure!(
+        closed
+            .as_ref()
+            .is_err_and(|e| format!("{e:#}").contains("may be signed")),
+        "{closed:?}"
+    );
+    let rows = recovery::recoveries(&file)?;
+    ensure!(
+        rows[0].stage == Stage::Folding && rows[0].irrevocable,
+        "{rows:?}"
+    );
+    // Her notes are out of her balance, claimed in the fold.
+    ensure!(available(wallet)? == 65_536 + n.contract.funded);
+    rt.mine(1)?;
+    let rate = bitcoin::FeeRate::from_sat_per_vb(2).context("a rate")?;
+    let done = recovery::advance(wallet, chain, &file, rate).await?;
+    ensure!(
+        done.len() == 1
+            && done[0].stage == Stage::Done
+            && done[0].fold.is_some()
+            && done[0].received == Some(151_071),
+        "{done:?}"
+    );
+    ensure!(scan(wallet, chain).await? == before + 151_071);
+    ensure!(available(wallet)? == 65_536 + n.contract.funded);
+    Ok(())
+}
+
+/// Her close's fold, signed by her, lost before the hub had it: the hub
+/// signed nothing. Her close fails as one that may be signed; asked again,
+/// it folds, and she is paid as by any fold.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_fold_whose_signature_never_reached_the_hub_folds_asked_again() -> Result<()> {
+    use licash_contracts::holder::recovery::{self, Stage};
+
+    let n = with_notes([35; 32], Losing::new("/fold/sign", false)?).await?;
+    let (rt, wallet, chain, mine) = (&n.rt, &n.wallet, &n.chain, &n.mine);
+    let file = mine.join("wallet.sqlite");
+    let before = scan(wallet, chain).await?;
+    let closed = holder::close(wallet, chain, &file, &n.contract.id).await;
+    ensure!(closed.is_err(), "{closed:?}");
+    let first = holder::list(&file)?[0].folded;
+    let txid = holder::close(wallet, chain, &file, &n.contract.id).await?;
+    eprintln!("folded asked again: {first:?} first, {txid} then");
+    rt.mine(1)?;
+    ensure!(rt.confirmations(&txid)?.is_some(), "the fold unmined");
+    let rate = bitcoin::FeeRate::from_sat_per_vb(2).context("a rate")?;
+    let done = recovery::advance(wallet, chain, &file, rate).await?;
+    ensure!(
+        done.len() == 1
+            && done[0].stage == Stage::Done
+            && done[0].fold == Some(txid)
+            && done[0].received == Some(151_071),
+        "{done:?}"
+    );
+    ensure!(scan(wallet, chain).await? == before + 151_071);
+    ensure!(available(wallet)? == 65_536 + n.contract.funded);
+    Ok(())
+}
