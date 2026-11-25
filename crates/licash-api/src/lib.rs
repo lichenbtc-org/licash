@@ -27,6 +27,7 @@
 //!
 //! Swap providers serve the API of [`swaps`].
 
+pub mod bridge;
 pub mod inbox;
 pub mod swaps;
 

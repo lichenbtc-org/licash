@@ -1523,3 +1523,26 @@ fn a_contracts_interest_counts_the_year_its_hub_says() {
     };
     assert_eq!(rate(1, 1, 1, none.year_blocks), 0);
 }
+
+#[test]
+fn a_signed_bridge_request_verifies_for_its_path_and_time_only() {
+    use licash_api::bridge::{Signed, ACCOUNT, MAX_SKEW, REGISTER};
+    let signed = Signed::sign(&[3; 32], REGISTER, 1_000, r#"{"pairing":"ab"}"#.into()).unwrap();
+    let signed = json(&signed);
+    let key = signed.verify(REGISTER, 1_000 + MAX_SKEW).unwrap();
+    assert_eq!(key.to_vec(), signed.key.0);
+    // Another path, too late or ahead, or another request: refused.
+    assert!(signed.verify(ACCOUNT, 1_000).is_err());
+    assert!(signed.verify(REGISTER, 1_001 + MAX_SKEW).is_err());
+    assert!(signed.verify(REGISTER, 999 - MAX_SKEW).is_err());
+    let mut forged = signed.clone();
+    forged.request = r#"{"pairing":"cd"}"#.into();
+    assert_eq!(
+        forged.verify(REGISTER, 1_000).unwrap_err().code,
+        Code::Invalid
+    );
+    let mut moved = signed;
+    moved.at += 1;
+    assert!(moved.verify(REGISTER, 1_000).is_err());
+    assert!(Signed::sign(&[0; 32], REGISTER, 0, String::new()).is_err());
+}
