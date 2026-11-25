@@ -1231,6 +1231,13 @@ impl<'a, T: Transport, C: Chain> Run<'a, T, C> {
                     (false, false) => (wallet.claim_notes(&self.id, &slots)?, vec![]),
                 };
             }
+            // What hers leave of her cap, the notes she imported from a
+            // bridge of hers fill ([`licash_wallet::Wallet::import_notes`]).
+            if let Some(slot) = slots.iter().find(|s| s.id == self.id) {
+                let (cap, max) = left_of(slot, &notes, &locks);
+                let imported = self.wallet.claim_imported(&self.id, &keyset, cap, max)?;
+                notes.extend(imported);
+            }
             self.took
                 .store(!(notes.is_empty() && locks.is_empty()), Ordering::SeqCst);
         }
@@ -1239,7 +1246,22 @@ impl<'a, T: Transport, C: Chain> Run<'a, T, C> {
             bail!("no notes at its hub to claim");
         }
         state.amount = self.amount(&notes, &funded, &locks);
-        let filing = match self.sound(&notes, &funded, &locks, tip).await? {
+        let mut sound = self.sound(&notes, &funded, &locks, tip).await?;
+        if let Err(why) = &sound {
+            // The notes imported are dropped first, for good: hers alone may
+            // be owed whole.
+            let dropped = self.wallet.void_imported(&self.id, why)?;
+            if !dropped.is_empty() {
+                notes.retain(|n| {
+                    (n.note.message().identifier()).map_or(true, |y| !dropped.contains(&y.0))
+                });
+                if !(notes.is_empty() && locks.is_empty() && funded.is_empty()) {
+                    state.amount = self.amount(&notes, &funded, &locks);
+                    sound = self.sound(&notes, &funded, &locks, tip).await?;
+                }
+            }
+        }
+        let filing = match sound {
             Ok(filing) => filing,
             Err(why) => {
                 self.give_back(&why)?;
@@ -3179,6 +3201,15 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
             }
         }
     }
+}
+
+/// What `notes` and `locks` leave of `slot`'s cap and count.
+fn left_of(slot: &ClaimSlot, notes: &[ClaimNote], locks: &[LockClaim]) -> (u64, usize) {
+    let held = (notes.iter().map(|n| n.note.message().denomination()))
+        .chain(locks.iter().map(|l| l.value))
+        .fold(0u64, u64::saturating_add);
+    let keys = notes.len() + locks.iter().map(|l| l.keys.len()).sum::<usize>();
+    (slot.cap.saturating_sub(held), slot.max.saturating_sub(keys))
 }
 
 /// Her close on a fold of her claim ([`Stage::Folding`]).
