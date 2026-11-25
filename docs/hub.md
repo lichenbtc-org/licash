@@ -632,7 +632,11 @@ key-path spend of a contract output is such a fold, and ends the contract.
 A contract no one exited ends at its close: the hub posts its
 default, which pays the holder her reserve and the hub its collateral back,
 to its wallet. The fee coins its wallet funds for these transactions are
-kept in `hub.sqlite` before use, and a contract ended 6 blocks deep is
+kept in `hub.sqlite` before use, and funded again only once one is gone
+(its funding in no block and refused by the hub's node when broadcast
+again, as after a reorg or another spend of the wallet's coins): the
+operator is told, once a contract, and the wallet's funding abandoned so
+its coins are free. A contract ended 6 blocks deep is
 not looked at again. The same database pins the evidence each response is
 decided on and each one-time signature (the response, the assertion) before
 it is made, with the openings, so that one copy holds both as of one moment:

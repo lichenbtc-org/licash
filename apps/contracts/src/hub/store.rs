@@ -356,6 +356,30 @@ impl Store {
         self.fee_coin(id, name)?.context("no fee coin kept")
     }
 
+    /// Keep `new` as terminal `name`'s fee coin of opening `id` in place of
+    /// `old`, gone from the chain and the mempool: the one kept, `old`'s
+    /// unless that was replaced already.
+    pub fn replace_fee_coin(
+        &self,
+        id: &[u8; 32],
+        name: &str,
+        old: &(OutPoint, TxOut),
+        new: &(OutPoint, TxOut),
+    ) -> Result<(OutPoint, TxOut)> {
+        self.0.execute(
+            "UPDATE opening_fee_coins SET outpoint = ?3, output = ?4
+             WHERE id = ?1 AND name = ?2 AND outpoint = ?5",
+            params![
+                id,
+                name,
+                serialize(&new.0),
+                serialize(&new.1),
+                serialize(&old.0)
+            ],
+        )?;
+        self.fee_coin(id, name)?.context("no fee coin kept")
+    }
+
     /// The extra fee coins kept for transaction `name` of opening `id`, in
     /// the order kept ([`Store::keep_extra_coin`]): a link's child's, or a
     /// terminal's larger ones.
@@ -682,11 +706,17 @@ mod tests {
         // Another made after a restart: the first one kept is paid with.
         ensure!(store.keep_fee_coin(&[1; 32], "default", &coin(8))? == coin(7));
         ensure!(store.keep_fee_coin(&[1; 32], "success", &coin(8))? == coin(8));
+        // One gone, replaced: once, in place of the one gone only.
+        ensure!(store.replace_fee_coin(&[1; 32], "success", &coin(7), &coin(9))? == coin(8));
+        ensure!(store.replace_fee_coin(&[1; 32], "success", &coin(8), &coin(9))? == coin(9));
+        ensure!(store.replace_fee_coin(&[1; 32], "success", &coin(8), &coin(10))? == coin(9));
+        ensure!(store.fee_coin(&[1; 32], "default")? == Some(coin(7)));
         store.end(&[1; 32], 100)?;
         store.end(&[1; 32], 101)?;
         drop(store);
         let store = Store::open(&crate::testing::hub_data(data.path()))?;
         ensure!(store.fee_coin(&[1; 32], "default")? == Some(coin(7)));
+        ensure!(store.fee_coin(&[1; 32], "success")? == Some(coin(9)));
         ensure!(store.signed_ids()? == vec![[2; 32]]);
         Ok(())
     }

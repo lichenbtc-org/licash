@@ -4259,39 +4259,13 @@ async fn a_holder_challenges_a_false_assertion_and_its_failure_pays_her_whole_cl
     Ok(())
 }
 
-/// The unconfirmed transactions of `rt`'s `harness` wallet (the hub's: its
-/// fee coins' funding and their children) that a reorg evicted, submitted
-/// again. Evicted here as they spend coinbases just matured, which the
-/// shorter chain makes immature: a regtest artifact. The hub does not
-/// recover from a fee coin gone on its own: it posts the package of its
-/// cached coin again, which never relays. Tested apart from this.
-async fn resubmit_evicted(rt: &Regtest) -> Result<()> {
-    use serde_json::{json, Value};
-    let wallet = rpc_of(rt, Some("harness"))?;
-    let listed: Value = wallet.rpc("listtransactions", json!(["*", 100])).await?;
-    let evicted: Vec<String> = listed
-        .as_array()
-        .context("listtransactions")?
-        .iter()
-        .filter(|t| t["confirmations"].as_i64() == Some(0) && t["category"] != "orphan")
-        .filter_map(|t| t["txid"].as_str().map(str::to_owned))
-        .collect();
-    // Parents before children: as many rounds as a chain of them is long.
-    for _ in 0..evicted.len() {
-        for txid in &evicted {
-            let tx: Value = wallet.rpc("gettransaction", json!([txid])).await?;
-            let _: Result<Value> = wallet.rpc("sendrawtransaction", json!([tx["hex"]])).await;
-        }
-    }
-    Ok(())
-}
-
 /// Her request, in a block, answered: the hub's response in the mempool.
 /// Then a reorg: her request mined again, its witness written otherwise
 /// (each digit of 15 as 16, which Bitcoin takes as 15), the same txid,
 /// `b` and `E`. The hub answers it as the request it pinned, with the
 /// response it signed (no other: its one-time key signed once), and she
-/// is paid what is left.
+/// is paid what is left. The fee coins the reorg left out (their funding
+/// spends coinbases the shorter chain made immature) are funded again.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs bitcoind and a release build"]
 async fn a_hub_answers_her_request_mined_again_written_otherwise_after_a_reorg() -> Result<()> {
@@ -4340,7 +4314,6 @@ async fn a_hub_answers_her_request_mined_again_written_otherwise_after_a_reorg()
     let hash: Value = node.rpc("getblockhash", json!([at])).await?;
     let _: Option<Value> = node.rpc_optional("invalidateblock", json!([hash])).await?;
     s.rt.mine_with(&[again.clone()])?;
-    resubmit_evicted(&s.rt).await?;
     ensure!(
         s.rt.get_tx(&txid)?.compute_wtxid() == again.compute_wtxid(),
         "mined as written otherwise"
@@ -4354,6 +4327,170 @@ async fn a_hub_answers_her_request_mined_again_written_otherwise_after_a_reorg()
     ensure!(
         received < 131_071,
         "{received} of a claim of 131071: {done:?}"
+    );
+    Ok(())
+}
+
+/// The transaction of `rt`'s `harness` wallet (the hub's) that funded
+/// `coin`, in the mempool, replaced by a spend of its inputs back to that
+/// wallet at a higher fee: `coin` gone, and what spent it with it, as an
+/// operator's own spend of the hub's wallet or a reorg can leave one.
+async fn replace_funding(rt: &Regtest, coin: bitcoin::OutPoint) -> Result<()> {
+    use serde_json::{json, Map, Value};
+    let wallet = rpc_of(rt, Some("harness"))?;
+    let entry: Value = wallet
+        .rpc("getmempoolentry", json!([coin.txid.to_string()]))
+        .await?;
+    let sat = |v: &Value| -> Result<u64> {
+        Ok(bitcoin::Amount::from_btc(v.as_f64().context("an amount")?)?.to_sat())
+    };
+    let (fee, evicted) = (
+        sat(&entry["fees"]["base"])?,
+        sat(&entry["fees"]["descendant"])?,
+    );
+    let funding = rt.get_tx(&coin.txid)?;
+    let out: u64 = funding.output.iter().map(|o| o.value.to_sat()).sum();
+    let inputs: Vec<Value> = (funding.input.iter())
+        .map(
+            |i| json!({"txid": i.previous_output.txid.to_string(), "vout": i.previous_output.vout}),
+        )
+        .collect();
+    let address: String = wallet.rpc("getnewaddress", json!([])).await?;
+    let back = bitcoin::Amount::from_sat(out + fee - evicted - 10_000);
+    let mut to = Map::new();
+    to.insert(address, json!(back.to_btc()));
+    let raw: String = wallet
+        .rpc("createrawtransaction", json!([inputs, [to]]))
+        .await?;
+    let signed: Value = wallet
+        .rpc("signrawtransactionwithwallet", json!([raw]))
+        .await?;
+    ensure!(signed["complete"] == true, "{signed}");
+    let _: String = wallet
+        .rpc("sendrawtransaction", json!([signed["hex"]]))
+        .await?;
+    ensure!(!rt.mempool()?.contains(&coin.txid), "{coin} not replaced");
+    Ok(())
+}
+
+/// The transaction in `rt`'s mempool spending `coin`, if one does.
+fn spending_in_mempool(
+    rt: &Regtest,
+    coin: bitcoin::OutPoint,
+) -> Result<Option<bitcoin::Transaction>> {
+    for txid in rt.mempool()? {
+        let Ok(tx) = rt.get_tx(&txid) else { continue };
+        if tx.input.iter().any(|i| i.previous_output == coin) {
+            return Ok(Some(tx));
+        }
+    }
+    Ok(None)
+}
+
+/// Her stale claim, the hub's response and its fee child in the mempool.
+/// Its wallet then spends otherwise, at a higher fee, the coins its fee
+/// coins were funded with: first those of the child's coin, then, once
+/// posted, those of its disclosure's. Each coin gone, the hub funds
+/// another and posts again (not the transaction of the coin gone, which
+/// never relays), its operator told; it discloses the unlock and she is
+/// paid what is left.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_hub_funds_again_a_fee_coin_its_wallet_spent_otherwise_and_pays_what_is_left(
+) -> Result<()> {
+    use bitcoin::OutPoint;
+    use licash_contracts::holder::recovery::{self, Stage};
+
+    let s = stale_claim([19; 32]).await?;
+    let alerts = told(&s.openings);
+    let db = s.mine.join("wallet.sqlite");
+    let advance = || recovery::advance(&s.wallet, &s.chain, &db, s.rate);
+    // The response and its child, in the mempool.
+    let mut answered = None;
+    for _ in 0..200 {
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        let r = advance().await?[0].clone();
+        ensure!(!matches!(r.stage, Stage::Lost | Stage::Done), "{r:?}");
+        if let Some(request) = r.request {
+            let x = spending_in_mempool(&s.rt, OutPoint::new(request, 0))?;
+            if let Some(x) = x {
+                answered = Some(x);
+                break;
+            }
+        }
+        s.rt.mine(1)?;
+    }
+    let x = answered.context("the hub never responded")?;
+    let xid = x.compute_txid();
+    // Its child: of the response's outputs, it spends one not the
+    // disclose slot (2), which its disclosure spends.
+    let child_of = |rt: &Regtest| -> Result<Option<bitcoin::Transaction>> {
+        for vout in (0..x.output.len() as u32).filter(|v| *v != 2) {
+            if let Some(child) = spending_in_mempool(rt, OutPoint::new(xid, vout))? {
+                return Ok(Some(child));
+            }
+        }
+        Ok(None)
+    };
+    let child = child_of(&s.rt)?.context("the response went without a fee child")?;
+    for coin in child.input.iter().map(|i| i.previous_output) {
+        if coin.txid != xid {
+            replace_funding(&s.rt, coin).await?;
+        }
+    }
+    ensure!(child_of(&s.rt)?.is_none(), "its child left in the mempool");
+    let round = s.openings.answer_requests().await?;
+    ensure!(round.failed == 0, "{round:?}");
+    let again = child_of(&s.rt)?.context("no child made again")?;
+    ensure!(
+        again.compute_txid() != child.compute_txid(),
+        "the same child"
+    );
+
+    // Its disclosure, in the mempool, its coin gone too.
+    let slot = OutPoint::new(xid, 2);
+    let mut disclosed = None;
+    for _ in 0..200 {
+        if let Some(d) = spending_in_mempool(&s.rt, slot)? {
+            disclosed = Some(d);
+            break;
+        }
+        ensure!(
+            s.rt.is_unspent(&slot)?,
+            "disclosed before its coin was taken"
+        );
+        s.rt.mine(1)?;
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        let r = advance().await?[0].clone();
+        ensure!(!matches!(r.stage, Stage::Lost | Stage::Done), "{r:?}");
+    }
+    let d = disclosed.context("the hub never disclosed")?;
+    let coin = d
+        .input
+        .iter()
+        .map(|i| i.previous_output)
+        .find(|c| *c != slot);
+    replace_funding(&s.rt, coin.context("a disclosure of no fee coin")?).await?;
+    ensure!(
+        spending_in_mempool(&s.rt, slot)?.is_none(),
+        "disclosed still"
+    );
+
+    let done = played(&s, |_| true).await?;
+    ensure!(!s.rt.is_unspent(&slot)?, "never disclosed: {done:?}");
+    ensure!(done.corrected == Some(98_304), "{done:?}");
+    ensure!(done.payout.is_some() && done.timeout.is_none(), "{done:?}");
+    // Told once a contract.
+    let alerted = alerts.lock().unwrap().clone();
+    ensure!(
+        alerted
+            .iter()
+            .filter(|a| a.contains("is gone, in no block"))
+            .count()
+            == 1,
+        "{alerted:?}"
     );
     Ok(())
 }
