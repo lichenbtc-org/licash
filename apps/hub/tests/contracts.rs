@@ -30,6 +30,10 @@ mod load;
 #[path = "contracts/outage.rs"]
 mod outage;
 
+/// Answers lost after the hub took the request ([`lost`]).
+#[path = "contracts/lost.rs"]
+mod lost;
+
 /// Whether the wallet's file at `wallet` holds the holder's contracts: made
 /// with the first contract opened, and by no reading of them.
 fn holds_contracts(wallet: &std::path::Path) -> Result<bool> {
