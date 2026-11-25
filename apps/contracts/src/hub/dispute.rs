@@ -2124,16 +2124,26 @@ impl Openings {
             crate::hex_id(id),
             self.store().fee_coins_kept(id, name)?
         );
-        let funded = match self.tagged_coin(&tag, script).await {
-            Ok(Some(coin)) => {
+        let funded = match self.tagged(&tag).await {
+            // Found, read: taken. Found and not read: nothing funded this
+            // round, as another would be a coin too many.
+            Ok(Some(txid)) => self.coin_of(&txid, script).await.inspect(|coin| {
                 tracing::warn!(id = %crate::hex_id(id), coin = %coin.0, "{name}'s fee coin funded before and not kept: taken");
-                Ok(coin)
-            }
+            }),
             Ok(None) => self.funded_coin(script, value, &tag).await,
-            // Not told: funded, as a coin too many costs less than a
-            // transaction not posted in time.
+            // Not listed (a login without `listtransactions`): funded, as
+            // a transaction not posted in time costs more than a coin too
+            // many, its operator told.
             Err(e) => {
                 tracing::warn!(id = %crate::hex_id(id), "{name}'s fee coins funded before not listed: {e:#}");
+                if self.once(id, "fee coins unlisted") {
+                    self.alert(&format!(
+                        "contract {}: the hub's wallet does not list its transactions ({e:#}): \
+                         a hub stopped between funding a fee coin and keeping it funds another, \
+                         lost to it. Allow `listtransactions` to its Core login.",
+                        crate::hex_id(id)
+                    ));
+                }
                 self.funded_coin(script, value, &tag).await
             }
         };
@@ -2151,25 +2161,18 @@ impl Openings {
         funded
     }
 
-    /// The coin paying `script` the hub's wallet funded under `tag`
-    /// ([`Self::fund_coin`]), if it is among its last transactions.
-    async fn tagged_coin(
-        &self,
-        tag: &str,
-        script: &ScriptBuf,
-    ) -> Result<Option<(OutPoint, TxOut)>> {
+    /// The txid of the transaction the hub's wallet funded a fee coin
+    /// with under `tag` ([`Self::fund_coin`]), if it is among its last.
+    async fn tagged(&self, tag: &str) -> Result<Option<String>> {
         let listed: Vec<serde_json::Value> = self
             .wallet
-            .rpc("listtransactions", serde_json::json!(["*", 1000, 0, true]))
+            .rpc("listtransactions", serde_json::json!(["*", 1000]))
             .await?;
-        let Some(txid) = (listed.iter())
+        Ok((listed.iter())
             .rev()
             .filter(|t| t["comment"].as_str() == Some(tag))
             .find_map(|t| t["txid"].as_str())
-        else {
-            return Ok(None);
-        };
-        self.coin_of(txid, script).await.map(Some)
+            .map(str::to_owned))
     }
 
     async fn funded_coin(

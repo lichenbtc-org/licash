@@ -992,6 +992,11 @@ Before starting it:
   lacking one responds to none of its contested claims.
 - Expect no migration: a database or file of an earlier layout is refused
   by name, never read nor replaced.
+- A Core login of the hub's limited by `-rpcwhitelist` needs, with
+  `--contracts`, `listtransactions`, `getmempoolentry` and
+  `abandontransaction` too (above). Without `listtransactions` its operator
+  is told, and a hub stopped between funding a fee coin and keeping it
+  funds another.
 - A hub of `--contracts` started without witnesses refuses to start:
   name its witnesses ([Contract witnesses](#contract-witnesses)), and on
   signet, with contracts signed before, import them first; or, on regtest
