@@ -127,7 +127,10 @@ async fn sized<T: Transport>(
     let now = wallet.hub_info(&hub).await;
     let now = now.map_err(|e| anyhow!("{hub}'s fees: {e}"))?;
     let range = now.contracts.and_then(|c| c.range);
-    if let Some(why) = fees::abusive(&now.fees, range.as_ref()) {
+    // Its cost is not judged against the coin ([`fees::costly`]): a coin
+    // paid for may be its price and a little of her own, the hub funding
+    // the rest, and costs what she was quoted at most ([`ceiling`]).
+    if let Some(why) = fees::abusive(&now.fees) {
         bail!("{hub} charges more than is sane, {why}: no contract opens there");
     }
     ensure!(
@@ -186,7 +189,7 @@ pub async fn pay<T: Transport>(
     store.insert_paid(
         &quote.ticket,
         &coin.hub,
-        (ask.blocks, ask.max_price, ask.cap),
+        (ask.blocks, ceiling(ask, coin.price), ask.cap),
         coin.value,
     )?;
     tracing::info!(
@@ -204,6 +207,19 @@ pub async fn pay<T: Transport>(
         price: coin.price,
         fit: coin.fit,
     })
+}
+
+/// The most a contract opened on a coin paid for at `price` may cost, as
+/// `ask`ed: her own ceiling, or with none that price, quoted to her before
+/// she paid. Never none: a coin paid for is judged by what she accepted,
+/// not by what is sane of it ([`fees::costly`]), which it may well be
+/// past, its price and a little of hers.
+fn ceiling(ask: &Ask, price: u64) -> u64 {
+    if ask.max_price == u64::MAX {
+        price
+    } else {
+        ask.max_price
+    }
 }
 
 /// The coin to pay for, and the contract it fits ([`fit`]): of the smallest
@@ -399,6 +415,22 @@ mod tests {
             ppm_year_funded: 0,
             year_blocks: licash_api::YEAR_BLOCKS,
         }
+    }
+
+    /// A coin paid for opens at her ceiling at most, or with none at the
+    /// price quoted: never unbounded, which would judge it by what is sane
+    /// of it after it was paid for.
+    #[test]
+    fn a_coin_paid_for_opens_at_her_ceiling_or_its_quoted_price() {
+        let ask = |max_price| Ask {
+            blocks: 1_000,
+            max_price,
+            cap: None,
+            deposit: None,
+        };
+        assert_eq!(ceiling(&ask(u64::MAX), 31_000), 31_000);
+        assert_eq!(ceiling(&ask(40_000), 31_000), 40_000);
+        assert_eq!(ceiling(&ask(30_000), 31_000), 30_000);
     }
 
     /// The coin paid for is the price and her part, of the smallest

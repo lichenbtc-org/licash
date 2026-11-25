@@ -2,13 +2,14 @@
 //! a contract opened there are the most it may charge her from then on
 //! ([`agree`], which tells her wallet): a hub may raise its fees whenever
 //! it likes, and is then paid nothing until she [`approve`]s them. A hub
-//! charging more than is sane ([`abusive`]) opens no contract unasked.
+//! charging more than is sane ([`abusive`]), or a contract costing more
+//! than is sane of the coin paying it ([`costly`]), opens none unasked.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{ensure, Result};
-use licash_api::{ContractRange, Fee, Fees};
+use licash_api::{Fee, Fees};
 use licash_contract::opening::Fate;
 use licash_wallet::{Transport, Wallet};
 
@@ -29,14 +30,10 @@ pub const SANE: Fees = Fees {
     output_msat: 1_000,
 };
 
-/// And for a contract of terms she chose, a year: 20% of its cap.
-pub const SANE_PPM_YEAR: u32 = 200_000;
-
-/// Why no contract opens unasked at a hub charging `fees`, of terms
-/// chosen within `range` if any: the first of its fees that is more than
-/// is sane ([`SANE`], [`SANE_PPM_YEAR`]). None if none is.
-pub fn abusive(fees: &Fees, range: Option<&ContractRange>) -> Option<String> {
-    let year = range.map_or(0, |r| u64::from(r.ppm_year.max(r.ppm_year_funded)));
+/// Why no contract opens unasked at a hub charging `fees`: the first of
+/// them that is more than is sane ([`SANE`]). None if none is. What a
+/// contract itself costs is judged against the coin paying it ([`costly`]).
+pub fn abusive(fees: &Fees) -> Option<String> {
     let parts = [
         (
             "a payment's base fee, in sat",
@@ -69,14 +66,31 @@ pub fn abusive(fees: &Fees, range: Option<&ContractRange>) -> Option<String> {
             fees.output_msat,
             SANE.output_msat,
         ),
-        (
-            "a contract's price a year, in parts per million of its cap",
-            year,
-            u64::from(SANE_PPM_YEAR),
-        ),
     ];
     let (what, is, most) = parts.iter().find(|(_, is, most)| is > most)?;
     Some(format!("{what}: {is}, where {most} at most is sane"))
+}
+
+/// The most of the coin paying for a contract its cost may be, as a
+/// fraction: half. A sanity bound, not a price: what she pays is hers to
+/// bound.
+pub const SANE_SHARE: u64 = 2;
+
+/// Why a contract priced `price` sat, `reserve` of it her reserve, paid
+/// for by a coin of `coin` sat, opens unasked at no hub: its cost, the
+/// hub's fee and interest (her reserve comes back to her as it closes),
+/// more than half the coin ([`SANE_SHARE`]). None if not. A contract
+/// mostly the hub's own funds (a coin little more than its price) costs
+/// more than that: it opens only asked all the same, or of a price she
+/// bounded herself, seen before she chose it.
+pub fn costly(price: u64, reserve: u64, coin: u64) -> Option<String> {
+    let cost = price.saturating_sub(reserve);
+    let most = coin / SANE_SHARE;
+    (cost > most).then(|| {
+        format!(
+            "its fee and interest, {cost} sat, more than {most}, half the coin of {coin} sat paying for it"
+        )
+    })
 }
 
 /// Tell `wallet` the most each hub it trusts may charge
@@ -252,23 +266,11 @@ mod tests {
 
     #[test]
     fn a_hub_charging_what_hubs_do_is_sane_and_one_charging_more_is_told_why() {
-        let range = |ppm_year| ContractRange {
-            min_cap: 1,
-            max_cap: 1_000_000,
-            min_blocks: 1,
-            max_blocks: 1_000,
-            per_coin: 1,
-            reserve: 20_000,
-            fee: 1_000_000,
-            ppm_year,
-            ppm_year_funded: 0,
-            year_blocks: licash_api::YEAR_BLOCKS,
-        };
-        assert_eq!(abusive(&Fees::default(), None), None);
-        assert_eq!(abusive(&fees(1, 100, 100), Some(&range(10_000))), None);
-        assert_eq!(abusive(&SANE, Some(&range(SANE_PPM_YEAR))), None);
-        // Each fee, of each kind, and the price of the terms she chooses.
-        let over = |fees: Fees, year| abusive(&fees, Some(&range(year))).unwrap();
+        assert_eq!(abusive(&Fees::default()), None);
+        assert_eq!(abusive(&fees(1, 100, 100)), None);
+        assert_eq!(abusive(&SANE), None);
+        // Each fee, of each kind.
+        let over = |fees: Fees| abusive(&fees).unwrap();
         for (raised, what) in [
             (
                 Fees {
@@ -329,14 +331,29 @@ mod tests {
                 "each note",
             ),
         ] {
-            let why = over(raised, 0);
+            let why = over(raised);
             assert!(why.contains(what), "{why}");
             assert!(raised.above(&SANE));
         }
-        let why = over(SANE, 200_001);
-        assert!(why.contains("a year") && why.contains("200001"), "{why}");
-        // Of fixed terms, their price is hers to bound.
-        assert_eq!(abusive(&SANE, None), None);
+    }
+
+    /// A contract's cost is judged against the coin paying it, not its
+    /// hub's rate: a high rate on a little of the hub's own is sane, her
+    /// reserve is no cost, and a coin little more than the price, the hub
+    /// funding most of a large cap, is not opened unasked.
+    #[test]
+    fn a_contract_costing_more_than_half_its_coin_is_told_why() {
+        // Her reserve, 20,000 sat, comes back: 10,000 of fee of a 50,000 coin.
+        assert_eq!(costly(30_000, 20_000, 50_000), None);
+        // Half exactly, of an odd coin too.
+        assert_eq!(costly(45_000, 20_000, 50_000), None);
+        assert_eq!(costly(45_000, 20_000, 50_001), None);
+        let why = costly(45_001, 20_000, 50_000).unwrap();
+        assert!(why.contains("25001") && why.contains("25000"), "{why}");
+        // Mostly the hub's: a coin of the price and a little more.
+        assert!(costly(130_000, 20_000, 131_000).is_some());
+        // A reserve above the price is no gain.
+        assert_eq!(costly(10_000, 20_000, 0), None);
     }
 
     #[tokio::test]
