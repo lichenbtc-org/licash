@@ -34,14 +34,20 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.licash.chain.mobile.Chain as LightClient
 import org.licash.chain.mobile.Mobile
 import org.licash.core.Activity
+import org.licash.core.AppTerms
 import org.licash.core.BackupFound
 import org.licash.core.BackupStep
 import org.licash.core.Balance
 import org.licash.core.BalancePoint
 import org.licash.core.BalanceSample
+import org.licash.core.Bridge
+import org.licash.core.BridgeAccount
+import org.licash.core.BridgeApp
+import org.licash.core.BridgeTopUp
 import org.licash.core.ChainSource
 import org.licash.core.Code
-import org.licash.core.ExtraCode
+import org.licash.core.ColdStorage
+import org.licash.core.ConnectedApp
 import org.licash.core.Contact
 import org.licash.core.Contract
 import org.licash.core.ContractExit
@@ -50,43 +56,47 @@ import org.licash.core.ContractState
 import org.licash.core.Details
 import org.licash.core.DonationAddress
 import org.licash.core.ExitConsent
+import org.licash.core.ExportedNotes
+import org.licash.core.ExtraCode
 import org.licash.core.FeesRaised
 import org.licash.core.FolderFile
 import org.licash.core.Holding
 import org.licash.core.Hub
+import org.licash.core.HubsFound
+import org.licash.core.ImportSource
+import org.licash.core.ImportedNotes
 import org.licash.core.InvoiceQuote
 import org.licash.core.Kind
 import org.licash.core.LicashException
 import org.licash.core.LightningInvoice
 import org.licash.core.MoveQuote
 import org.licash.core.Network
+import org.licash.core.NoteOptimization
 import org.licash.core.Notes
 import org.licash.core.NotesOf
-import org.licash.core.NoteOptimization
 import org.licash.core.Paid
 import org.licash.core.PaidContract
 import org.licash.core.PaidContractQuote
-import org.licash.core.Recovery
+import org.licash.core.PayOffer
 import org.licash.core.PayQuote
 import org.licash.core.PayoutQuote
-import org.licash.core.HubsFound
-import org.licash.core.PayOffer
-import org.licash.core.ColdStorage
+import org.licash.core.Recovery
 import org.licash.core.Scan
 import org.licash.core.Scanned
 import org.licash.core.State
 import org.licash.core.Stats
+import org.licash.core.TopUpRules
 import org.licash.core.TorClient
 import org.licash.core.TorStatus
 import org.licash.core.Wallet
+import org.licash.core.backupFileMost
+import org.licash.core.backupFolderName
 import org.licash.core.chainName
 import org.licash.core.defaultRelays
 import org.licash.core.explorer
-import org.licash.core.backupFileMost
-import org.licash.core.backupFolderName
 import org.licash.core.findBackup
-import org.licash.core.stateBundleMost
 import org.licash.core.setLogger
+import org.licash.core.stateBundleMost
 import org.licash.core.walletExists
 import org.licash.wallet.ui.Progress
 import org.licash.wallet.ui.shownName
@@ -870,6 +880,14 @@ class Engine(context: Context) {
         } catch (e: LicashException) {
             AppLog.info("note maintenance deferred: ${explain(e)}")
         }
+        // Bridges whose rules say so topped up out of the notes: each on its own.
+        try {
+            locked { it.topUpBridges() }.forEach { t ->
+                t.error?.let { AppLog.info("a top-up of a bridge deferred: $it") }
+            }
+        } catch (e: LicashException) {
+            AppLog.info("bridge top-ups deferred: ${explain(e)}")
+        }
         state.update { it.copy(problem = problems.firstOrNull()) }
         refresh()
         tell()
@@ -1528,6 +1546,71 @@ class Engine(context: Context) {
 
     /** Extra code `index`, asking `amount` if given. */
     suspend fun extraCode(index: UInt, amount: ULong?): Result<Code> = io { local { it.extraCode(index, amount) } }
+
+    /** The NWC bridges added, each an account apps pay and are paid through. */
+    suspend fun bridges(): Result<List<Bridge>> = io { local { it.bridges() } }
+
+    /** Add the bridge at `url`, with the pairing code its operator gave if it keeps only its owner's. */
+    suspend fun addBridge(url: String, pairing: String?): Result<Bridge> = io { local { it.addBridge(url, pairing) } }
+
+    /** Forget the bridge at `url`: its account stays there. */
+    suspend fun removeBridge(url: String): Result<Unit> = io { local { it.removeBridge(url) } }
+
+    /** The account at the bridge at `url`, as it says. */
+    suspend fun bridgeAccount(url: String): Result<BridgeAccount> = io { local { it.bridgeAccount(url) } }
+
+    /** Top the bridge at `url` up each round by `rules`, or no more. */
+    suspend fun setBridgeRules(url: String, rules: TopUpRules?): Result<Unit> =
+        io { local { it.setBridgeRules(url, rules) } }
+
+    /** Connect an app to the account at the bridge at `url`: the URI to give it. */
+    suspend fun connectApp(url: String, terms: AppTerms): Result<ConnectedApp> = io { local { it.connectApp(url, terms) } }
+
+    /** Revoke the app of key `key` at the bridge at `url`, for good. */
+    suspend fun revokeApp(url: String, key: String): Result<BridgeApp> = io { local { it.revokeApp(url, key) } }
+
+    /** Name the account's Lightning Address at the bridge at `url`, or none. */
+    suspend fun nameBridgeAddress(url: String, name: String?): Result<BridgeAccount> =
+        io { local { it.bridgeAddress(url, name) } }
+
+    /** The first Lightning Address of an account at a bridge, if any: none asked of bridges serving none. */
+    suspend fun bridgeAddress(): Result<String?> = io {
+        local { w ->
+            w.bridges().filter { it.addresses }.firstNotNullOfOrNull { b ->
+                runCatching { w.bridgeAccount(b.url).lightningAddress }.getOrNull()
+            }
+        }
+    }
+
+    /** Top the bridge at `url` up by `amount` out of the notes, its fee at most `maxFee` if given. */
+    suspend fun topUpBridge(url: String, amount: ULong, maxFee: ULong?): Result<BridgeTopUp> = io {
+        try {
+            locked { it.topUpBridge(url, amount, maxFee) }
+        } finally {
+            refresh()
+        }
+    }
+
+    /** Have the bridge at `url` pay `amount` of the account back to the wallet. */
+    suspend fun withdrawBridge(url: String, amount: ULong): Result<State> = io {
+        try {
+            locked { it.withdrawBridge(url, amount) }
+        } finally {
+            refresh()
+        }
+    }
+
+    /** Freeze the bridge at `url` for good and import its notes, for recoveries to claim. */
+    suspend fun exportBridge(url: String): Result<ExportedNotes> = io { locked { it.exportBridge(url) } }
+
+    /** Import the notes a frozen bridge's operator exported, in hex. */
+    suspend fun importNotes(export: String): Result<ImportedNotes> = io { locked { it.importNotes(export) } }
+
+    /** The notes imported, by bridge. */
+    suspend fun importedNotes(): Result<List<ImportSource>> = io { local { it.importedNotes() } }
+
+    /** Forget the notes imported of the bridge of key `source`: refused while a recovery claims them. */
+    suspend fun discardImported(source: String): Result<UInt> = io { locked { it.discardImported(source) } }
 
     /** The code on Bitcoin: an address any wallet pays, handed out, and watched from then on. */
     suspend fun bitcoinCode(amount: ULong?): Result<Code> = io { local { it.bitcoinCode(amount) } }
