@@ -275,7 +275,8 @@ instead, its node holding the payment until the provider locks its notes
 to the app at a hub it trusts, which the app claims as it claims a hub's:
 nothing is trusted to the provider, but it sees the amount, the memo and
 which payments go to one wallet. Receive says the provider's fee taken.
-Receive has a tab each for the Licash code (its hubs, and its silent
+Receive has a tab each for the Licash address (the wallet's payment code,
+as the app calls it everywhere: its hubs, and its silent
 payment address), Lightning (asking an amount first) and Bitcoin (the bare
 address any wallet pays, handed out only once asked for); the code alone,
 the silent payment address alone and which identity the code is of are
@@ -332,7 +333,7 @@ in the background: the periodic job runs while any is on its way. The
 wallet file records where each stands; a `deliveries.json` left by an
 earlier version is no longer read.
 
-Paying a code, a note may be typed for the payee, and "Share my code"
+Paying a code, a note may be typed for the payee, and "Share my address"
 (off by default) tells them who paid, proved to them alone: both sealed
 for the payee, the hub and relays reading neither. A hub that would not
 keep a note with a payment refuses it, nothing paid, and the app offers
@@ -366,7 +367,7 @@ still holds it and must hand it over), and paid on to the wallet's own
 code after a delay of between 1 and 30 minutes, a different one for each
 payment, less the hub's fee: an amount below that fee waits for more. The
 history shows each payment at the code, named "To" it, its fee
-that of moving it to the balance. "Share my code" may share a separate
+that of moving it to the balance. "Share my address" may share a separate
 code instead ("Share as"). Each code is kept in a wallet file of its own
 beside the wallet's (`wallet.sqlite.codes/`), deleted with it, outside
 the state bundle and the automatic backup: a wallet restored from either

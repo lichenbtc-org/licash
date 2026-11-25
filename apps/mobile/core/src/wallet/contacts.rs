@@ -73,7 +73,7 @@ fn kept_code(text: &str, network: ChainProfile) -> Result<PaymentCode, LicashErr
     code.check(network)?;
     let Some(licash) = code.licash else {
         return Err(LicashError::invalid(
-            "not a Licash code: a contact is paid in notes",
+            "not a Licash address: a contact is paid in notes",
         ));
     };
     Ok(PaymentCode {

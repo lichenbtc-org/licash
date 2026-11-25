@@ -73,7 +73,7 @@ internal fun NoteFields(
 ) {
     var picking by remember { mutableStateOf(false) }
     if (picking) {
-        Sheet("Share which code", dismiss = { picking = false }) {
+        Sheet("Share which address", dismiss = { picking = false }) {
             Entry(MAIN_IDENTITY, sub = "The one your contacts know", tag = "share-as-0") {
                 picking = false
                 onShareAs(0u)
@@ -107,10 +107,10 @@ internal fun NoteFields(
         )
         Spacer(Modifier.height(8.dp))
         Toggle(
-            "Share my code",
+            "Share my address",
             share,
             sub = if (share) "They'll know it's you" else "They won't know who paid",
-            means = "Tells them your payment code, so they know the payment is from you and can pay you back. " +
+            means = "Tells them your Licash address, so they know the payment is from you and can pay you back. " +
                 "Anyone they show it to can link it to you.",
             set = onShare,
         )

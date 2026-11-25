@@ -694,7 +694,7 @@ impl Wallet {
             return Ok(Scanned::Payment);
         }
         Err(LicashError::invalid(
-            "neither a payment code, a Lightning invoice nor a payment",
+            "neither a Licash address, a Lightning invoice nor a payment",
         ))
     }
 

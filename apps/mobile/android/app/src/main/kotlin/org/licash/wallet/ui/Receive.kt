@@ -69,8 +69,8 @@ internal enum class Way(val label: String, val says: String, val tag: String) {
     /** A Lightning invoice a hub makes, or a provider where none does, for an amount: any wallet pays it. */
     LIGHTNING("Lightning invoice", "Any Lightning wallet, for an amount", "way-lightning"),
 
-    /** The wallet's code, paid in notes. */
-    CODE("Licash code", "Licash wallets, cheaper and more private", "way-code"),
+    /** The wallet's code, called its address, as what one is paid at is: paid in notes. */
+    CODE("Licash address", "Licash wallets, cheaper and more private", "way-code"),
 
     /** The code on Bitcoin: an address any wallet pays, handed out once asked for, and the silent payment address. */
     BITCOIN("Bitcoin address", "Any Bitcoin wallet, on Bitcoin", "way-bitcoin"),
@@ -668,7 +668,7 @@ private fun MemoField(memo: String, by: String, onMemo: (String) -> Unit, done: 
 
 /** What a separate code is, said where one is made. */
 internal const val SEPARATE_WORDS =
-    "A code of its own to be paid at: no one can tell it's yours, or link it to your other identities. " +
+    "An address of its own to be paid at: no one can tell it's yours, or link it to your other identities. " +
         "Payments to it move to your balance, less a hub fee."
 
 /** The wallet's own code, as an identity: the one its contacts know. */

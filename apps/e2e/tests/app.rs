@@ -828,7 +828,7 @@ async fn refused(eco: &Eco, phone: &Phone, bobs: &PaymentCode) -> anyhow::Result
     phone.tap_id("cancel").await?;
 
     phone.link("licash:nonsense").await?;
-    asked(phone, "Neither a payment code", 30).await?;
+    asked(phone, "Neither a Licash address", 30).await?;
     phone.tap_id("cancel").await?;
 
     // A code naming only a hub it does not use.

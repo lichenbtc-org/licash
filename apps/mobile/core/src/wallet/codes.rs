@@ -28,7 +28,7 @@ impl Wallet {
         let made = self.operation(self.wallet.add_code(&label))?;
         let codes = self.codes()?;
         let code = codes.into_iter().find(|c| c.index == made.index);
-        code.ok_or_else(|| LicashError::failed("an extra code made, then gone"))
+        code.ok_or_else(|| LicashError::failed("an extra address made, then gone"))
     }
 
     /// Extra code `index`, asking `amount` if given, at the wallet's hubs.

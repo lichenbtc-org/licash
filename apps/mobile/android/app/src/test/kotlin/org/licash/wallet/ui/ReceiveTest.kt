@@ -20,7 +20,7 @@ class ReceiveTest {
         assertEquals(listOf(Way.LIGHTNING, Way.CODE, Way.BITCOIN), ways(lightning = true, silent = false))
         assertEquals(listOf(Way.CODE, Way.BITCOIN, Way.SILENT), ways(lightning = false, silent = true))
         assertEquals(
-            listOf("Lightning invoice", "Licash code", "Bitcoin address", "Silent payment address"),
+            listOf("Lightning invoice", "Licash address", "Bitcoin address", "Silent payment address"),
             ways(lightning = true, silent = true).map { it.label },
         )
     }

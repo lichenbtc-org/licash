@@ -80,6 +80,7 @@ a person sees. The apps differ in medium, not in manners.
 | Vault, only as the picture: the tour, setting a wallet up, a step card | Vault for a protection's rows and states |
 | Protected amount, for how much a protection covers | Size, cap |
 | One block is enough | Confirmations (how deep is under Details) |
+| Address, Licash address, for what a wallet is paid at | Code, payment code (the CLI and the protocol keep `code`) |
 | Tokens, ecash tokens, in the tour | Claims |
 
 Core error reasons pass through `explain()` and `plain()` (Android,
