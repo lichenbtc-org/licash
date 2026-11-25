@@ -19,6 +19,10 @@ static DOWN: AtomicBool = AtomicBool::new(false);
 /// packets.
 static STALLS: AtomicBool = AtomicBool::new(false);
 
+/// The coins a transaction the node is handed must spend none of
+/// ([`Severable::withhold`]): refused, as a hub withholding F would.
+static WITHHELD: std::sync::Mutex<Vec<bitcoin::OutPoint>> = std::sync::Mutex::new(Vec::new());
+
 pub(super) struct Severable;
 
 impl Severable {
@@ -42,11 +46,28 @@ impl Severable {
         DOWN.store(false, Ordering::Relaxed);
         STALLS.store(false, Ordering::Relaxed);
     }
+
+    /// No transaction spending `coin` handed to the node: as a hub that
+    /// withholds an F spending it, or whose broadcasts never relay.
+    pub(super) fn withhold(&self, coin: bitcoin::OutPoint) {
+        WITHHELD.lock().unwrap().push(coin);
+    }
+}
+
+/// Whether `params`, of `sendrawtransaction`, hand the node a transaction
+/// spending a coin [`WITHHELD`].
+fn withheld(params: &serde_json::Value) -> bool {
+    let tx = params[0].as_str().and_then(|hex| {
+        bitcoin::consensus::encode::deserialize_hex::<bitcoin::Transaction>(hex).ok()
+    });
+    let withheld = WITHHELD.lock().unwrap();
+    tx.is_some_and(|tx| (tx.input.iter()).any(|i| withheld.contains(&i.previous_output)))
 }
 
 impl Drop for Severable {
     fn drop(&mut self) {
         SEVERABLE.store(false, Ordering::Relaxed);
+        WITHHELD.lock().unwrap().clear();
         self.up();
     }
 }
@@ -81,6 +102,11 @@ async fn through(real: Source) -> Result<Source> {
             call["params"].clone(),
             call["id"].clone(),
         );
+        if method == "sendrawtransaction" && withheld(&params) {
+            let error = serde_json::json!({ "code": -26, "message": "withheld" });
+            return Json(serde_json::json!({ "result": null, "error": error, "id": id }))
+                .into_response();
+        }
         Json(forwarded(&real, method, params, id).await.0).into_response()
     }
     let app = axum::Router::new().fallback(post(answer)).with_state(real);

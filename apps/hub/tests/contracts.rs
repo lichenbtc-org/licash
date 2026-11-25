@@ -34,6 +34,11 @@ mod outage;
 #[path = "contracts/lost.rs"]
 mod lost;
 
+/// She signs her deposit into F first, and takes it back from a hub that
+/// never completes F ([`first`]).
+#[path = "contracts/first.rs"]
+mod first;
+
 /// Whether the wallet's file at `wallet` holds the holder's contracts: made
 /// with the first contract opened, and by no reading of them.
 fn holds_contracts(wallet: &std::path::Path) -> Result<bool> {
@@ -2548,8 +2553,9 @@ async fn hub_answering_following(
 }
 
 /// [`Node`], but stalling at its first broadcast, kept: as a holder whose
-/// app stops once the hub signed F, before it hands F to the network or
-/// tells the hub, which would broadcast it too.
+/// app stops once the hub answered F whole, before she hands it to the
+/// network. The hub broadcast it first: withheld where a test needs F in
+/// no block ([`outage::Severable::withhold`]).
 struct Stalling {
     node: Node,
     f: std::sync::Mutex<Option<bitcoin::Transaction>>,
@@ -2588,8 +2594,8 @@ impl holder::Chain for Stalling {
     }
 }
 
-/// An opening at `url` by `wallet` (of `mine`) stalled once the hub signed
-/// F, before F is broadcast: F.
+/// An opening at `url` by `wallet` (of `mine`) stalled once the hub
+/// answered F whole, before she broadcasts it: F.
 async fn stalled_opening(
     wallet: &Wallet<Http>,
     source: &Source,
@@ -2616,14 +2622,16 @@ async fn stalled_opening(
     f.context("no F")
 }
 
-/// The hub frees the coins of an opening it signed whose F never confirms:
-/// at once once her deposit is spent elsewhere, deep; else, a day after it
-/// first saw F in no block (or once F may no longer fund its contract),
-/// by spending one of its own coins F spends back to its wallet.
+/// The hub frees the coins of an opening it signed whose F never confirms,
+/// its broadcasts of F never relayed: at once once her deposit is spent
+/// elsewhere, deep; else, a day after it first saw F in no block (or once
+/// F may no longer fund its contract), by spending one of its own coins F
+/// spends back to its wallet.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs bitcoind and a release build"]
 async fn a_hub_frees_the_coins_of_an_opening_it_signed_whose_f_never_confirms() -> Result<()> {
     use bitcoin::FeeRate;
+    let severable = outage::Severable::on();
     let rt = Regtest::start_standard()?;
     let dir = tempfile::tempdir()?;
     let hub_dir = dir.path().join("hub");
@@ -2645,15 +2653,19 @@ async fn a_hub_frees_the_coins_of_an_opening_it_signed_whose_f_never_confirms() 
         }
     };
 
-    // Three holders whose apps stop once the hub signed their F.
+    // Three holders whose apps stop once the hub answered their F whole,
+    // which the hub's node never takes.
     let mut stalled = Vec::new();
     for (n, seed) in [[41; 32], [42; 32], [43; 32]].into_iter().enumerate() {
         let at = dir.path().join(format!("holder{n}"));
         std::fs::create_dir(&at)?;
         let (mine, wallet) = holder_wallet(&rt, &chain, &at, &url, seed, &[COIN]).await?;
         let deposit = wallet.silent_coins()?[0].outpoint;
+        severable.withhold(deposit);
         let f = stalled_opening(&wallet, &source, &mine, &url).await?;
         ensure!(f.input.iter().any(|i| i.previous_output == deposit));
+        ensure!(f.input.iter().all(|i| !i.witness.is_empty()), "F not whole");
+        ensure!(rt.get_tx(&f.compute_txid()).is_err(), "F broadcast");
         stalled.push((wallet, f, deposit));
     }
     ensure!(licash_contracts::hub::signed(&hub_dir)? == 3);

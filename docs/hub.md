@@ -481,8 +481,18 @@ named after it can be claimed in it: the hub offers no contract until its
 scan of the chain has begun, nor while it lags the tip by more than that
 depth. F, a contract's
 funding, spends the wallet's coins, which stay locked while the opening
-lives. A wallet that has the hub sign F and never broadcasts it holds
-those coins locked, so the hub frees them itself. Once a coin F spends is
+lives. The holder signs her deposit into F first, in her consent: the hub
+checks that signature, and that her deposit is still unspent in its node's
+mempool, before it signs its own inputs, then saves F whole, broadcasts it
+and answers it to her. Its signatures leave only inside the whole F, so a
+holder naming a coin she cannot spend gets none, and the hub signs nothing
+for her. The hub broadcasts F again each round while F is in no block and
+no coin it spends is spent elsewhere. A holder whose F is in no block and
+in no mempool her chain sees 6 blocks after she signed it, as when the hub
+withholds it, spends her deposit back to her own wallet, at no more than
+F's fee rate, so that it never replaces an F a mempool holds. F can still
+stay out of every block, for example when the node never relays it, so
+the hub frees those coins itself. Once a coin F spends is
 spent elsewhere 6 blocks deep (her deposit, say), it gives the opening up
 and unlocks them. If F is still in no block 144 blocks (a day) after the
 hub first saw it, or once F may no longer fund its contract, the hub
@@ -1043,6 +1053,14 @@ Before starting it:
   Its contracts under way are answered only once it runs again, so do this
   before their deadlines. Never start an earlier release on a `hub.sqlite`
   bound to witnesses: it knows none, and signs as if it had none.
+- Openings speak version 3 of the opening protocol: she signs her deposit
+  into F before the hub signs. Upgrade the hub first, then the apps. An app
+  of version 2 opens no contract at a hub of version 3 until it is updated.
+  An opening already under way when the hub is upgraded finishes once its
+  app is updated too, before the hub abandons it after an hour idle. One
+  the hub had already signed finishes the old way. Once a hub has stored an
+  opening of version 3, do not downgrade it: an earlier release cannot read
+  that opening.
 
 ### From a ledger of schema 3
 
