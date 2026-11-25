@@ -119,6 +119,10 @@ pub(super) struct Watch {
     /// ([`Openings::refuse_evidence`]).
     #[cfg(feature = "faults")]
     no_evidence: std::sync::atomic::AtomicBool,
+    /// A hub shows no one the π2 and π3 of its assertions, as one offline
+    /// would ([`Openings::refuse_proofs`]).
+    #[cfg(feature = "faults")]
+    no_proofs: std::sync::atomic::AtomicBool,
     /// The hub's wallet funds no fee coin, as one out of coins or locked
     /// ([`Openings::fund_no_fee_coins`]).
     #[cfg(feature = "faults")]
@@ -547,6 +551,42 @@ impl Openings {
             .ok_or_else(|| Refused::bad("no evidence pinned"))
     }
 
+    /// The π2 and π3 of the assertion the hub signed in contract `id`, as
+    /// pinned before it was, for the holder who signs for the contract's
+    /// claim key ([`crate::proof_digest`]): 64 bytes then 32. Its leaf
+    /// does not check them, so the block may show others (a relayer's, a
+    /// miner's) that prove nothing; she checks these instead before she
+    /// challenges. They were public as the hub broadcast them, but only
+    /// she has a use for them, so only she is shown them.
+    pub(super) async fn show_proof(&self, id: &[u8; 32], body: &[u8]) -> Result<Vec<u8>, Refused> {
+        #[cfg(feature = "faults")]
+        if self
+            .watch
+            .no_proofs
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(Refused::unavailable("no proof to show"));
+        }
+        let signature = licash::crypto::Signature(
+            body.try_into()
+                .map_err(|_| Refused::bad("a signature is 64 bytes"))?,
+        );
+        let (_, o) = self.signed_opening(id).await?;
+        let assertion = Responses::open(&self.data)
+            .map_err(Refused::unavailable)?
+            .response(&tagged(id, b"assert"))
+            .map_err(Refused::unavailable)?
+            .ok_or_else(|| Refused::bad("no assertion to show the proof of"))?;
+        licash::crypto::schnorr_verify(
+            &o.base.parts().claim_key,
+            &crate::proof_digest(id, &assertion.compute_txid()),
+            &signature,
+        )
+        .map_err(|_| Refused::bad("not signed with the contract's claim key"))?;
+        let (pi2, pi3) = HubProves::asserted_pair(&assertion).map_err(Refused::unavailable)?;
+        Ok([pi2, pi3].concat())
+    }
+
     /// Opening `id`, signed, its contract output unspent, even by the
     /// mempool: one to fold.
     async fn standing(&self, id: &[u8; 32]) -> Result<(Hub, HubOpening), Refused> {
@@ -577,6 +617,15 @@ impl Openings {
     pub fn refuse_evidence(&self) {
         self.watch
             .no_evidence
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Show holders no π2 and π3 of its assertions from now on, as a hub
+    /// offline would: for tests of the holder's challenge.
+    #[cfg(feature = "faults")]
+    pub fn refuse_proofs(&self) {
+        self.watch
+            .no_proofs
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 

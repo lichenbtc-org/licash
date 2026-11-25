@@ -2372,6 +2372,38 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
         }
     }
 
+    /// Whether the hub's assertion proves its statement with the π2 and π3
+    /// the hub shows her of it ([`crate::PROOF`]), its π1 the one the
+    /// chain shows: then the hub answers any challenge of it (any valid π2
+    /// and π3 decrypt for that π1), and she leaves it alone. Not asked of
+    /// a holder doubting every assertion (tests).
+    async fn hub_proves(&self, state: &State) -> Result<bool> {
+        #[cfg(feature = "faults")]
+        if DOUBT.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let assertion = state.assertion.as_ref().context("no assertion")?;
+        let hub = self.hub_url()?;
+        let digest = crate::proof_digest(&self.id, &assertion.compute_txid());
+        let url = format!(
+            "{hub}{}",
+            crate::PROOF.replace("{id}", &crate::hex_id(&self.id))
+        );
+        let body = self.keys.sign_as_claim(&digest).to_vec();
+        let bytes = super::fold::post(self.wallet, &hub, &url, body).await?;
+        ensure!(bytes.len() == 96, "{} bytes, not π2 and π3", bytes.len());
+        let (pi2, pi3) = bytes.split_at(64);
+        self.o
+            .verify_assertion(&HubProves::with_pair(assertion, pi2, pi3)?)
+    }
+
+    /// The hub's address her contract was opened with.
+    fn hub_url(&self) -> Result<String> {
+        let contract = (self.store.list()?.into_iter().find(|c| c.id == self.id))
+            .context("no such contract")?;
+        Ok(contract.hub.trim_end_matches('/').to_owned())
+    }
+
     /// Whether the hub's response bears out the reduction of her claim,
     /// from the evidence it shows her under her claim key and what Bitcoin
     /// shows of the claim and the response's disclosure: the statement's
@@ -2391,9 +2423,7 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
         let parts = self.o.base.parts();
 
         // What the hub responded on.
-        let contract = (self.store.list()?.into_iter().find(|c| c.id == self.id))
-            .context("no such contract")?;
-        let hub = contract.hub.trim_end_matches('/');
+        let hub = &self.hub_url()?;
         let digest = crate::evidence_digest(&self.id, &response.compute_txid());
         let url = format!(
             "{hub}{}",
@@ -2527,6 +2557,35 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
                 return self.post_challenge(state, height, tip).await;
             }
             return Ok(Next::Save);
+        }
+        if stage == Stage::Asserted && state.verified == Some(false) && state.challenge.is_none() {
+            // Its π2 and π3 the block shows may be a relayer's or a
+            // miner's: she asks the hub for its own first, a while.
+            let due = height
+                .checked_add(blocks(
+                    presign(&self.o.set, "success")?.tx.input[0].sequence,
+                )?)
+                .context("deadline overflow")?;
+            let by = due
+                .saturating_sub(1)
+                .saturating_sub(self.o.base.parts().graph.deadline_margin);
+            let wait_until = height.saturating_add(by.saturating_sub(height) / 2);
+            let unproved = match self.hub_proves(state).await {
+                Ok(true) => None,
+                Ok(false) => Some("the hub shows no π2 and π3 that prove it".to_owned()),
+                Err(e) => Some(format!("the hub shows no π2 and π3 of it: {e:#}")),
+            };
+            match unproved {
+                None => state.verified = Some(true),
+                Some(_) if tip < wait_until => {
+                    state.next_at = Some(tip.saturating_add(1));
+                    return Ok(Next::Save);
+                }
+                Some(why) => self.trouble(format!(
+                    "the hub's assertion does not prove its statement as mined, and {why}: \
+                     she challenges it"
+                )),
+            }
         }
         if stage == Stage::Asserted && state.verified == Some(false) {
             // One made before, its assertion's block since replaced: the

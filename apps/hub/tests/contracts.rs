@@ -4711,16 +4711,60 @@ fn in_mempool_asserting(rt: &Regtest) -> Result<Option<bitcoin::Transaction>> {
 
 /// The hub asserts a true proof, and a miner mines it with π2 and π3 (which
 /// its leaf drops unchecked) replaced: the same transaction, by its id, but
-/// a proof that no longer verifies, to whoever reads it from the chain. She
-/// challenges it; the hub answers from the proof it made and pinned, not
-/// from the one the chain shows, and pays her what is left.
+/// a proof that no longer verifies, to whoever reads it from the chain. The
+/// hub shows her none of its own (offline, say), so she challenges it; the
+/// hub answers from the proof it made and pinned, not from the one the
+/// chain shows, and pays her what is left.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs bitcoind and a release build"]
 async fn a_hub_answers_the_challenge_of_its_assertion_mined_with_another_pi2_and_pi3() -> Result<()>
 {
+    let s = stale_claim([17; 32]).await?;
+    s.openings.refuse_proofs();
+    let altered = asserted_with_another_pair(&s).await?;
+    // Mined with π2 and π3 no proof: she reads it unproved, so challenges.
+    let done = played(&s, |_| true).await?;
+    ensure!(done.assertion == Some(altered) && !done.proved, "{done:?}");
+    ensure!(done.challenge.is_some(), "not challenged: {done:?}");
+    ensure!(done.corrected == Some(98_304), "{done:?}");
+    // Paid by the hub's answer to her challenge, not by her timeout.
+    ensure!(done.payout.is_some() && done.timeout.is_none(), "{done:?}");
+    let received = done.received.context("nothing received")?;
+    ensure!(
+        received < 131_071,
+        "{received} of a claim of 131071: {done:?}"
+    );
+    Ok(())
+}
+
+/// As [`a_hub_answers_the_challenge_of_its_assertion_mined_with_another_pi2_and_pi3`],
+/// the hub showing her the π2 and π3 it signed: with the chain's π1 they
+/// prove its statement, so she leaves the assertion alone, no challenge
+/// posted, and its success pays her what is left.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_holder_checks_the_hubs_own_pi2_and_pi3_of_an_assertion_mined_with_others() -> Result<()>
+{
+    let s = stale_claim([23; 32]).await?;
+    let altered = asserted_with_another_pair(&s).await?;
+    let done = played(&s, |_| true).await?;
+    ensure!(done.assertion == Some(altered) && done.proved, "{done:?}");
+    ensure!(done.challenge.is_none(), "challenged: {done:?}");
+    ensure!(done.corrected == Some(98_304), "{done:?}");
+    ensure!(done.payout.is_some() && done.timeout.is_none(), "{done:?}");
+    let received = done.received.context("nothing received")?;
+    ensure!(
+        received < 131_071,
+        "{received} of a claim of 131071: {done:?}"
+    );
+    Ok(())
+}
+
+/// Her stale claim contested (the hub shows her no evidence), the hub's
+/// assertion mined with π2 and π3 replaced, as a miner may: its txid.
+async fn asserted_with_another_pair(s: &Stale) -> Result<bitcoin::Txid> {
     use licash_contracts::holder::recovery::{self, Stage};
 
-    let s = stale_claim([17; 32]).await?;
     s.openings.refuse_evidence();
     // A coin for a challenge's fee, set aside from her next round.
     let to = s.wallet.fallback_address()?.script_pubkey();
@@ -4749,20 +4793,7 @@ async fn a_hub_answers_the_challenge_of_its_assertion_mined_with_another_pi2_and
         }
         s.rt.mine(1)?;
     }
-    let altered = altered.context("the hub never asserted")?;
-    // Mined with π2 and π3 no proof: she reads it unproved, so challenges.
-    let done = played(&s, |_| true).await?;
-    ensure!(done.assertion == Some(altered) && !done.proved, "{done:?}");
-    ensure!(done.challenge.is_some(), "not challenged: {done:?}");
-    ensure!(done.corrected == Some(98_304), "{done:?}");
-    // Paid by the hub's answer to her challenge, not by her timeout.
-    ensure!(done.payout.is_some() && done.timeout.is_none(), "{done:?}");
-    let received = done.received.context("nothing received")?;
-    ensure!(
-        received < 131_071,
-        "{received} of a claim of 131071: {done:?}"
-    );
-    Ok(())
+    altered.context("the hub never asserted")
 }
 
 /// A backup of the hub's data directory `from` made in `to` while it runs,

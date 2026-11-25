@@ -690,6 +690,30 @@ impl HubProves {
         );
         Ok((b, Self::b_wire(&sig)))
     }
+    /// `assert`'s π2 and π3 as it shows them: the two arguments its leaf
+    /// drops unchecked, which whoever relays or mines it may replace
+    /// without changing its id.
+    pub fn asserted_pair(assert: &Transaction) -> Result<(Vec<u8>, Vec<u8>)> {
+        let args = link_args(assert);
+        let (_, pi2, pi3) = Graph::read_assert(&args).context("assert's arguments")?;
+        Ok((pi2.to_vec(), pi3.to_vec()))
+    }
+    /// `assert` with π2 and π3 `pi2` and `pi3`, all else (π1's digits, its
+    /// signatures) as it is: the same transaction by its id.
+    pub fn with_pair(assert: &Transaction, pi2: &[u8], pi3: &[u8]) -> Result<Transaction> {
+        Self::asserted_pair(assert)?;
+        // The deepest of its stack: π3, then π2 (`assert_wire`).
+        let mut items = assert.input[0].witness.to_vec();
+        items[0] = pi3.to_vec();
+        items[1] = pi2.to_vec();
+        let mut tx = assert.clone();
+        tx.input[0].witness = lichen_btc::bitcoin::Witness::from_slice(&items);
+        ensure!(
+            Self::asserted_pair(&tx)? == (pi2.to_vec(), pi3.to_vec()),
+            "π2 and π3 not where assert's leaf takes them"
+        );
+        Ok(tx)
+    }
     /// What `assert` put on chain.
     pub fn assertion(&self, assert: &Transaction) -> Result<Assertion> {
         let args = link_args(assert);

@@ -72,6 +72,13 @@ pub const FOLD_SIGN: &str = "/v1/contracts/openings/{id}/fold/sign";
 /// (`licash::recovery::evidence_to_bytes`), for her to check before she
 /// leaves the response uncontested.
 pub const EVIDENCE: &str = "/v1/contracts/openings/{id}/evidence";
+/// POST her signature (64 bytes) as the contract's claim key, over
+/// [`proof_digest`]: π2 (64 bytes) then π3 (32) of the assertion the hub
+/// signed, which its leaf does not check, so that one mined with others
+/// (a relayer's or a miner's) she checks with the hub's before she
+/// challenges it. She challenges as ever if the hub shows none, or none
+/// that proves.
+pub const PROOF: &str = "/v1/contracts/openings/{id}/proof";
 
 /// What she signs, with her payment key in contract `id`, to be offered
 /// its fold: the route asked ([`FOLD`] or [`FOLD_CLAIM`]) and the `body`
@@ -91,6 +98,16 @@ pub fn evidence_digest(id: &[u8; 32], response: &bitcoin::Txid) -> [u8; 32] {
     licash::crypto::tagged_hash(
         "licash/contracts/evidence/v1",
         &[id, &response.to_byte_array()],
+    )
+}
+
+/// What she signs, as the contract's claim key, to be shown the π2 and π3
+/// of the hub's assertion `assertion` in contract `id` ([`PROOF`]).
+pub fn proof_digest(id: &[u8; 32], assertion: &bitcoin::Txid) -> [u8; 32] {
+    use bitcoin::hashes::Hash as _;
+    licash::crypto::tagged_hash(
+        "licash/contracts/proof/v1",
+        &[id, &assertion.to_byte_array()],
     )
 }
 
