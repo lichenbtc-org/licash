@@ -128,9 +128,35 @@ not made from `seed`, and it holds the fee coins the hub's answers need)
 and LND's channel backup.
 
 What a copy loses grows with its age, so take it as often as the hub
-changes, not daily: a replicator that ships SQLite's WAL as it is written
-(as Litestream does; not yet tested with the hub), the files synced after
-it, keeps the copy seconds old. Each paragraph below says what an older copy loses;
+changes, not daily. Litestream (0.5.18, tested in regtest under payments
+and disputes, to a file replica) ships each database's WAL to its replica
+every second; its other replica types (S3 and the like) are in its own
+documentation:
+
+```yaml
+dbs:
+  - path: /DATA/hub.sqlite
+    replica:
+      type: file
+      path: /REPLICA/hub
+  - path: /DATA/swaps/wallet.sqlite
+    replica:
+      type: file
+      path: /REPLICA/swaps
+```
+
+Sync the other files of `<data>` beside it, every few seconds (as with
+`rsync`), leaving out the databases, their `-wal`, `-shm` and `.lock`
+files, and Litestream's `.hub.sqlite-litestream`: a file synced later
+than the database that names it is missing from a restore, which the
+hub's alert at start tells of. Restore with `litestream restore -o
+<data>/hub.sqlite file:///REPLICA/hub` first, then the files. Keep Litestream
+running whenever the hub is: it takes over the checkpoints, and commits
+made while it was stopped may be missing from the replica (upstream issue
+1540). Whatever it had not shipped when the machine is lost, a second's
+writes, is lost with it, as with any copy.
+
+Each paragraph below says what an older copy loses;
 for contracts, the worst is an opening signed after the copy. The hub's
 keys for each opening come from a secret drawn for it alone and kept only
 in `hub.sqlite`, not from `seed`: a hub restored without it neither answers
