@@ -257,6 +257,74 @@ struct Chain {
         requires = "contracts"
     )]
     contracts_work_depth: Option<u32>,
+    #[command(flatten)]
+    witnesses: WitnessArgs,
+}
+
+/// Whom the hub writes each contract's one-time answers to before it
+/// signs them: `--contracts-witnesses none`, or a set and its witnesses.
+#[derive(clap::Args, Debug, Clone)]
+struct WitnessArgs {
+    /// `none`: keep each contract's one-time answers in `hub.sqlite` alone,
+    /// on regtest or signet. A restore of it older than an answer, or a
+    /// second copy of the hub, may then sign another, which gives the
+    /// holder the hub's outputs. Refused on mainnet, and once its contracts
+    /// are witnessed.
+    #[arg(
+        long = "contracts-witnesses",
+        value_name = "none",
+        env = "LICASH_HUB_CONTRACTS_WITNESSES",
+        value_parser = ["none"],
+        conflicts_with = "contracts_witness_set",
+    )]
+    contracts_witnesses: Option<String>,
+    /// The id of the set of the hub's contract witnesses
+    /// (`licash-witness init`), each named with `--contracts-witness`.
+    #[arg(
+        long = "contracts-witness-set",
+        value_name = "SET_ID",
+        env = "LICASH_HUB_CONTRACTS_WITNESS_SET",
+        requires = "contracts_witness"
+    )]
+    contracts_witness_set: Option<String>,
+    /// A witness of the set, as `https://host:port#<pin>`, its pin the
+    /// SHA-256 of its certificate as `licash-witness show` prints it. The
+    /// hub writes each one-time answer to every one before it signs it,
+    /// and signs none unless all keep the same: two on mainnet at least,
+    /// apart from the hub and from each other. Repeat, or separate with
+    /// commas.
+    #[arg(
+        long = "contracts-witness",
+        value_name = "URL#PIN",
+        env = "LICASH_HUB_CONTRACTS_WITNESS",
+        value_delimiter = ',',
+        requires = "contracts_witness_set"
+    )]
+    contracts_witness: Vec<String>,
+}
+
+impl WitnessArgs {
+    /// The witnesses named, with the hub's witness key of the seed at
+    /// `seed`: none named is refused, never taken as `none`.
+    fn witnesses(&self, seed: &Path) -> anyhow::Result<licash_contracts::hub::Witnesses> {
+        use licash_contracts::hub::Witnesses;
+        if self.contracts_witnesses.is_some() {
+            return Ok(Witnesses::none());
+        }
+        let set = self.contracts_witness_set.as_deref().context(
+            "contracts need witnesses: --contracts-witness-set and --contracts-witness, or \
+             --contracts-witnesses none on regtest or signet",
+        )?;
+        let set = <[u8; 32]>::try_from(hex::decode(set).unwrap_or_default())
+            .map_err(|_| anyhow::anyhow!("--contracts-witness-set: 32 bytes in hex"))?;
+        let members = self
+            .contracts_witness
+            .iter()
+            .map(|w| licash_witness::client::Client::parse(w))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let secret = licash_hub::witness_secret_of(seed).context("the hub's witness key")?;
+        Witnesses::of(set, members, secret)
+    }
 }
 
 impl Chain {
@@ -1031,6 +1099,23 @@ enum Command {
     /// alert and the ledger first: such notes were made with the hub's
     /// seed outside it, unless its ledger was restored from an older copy.
     ResumePayouts,
+    /// The x-only public key of the hub's witness key, of its seed, in hex:
+    /// what `licash-witness init --hub-key` takes.
+    WitnessKey,
+    /// Give the hub's contract witnesses, all new, the contracts it opened
+    /// before it had them, with the hub stopped: each enrolled, each answer
+    /// it signed kept as it signed it, and each it may have signed with
+    /// what it no longer knows (marked as about to be signed, nothing
+    /// pinned) kept never to be signed. Then the witnesses are sealed and
+    /// `hub.sqlite` bound to their set. Run again if it fails; refused on
+    /// mainnet, which never runs contracts without witnesses.
+    ContractsWitnessImport {
+        #[command(flatten)]
+        witnesses: WitnessArgs,
+        /// The hub's network: bitcoin, regtest, signet or mutinynet.
+        #[arg(long, env = "LICASH_HUB_NETWORK")]
+        network: ChainProfile,
+    },
     /// The hub's events as JSON lines, oldest first.
     Events {
         /// Only events after this sequence number.
@@ -1121,6 +1206,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             let max_live = chain.contracts_max_live;
             let proof_scale = chain.contracts_proof_scale;
             let work_depth = chain.contracts_work_depth;
+            let witnessing = chain.witnesses.clone();
             let opening_fee = chain.contracts_fee;
             let wallet = match (&chain.contracts_wallet, &chain.url) {
                 (Some(url), _) => Some(url.parse::<Source>().context("--contracts-wallet")?),
@@ -1247,6 +1333,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 (true, Some((source, _, _))) => {
                     let keyset = hub.issuing();
                     let wallet = wallet.unwrap_or_else(|| source.clone());
+                    let witnesses = witnessing.witnesses(&seed)?;
                     let opening = Openings::with_wallet(
                         &cli.data,
                         source.clone(),
@@ -1255,6 +1342,18 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                         range,
                     );
                     let openings = runtime.block_on(opening).context("open the contracts")?;
+                    let count = witnesses.count();
+                    runtime
+                        .block_on(openings.witnessed_by(witnesses))
+                        .context("the contracts' witnesses")?;
+                    match count {
+                        0 => tracing::warn!(
+                            "contracts without witnesses (--contracts-witnesses none): a \
+                             restore of hub.sqlite older than an answer, or a second copy of \
+                             the hub, may sign another"
+                        ),
+                        n => tracing::info!(witnesses = n, "contracts witnessed"),
+                    }
                     openings
                         .check_lock_window(lock_window)
                         .context("--lock-window")?;
@@ -1454,6 +1553,32 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             max_authorizations,
         } => audit(&db, json, max_authorizations),
         Command::ResumePayouts => resume_payouts(&cli.data),
+        Command::WitnessKey => {
+            let secret = licash_hub::witness_secret_of(&seed).context("the hub's witness key")?;
+            println!("{}", hex::encode(licash_witness::public_key(&secret)?));
+            Ok(())
+        }
+        Command::ContractsWitnessImport { witnesses, network } => {
+            anyhow::ensure!(
+                network != ChainProfile::Core30Mainnet,
+                "an import is refused on mainnet: its contracts are witnessed from the first"
+            );
+            anyhow::ensure!(db.exists(), "no hub at {}", db.display());
+            anyhow::ensure!(
+                witnesses.contracts_witnesses.is_none(),
+                "an import is into witnesses: --contracts-witness-set and --contracts-witness"
+            );
+            // Held until the import is done: no hub signs beside it.
+            let _stopped = licash_hub::stopped(&db)?;
+            let witnesses = witnesses.witnesses(&seed)?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            let imported = runtime.block_on(witnesses.import(&cli.data))?;
+            println!(
+                "enrolled {} contracts, kept {} answers signed and {} never to be signed; sealed",
+                imported.enrolled, imported.answers, imported.burnt
+            );
+            Ok(())
+        }
         Command::Dashboard {
             dashboard,
             url,

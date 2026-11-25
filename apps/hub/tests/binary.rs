@@ -407,6 +407,57 @@ fn a_payout_wallet_needs_contracts_and_a_nodes_json_rpc() {
     assert!(!missing.exists());
 }
 
+/// The hub's witness key is of its seed, the same on every call; its
+/// contracts are imported into witnesses off mainnet only, and into
+/// witnesses named, never `none`.
+#[test]
+fn a_hubs_witness_key_is_of_its_seed_and_an_import_is_never_on_mainnet() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("hub");
+    assert!(output(&data, &["init", "--max-pow", "6"]).status.success());
+    let key = stdout(&data, &["witness-key"]);
+    assert_eq!(key.trim().len(), 64, "{key}");
+    assert!(hex::decode(key.trim()).is_ok(), "{key}");
+    assert_eq!(stdout(&data, &["witness-key"]), key);
+    let other = dir.path().join("other");
+    assert!(output(&other, &["init", "--max-pow", "6"]).status.success());
+    assert_ne!(stdout(&other, &["witness-key"]), key);
+    let set = "11".repeat(32);
+    let witness = format!("https://127.0.0.1:1#{}", "22".repeat(32));
+    let import = |network: &str| {
+        let args = [
+            "contracts-witness-import",
+            "--network",
+            network,
+            "--contracts-witness-set",
+            &set,
+            "--contracts-witness",
+            &witness,
+        ];
+        let out = output(&data, &args);
+        assert!(!out.status.success());
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    assert!(import("bitcoin").contains("refused on mainnet"));
+    // Never beside a hub running on its ledger.
+    {
+        let _running = licash_hub::stopped(&data.join("hub.sqlite")).unwrap();
+        assert!(import("regtest").contains("another hub is running"));
+    }
+    // Off mainnet, tried: its witness unreachable.
+    assert!(import("regtest").contains("127.0.0.1:1"));
+    let none = [
+        "contracts-witness-import",
+        "--network",
+        "regtest",
+        "--contracts-witnesses",
+        "none",
+    ];
+    let out = output(&data, &none);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("into witnesses"));
+}
+
 /// Give the hub at `data` an own lock under `hash`, which it may yet pay,
 /// as for a deposit, a Lightning receipt or a swap: the lock's id.
 fn own_lock(data: &Path, hash: [u8; 32]) -> String {

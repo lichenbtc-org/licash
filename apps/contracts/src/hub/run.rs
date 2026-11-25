@@ -345,6 +345,13 @@ impl Openings {
                         .filter(|(i, _)| !inputs.contains(i))
                         .map(|(_, (input, coin))| (input.previous_output, coin.clone()))
                         .collect();
+                    // No contract is signed that its witnesses would not keep
+                    // the answers of.
+                    let witnesses = self.witnesses().map_err(Refused::unavailable)?;
+                    witnesses
+                        .enroll(&self.data, &id, || self.never_signed())
+                        .await
+                        .map_err(Refused::unavailable)?;
                     let signed = self.sign(&funding, &theirs).await;
                     let signed = signed.map_err(Refused::unavailable)?;
                     let (next, more) =

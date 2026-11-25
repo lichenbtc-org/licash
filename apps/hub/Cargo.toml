@@ -15,6 +15,7 @@ licash-api.workspace = true
 licash-chain-client.workspace = true
 licash-dashboard.workspace = true
 licash-contracts = { path = "../contracts" }
+licash-witness = { path = "../witness" }
 licash-hub.workspace = true
 licash-lightning.workspace = true
 licash-nostr = { workspace = true, features = ["tor"] }

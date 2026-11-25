@@ -18,6 +18,9 @@ mod responses;
 mod run;
 mod store;
 pub mod terms;
+mod witness;
+
+pub use witness::Witnesses;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -180,6 +183,9 @@ pub struct Openings {
     /// What the node's wallet last said it holds, in sat: the most it
     /// funds an F with ([`terms::fundable`]). None until it says.
     funds: Mutex<Option<u64>>,
+    /// Whom the hub writes each one-time answer to before it signs it
+    /// ([`Openings::witnessed_by`]): until told, it signs no contract.
+    witnesses: std::sync::OnceLock<Witnesses>,
 }
 
 /// How full the hub's contracts are ([`Openings::load`]).
@@ -425,6 +431,7 @@ impl Openings {
             load_told: Default::default(),
             folds: Mutex::default(),
             funds: Mutex::new(None),
+            witnesses: std::sync::OnceLock::new(),
         });
         if let Err(e) = openings.learn_funds().await {
             tracing::warn!("contracts need the node's wallet, to fund F: {e:#}");
@@ -433,6 +440,31 @@ impl Openings {
         let locked = openings.store().locked()?;
         openings.relock_coins(&locked).await;
         Ok(openings)
+    }
+
+    /// Write each one-time answer to `witnesses` before signing it, and
+    /// enroll each contract in them before signing its funding: until
+    /// told, the hub signs neither. Refused where [`Witnesses::admit`]
+    /// refuses them. Set once.
+    pub async fn witnessed_by(&self, witnesses: Witnesses) -> Result<()> {
+        let profile: ChainProfile = self.source.profile().await?;
+        witnesses.admit(profile, &self.data)?;
+        self.witnesses
+            .set(witnesses)
+            .map_err(|_| anyhow::anyhow!("the hub's witnesses are set already"))
+    }
+
+    fn witnesses(&self) -> Result<&Witnesses> {
+        self.witnesses.get().context(
+            "the hub has no contract witnesses configured (--contracts-witness, or \
+             --contracts-witnesses none): it signs no contract",
+        )
+    }
+
+    /// Whether the hub never signed a funding nor a one-time answer, as its
+    /// database tells: on which a witness set is sealed as its first.
+    fn never_signed(&self) -> Result<bool> {
+        Ok(self.store().never_signed()? && responses::Responses::open(&self.data)?.is_empty()?)
     }
 
     /// Pay the hub's share of each contract opened from now on to a new
@@ -1263,6 +1295,7 @@ mod tests {
             load_told: Default::default(),
             folds: Mutex::default(),
             funds: Mutex::new(None),
+            witnesses: std::sync::OnceLock::from(Witnesses::none()),
         }
     }
 

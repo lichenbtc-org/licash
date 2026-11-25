@@ -46,9 +46,12 @@ use lichen_contract::Role;
 use sha2::{Digest, Sha256};
 
 use super::prover::{self, Admission};
+use super::witness::Decision;
 use super::{responses::Responses, Openings, Refused};
 use crate::holder::node::Node;
 use crate::FoldOffer;
+use bitcoin::hashes::Hash as _;
+use licash_witness::slot;
 
 /// What the hub's ledger holds against a claim published in the block at
 /// a height ([`Found`]): candidates, of which the responder cites those the
@@ -546,9 +549,27 @@ impl Openings {
             &signature,
         )
         .map_err(|_| Refused::bad("not signed with the contract's claim key"))?;
-        pins.evidence(id)
+        self.responded_on(id)
+            .await
             .map_err(Refused::unavailable)?
             .ok_or_else(|| Refused::bad("no evidence pinned"))
+    }
+
+    /// The evidence the hub's response to contract `id` was decided on, as
+    /// pinned, else as its witnesses keep it (its pin lost, or restored
+    /// older): none where neither holds any.
+    async fn responded_on(&self, id: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+        if let Some(pinned) = Responses::open(&self.data)?.evidence(id)? {
+            return Ok(Some(pinned));
+        }
+        let kept = self
+            .witnesses()?
+            .recover(&self.data, id, slot::RESPOND)
+            .await?;
+        Ok(match kept {
+            Some(Decision::Respond { evidence, .. }) => Some(evidence),
+            _ => None,
+        })
     }
 
     /// The π2 and π3 of the assertion the hub signed in contract `id`, as
@@ -838,7 +859,11 @@ impl Openings {
         let hers_at = r_at.saturating_add(u32::from(o.base.parts().graph.response_window));
         let lone = tip.saturating_add(1) < hers_at;
         let pinned = pins.evidence(id)?.is_some();
-        if !pinned && self.pin_lost(id, "respond", spends, lone).await? {
+        if !pinned
+            && self
+                .unpinned(id, slot::RESPOND, id, r, spends, lone)
+                .await?
+        {
             return Ok(Played::Idle);
         }
         // What its ledger holds against her claim that the hub cannot cite.
@@ -938,24 +963,76 @@ impl Openings {
                 }
             }
         }
-        // What is pinned first is what the hub answers on.
-        let pinned = pins.pin(id, r, &recovery::evidence_to_bytes(&evidence))?;
-        let evidence = pinned_evidence(o, &pinned)?;
+        // What is pinned first is what the hub answers on, unless its
+        // witnesses agreed on another before.
+        let mut pinned = pins.pin(id, r, &recovery::evidence_to_bytes(&evidence))?;
+        let mut evidence = pinned_evidence(o, &pinned)?;
         decided = owed(&evidence)?;
         ensure!(
             decided.owed < b,
             "the pinned evidence leaves her claim owed"
         );
-        tracing::warn!(
-            id = %crate::hex_id(id),
-            claimed = b,
-            owed = decided.owed,
-            cited = evidence.len(),
-            "a contract claim is owed less than it asks: responding"
-        );
-        self.store().begin_signing(id, "respond")?;
-        let keys = hub.keys();
-        let response = pins.answer(id, r, || o.respond(keys, decided.owed))?;
+        let response = match pins.response(id)? {
+            // Signed: posted again as it is.
+            Some(response) => response,
+            None => {
+                let ours = Decision::Respond {
+                    request: r.compute_txid().to_byte_array(),
+                    b,
+                    e,
+                    owed: decided.owed,
+                    evidence: pinned.clone(),
+                };
+                let Some(agreed) = self.authorized(id, slot::RESPOND, &ours).await? else {
+                    return Ok(Played::Idle);
+                };
+                let Decision::Respond {
+                    request,
+                    b: agreed_b,
+                    e: agreed_e,
+                    owed: b_prime,
+                    evidence: agreed_evidence,
+                } = agreed
+                else {
+                    bail!("the witnesses keep another kind of decision for its response");
+                };
+                ensure!(
+                    request == r.compute_txid().to_byte_array() && (agreed_b, agreed_e) == (b, e),
+                    "the witnesses keep a response to another request: it signs none"
+                );
+                if agreed_evidence != pinned {
+                    pins.adopt(id, r, &agreed_evidence)?;
+                    pinned = agreed_evidence;
+                    evidence = pinned_evidence(o, &pinned)?;
+                    decided = owed(&evidence)?;
+                }
+                // Signed only as its witnesses keep it, and as its evidence
+                // decides it.
+                ensure!(
+                    decided.owed == b_prime && b_prime < b,
+                    "the response its witnesses keep, b′ = {b_prime}, is not what its evidence \
+                     decides ({}): it signs none",
+                    decided.owed
+                );
+                tracing::warn!(
+                    id = %crate::hex_id(id),
+                    claimed = b,
+                    owed = decided.owed,
+                    cited = evidence.len(),
+                    "a contract claim is owed less than it asks: responding"
+                );
+                self.store().begin_signing(id, "respond")?;
+                let keys = hub.keys();
+                pins.answer(id, r, || {
+                    let tx = o.respond(keys, b_prime)?;
+                    ensure!(
+                        HubProves::responded_b(&tx)?.0 == b_prime,
+                        "the response signs another b′ than its witnesses keep"
+                    );
+                    Ok(tx)
+                })?
+            }
+        };
         if let Some(prover) = prover {
             let (deadline, release, cycles) = job(&evidence);
             let program = o.base.parts().recipe.program;
@@ -1144,7 +1221,7 @@ impl Openings {
         {
             return Ok(());
         }
-        let Some(pinned) = Responses::open(&self.data)?.evidence(id)? else {
+        let Some(pinned) = self.responded_on(id).await? else {
             return Ok(());
         };
         let evidence = pinned_evidence(o, &pinned)?;
@@ -1193,7 +1270,11 @@ impl Openings {
         let hers_at = c_at.saturating_add(u32::from(o.base.parts().graph.assert_window));
         let lone = tip.saturating_add(1) < hers_at;
         let pinned = pins.evidence(&tag)?.is_some();
-        if !pinned && self.pin_lost(id, "assert", spends, lone).await? {
+        if !pinned
+            && self
+                .unpinned(id, slot::ASSERT, &tag, r, spends, lone)
+                .await?
+        {
             return Ok(Played::Idle);
         }
         let journal = graph::journal(&o.base);
@@ -1213,10 +1294,162 @@ impl Openings {
             kind.verify(&journal, &proof) || self.false_proofs(),
             "the proof does not verify for this contract"
         );
+        let ours = Decision::Assert {
+            request: r.compute_txid().to_byte_array(),
+            digits: dispute::asserted_digits(&proof),
+            proof: lichen_babe::statement::proof_to_bytes(&proof),
+        };
+        let Some(agreed) = self.authorized(id, slot::ASSERT, &ours).await? else {
+            return Ok(Played::Idle);
+        };
+        let Decision::Assert {
+            request,
+            digits,
+            proof: agreed_proof,
+        } = agreed
+        else {
+            bail!("the witnesses keep another kind of decision for its assertion");
+        };
+        ensure!(
+            request == r.compute_txid().to_byte_array(),
+            "the witnesses keep an assertion against another request: it signs none"
+        );
+        let proof = match ours {
+            Decision::Assert {
+                proof: ref mine, ..
+            } if *mine == agreed_proof => proof,
+            _ => {
+                pins.adopt(&tag, r, &agreed_proof)?;
+                lichen_babe::statement::proof_from_bytes(&agreed_proof)
+                    .context("the proof its witnesses keep does not decode")?
+            }
+        };
+        // Signed only as its witnesses keep it, and as it verifies.
+        ensure!(
+            dispute::asserted_digits(&proof) == digits,
+            "the assertion its witnesses keep signs other digits than its proof's: it signs none"
+        );
+        ensure!(
+            kind.verify(&journal, &proof) || self.false_proofs(),
+            "the proof its witnesses keep does not verify for this contract: it signs none"
+        );
         self.store().begin_signing(id, "assert")?;
         let tx = pins.answer(&tag, r, || o.assert(hub.keys(), &proof))?;
         post(tx).await?;
         Ok(Played::Posted("assert"))
+    }
+
+    /// What the hub's witnesses agree it signs in `slot` of contract `id`,
+    /// `ours` unless they hold another: none, the operator told, where
+    /// they keep it never to be signed. An error, told too, where they
+    /// cannot agree: nothing is signed then.
+    async fn authorized(
+        &self,
+        id: &[u8; 32],
+        slot: &'static str,
+        ours: &Decision,
+    ) -> Result<Option<Decision>> {
+        let agreed = async {
+            self.witnesses()?
+                .authorize(&self.data, id, slot, ours)
+                .await
+        };
+        match agreed.await {
+            Ok(Decision::Burnt) => {
+                self.burnt(id, slot);
+                Ok(None)
+            }
+            Ok(agreed) => Ok(Some(agreed)),
+            Err(e) => {
+                self.unwitnessed(id, slot, &e);
+                Err(e)
+            }
+        }
+    }
+
+    fn burnt(&self, id: &[u8; 32], slot: &str) {
+        if self.once(id, "burnt") {
+            self.alert(&format!(
+                "contract {}: the hub's witnesses keep its {slot} never to be signed: it may \
+                 have signed it with what it no longer knows. It signs none: her timeout pays \
+                 her what she claims, and the hub's reserve once a response is in a block.",
+                crate::hex_id(id)
+            ));
+        }
+    }
+
+    /// Told once a contract, slot and cause: a witness unreachable told
+    /// hides no disagreement found later.
+    fn unwitnessed(&self, id: &[u8; 32], name: &str, e: &anyhow::Error) {
+        let disagreed = super::witness::disagreed(e);
+        let what = match (name == slot::RESPOND, disagreed) {
+            (true, true) => "respond disagreed",
+            (true, false) => "respond unwitnessed",
+            (false, true) => "assert disagreed",
+            (false, false) => "assert unwitnessed",
+        };
+        if self.once(id, what) {
+            self.alert(&format!(
+                "contract {}: the hub signs no {name} until its witnesses agree on it: {e:#}. \
+                 Unanswered by its deadline, her timeout pays her what she claims.",
+                crate::hex_id(id)
+            ));
+        }
+    }
+
+    /// Whether answer `name` of opening `id`, of the request `request`, is
+    /// not to be signed, nothing pinned for it (in `pin`): what its
+    /// witnesses keep pinned again where they keep any, then signed as
+    /// any; else as [`Self::pin_lost`] tells, its witnesses then told to
+    /// keep it never to be signed, against a hub restored older than its
+    /// mark.
+    #[allow(clippy::too_many_arguments)]
+    async fn unpinned(
+        &self,
+        id: &[u8; 32],
+        name: &'static str,
+        pin: &[u8; 32],
+        request: &Transaction,
+        coin: OutPoint,
+        lone: bool,
+    ) -> Result<bool> {
+        let witnesses = self.witnesses()?;
+        let kept = match witnesses.recover(&self.data, id, name).await {
+            Ok(kept) => kept,
+            Err(e) => {
+                self.unwitnessed(id, name, &e);
+                return Err(e);
+            }
+        };
+        let pins = Responses::open(&self.data)?;
+        match kept {
+            Some(Decision::Burnt) => {
+                self.burnt(id, name);
+                return Ok(true);
+            }
+            Some(Decision::Respond { evidence, .. }) if name == slot::RESPOND => {
+                pins.adopt(pin, request, &evidence)?;
+                return Ok(false);
+            }
+            Some(Decision::Assert { proof, .. }) if name == slot::ASSERT => {
+                pins.adopt(pin, request, &proof)?;
+                return Ok(false);
+            }
+            Some(_) => bail!("the witnesses keep another kind of decision for its {name}"),
+            None => {}
+        }
+        if !self.pin_lost(id, name, coin, lone).await? {
+            return Ok(false);
+        }
+        if witnesses.count() > 0 {
+            if let Err(e) = witnesses
+                .authorize(&self.data, id, name, &Decision::Burnt)
+                .await
+            {
+                self.unwitnessed(id, name, &e);
+            }
+        }
+        Ok(true)
     }
 
     /// Whether the hub signed answer `name` of opening `id`, or was about
@@ -1317,7 +1550,7 @@ impl Openings {
         let bytes = match frozen {
             Some(bytes) => bytes,
             None => {
-                let pinned = Responses::open(&self.data)?.evidence(id)?;
+                let pinned = self.responded_on(id).await?;
                 if pinned.is_none() && self.once(id, "pin lost") {
                     // Its response is in a block: no answer of another
                     // kept tells of this, and nothing else alerts.
@@ -2909,7 +3142,7 @@ fn pinned_evidence(o: &HubOpening, bytes: &[u8]) -> Result<Vec<Evidence>> {
         .map_err(|e| anyhow!("the pinned evidence: {e}"))
 }
 
-fn tagged(id: &[u8; 32], tag: &[u8]) -> [u8; 32] {
+pub(super) fn tagged(id: &[u8; 32], tag: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(b"licash/contracts/hub-pin");
     h.update(id);

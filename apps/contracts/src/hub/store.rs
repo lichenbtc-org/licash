@@ -447,6 +447,28 @@ impl Store {
         Ok(())
     }
 
+    /// Whether the hub never signed a contract's funding, nor began to sign
+    /// an answer of a one-time key, of any format: what it may seal a new
+    /// witness set on as its first ([`super::witness`]).
+    pub fn never_signed(&self) -> Result<bool> {
+        let signed: i64 = self.0.query_row(
+            "SELECT (SELECT count(*) FROM openings WHERE irrevocable = 1)
+                  + (SELECT count(*) FROM opening_signing)",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(signed == 0)
+    }
+
+    /// Every opening's id, of any format or phase, oldest first.
+    pub fn all_ids(&self) -> Result<Vec<[u8; 32]>> {
+        let mut stmt = self
+            .0
+            .prepare("SELECT id FROM openings ORDER BY created_at, rowid")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Whether the hub was about to sign answer `name` of opening `id`, or
     /// had ([`Store::begin_signing`]).
     pub fn began_signing(&self, id: &[u8; 32], name: &str) -> Result<bool> {

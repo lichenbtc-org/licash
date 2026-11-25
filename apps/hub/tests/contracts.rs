@@ -15,7 +15,7 @@ use licash::spend::ChainProfile;
 use licash_chain_client::Source;
 use licash_contracts::holder::{self, Ask, Contract, Fate, Node, Phase};
 use licash_contracts::hub::terms::Range;
-use licash_contracts::hub::Openings;
+use licash_contracts::hub::{Openings, Witnesses};
 use licash_hub::{Hub, Policy};
 use licash_hub_service::{deposit, watch, Services};
 use licash_transport::Http;
@@ -100,6 +100,7 @@ async fn serve(
     };
     let openings = Openings::with_wallet(dir, chain, source.clone(), keyset, range);
     let openings = openings.await?;
+    witnessed(&openings, &hub).await?;
     let deposits = deposits_for(&hub, &source, dir, &openings)?;
     // An opening takes a deposit of the hub's for her reserve, which it
     // gives only once it follows a chain.
@@ -168,6 +169,66 @@ async fn forwarded(
             let error = json!({ "code": code, "message": e });
             (json!({ "result": null, "error": error, "id": id }), false)
         }
+    }
+}
+
+/// How many witnesses the hubs the harness makes next have: none
+/// (`--contracts-witnesses none`) unless set, else each hub its own,
+/// served here ([`witnessed`]).
+static WITNESSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The directories of the witnesses [`witnessed`] served: kept while the
+/// test runs.
+static WITNESS_DIRS: std::sync::Mutex<Vec<tempfile::TempDir>> = std::sync::Mutex::new(Vec::new());
+
+/// `openings` of `hub` witnessed as [`WITNESSES`] says: by that many
+/// witnesses of a set of their own, each served on a local port.
+async fn witnessed(openings: &Openings, hub: &Hub) -> Result<()> {
+    use licash_witness::{client::Client, server, store::Store};
+    let count = WITNESSES.load(std::sync::atomic::Ordering::Relaxed);
+    if count == 0 {
+        return openings.witnessed_by(Witnesses::none()).await;
+    }
+    let mut set = [0; 32];
+    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut set);
+    let key = licash_witness::public_key(&hub.witness_secret())?;
+    let mut members = Vec::new();
+    for _ in 0..count {
+        let dir = tempfile::tempdir()?;
+        let db = dir.path().join("witness.sqlite");
+        Store::create(&db, &set, &key)?;
+        let pin = server::make_identity(dir.path())?;
+        let store = Arc::new(Store::open(&db)?);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        members.push(Client::new(
+            &format!("https://{}", listener.local_addr()?),
+            pin,
+        )?);
+        let path = dir.path().to_owned();
+        tokio::spawn(
+            async move { server::serve(listener, &path, store, std::future::pending()).await },
+        );
+        WITNESS_DIRS.lock().unwrap().push(dir);
+    }
+    openings
+        .witnessed_by(Witnesses::of(set, members, hub.witness_secret())?)
+        .await
+}
+
+/// While one lives, the hubs the harness makes are witnessed by `n`
+/// witnesses each ([`witnessed`]).
+struct Witnessed;
+
+impl Witnessed {
+    fn by(n: usize) -> Self {
+        WITNESSES.store(n, std::sync::atomic::Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for Witnessed {
+    fn drop(&mut self) {
+        WITNESSES.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -2290,6 +2351,7 @@ async fn hub_answering_following(
     };
     let openings = Openings::with_wallet(dir, chain, source.clone(), keyset, range);
     let openings = openings.await?;
+    witnessed(&openings, &hub).await?;
     // Its ledger against holders' claims, as the hub service's.
     licash_hub_service::answer_from(&openings, hub.clone());
     let deposits = deposits_for(&hub, &source, dir, &openings)?;
@@ -4154,6 +4216,77 @@ async fn a_hub_that_lost_what_it_responded_on_is_told_it_asserts_nothing() -> Re
     Ok(())
 }
 
+/// A witnessed hub restored older than its response, its pins and its
+/// signing marks lost alike, signs again the response its witnesses keep,
+/// the very one it broadcast, and plays on with the evidence they keep:
+/// never another, and never told its pins are lost.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_witnessed_hub_restored_older_than_its_response_answers_as_it_did() -> Result<()> {
+    use licash_contracts::holder::recovery::{self, Stage};
+
+    let _witnessed = Witnessed::by(2);
+    let s = stale_claim([25; 32]).await?;
+    let data = s._dir.path().join("hub");
+    let told = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let alerts = told.clone();
+    s.openings.alert_with(Arc::new(move |message: &str| {
+        alerts.lock().unwrap().push(message.to_owned())
+    }));
+    let mut responded = false;
+    for _ in 0..50 {
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        if round.answered == 1 {
+            responded = true;
+            break;
+        }
+        s.rt.mine(1)?;
+    }
+    ensure!(responded, "{:?}", told.lock().unwrap());
+    let db = rusqlite::Connection::open(data.join("hub.sqlite"))?;
+    let signed = || {
+        db.query_row(
+            "SELECT response, evidence FROM response_pins WHERE response IS NOT NULL",
+            [],
+            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)),
+        )
+    };
+    let first = signed()?;
+    // Restored older than its response: nothing of it in hub.sqlite.
+    db.execute_batch("DELETE FROM response_pins; DELETE FROM opening_signing;")?;
+    let round = s.openings.answer_requests().await?;
+    ensure!(round.failed == 0, "{round:?}");
+    ensure!(signed()? == first, "signed another response");
+    ensure!(
+        told.lock()
+            .unwrap()
+            .iter()
+            .all(|m| !m.contains("no longer hold")),
+        "{:?}",
+        told.lock().unwrap()
+    );
+    let mut done = None;
+    for _ in 0..800 {
+        s.rt.mine(1)?;
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        let r = recovery::advance(&s.wallet, &s.chain, &s.mine.join("wallet.sqlite"), s.rate)
+            .await?[0]
+            .clone();
+        ensure!(r.stage != Stage::Lost, "{r:?}");
+        if r.stage == Stage::Done {
+            done = Some(r);
+            break;
+        }
+    }
+    let done = done.context("never paid")?;
+    ensure!(done.response.is_some(), "{done:?}");
+    ensure!(done.corrected == Some(98_304), "{done:?}");
+    ensure!(signed()? == first, "signed another response");
+    Ok(())
+}
+
 /// Transaction `txid` of a dispute, confirmed on `rt`'s standard node at
 /// the fee its graph presigned: at least 1 sat/vB of its actual size,
 /// what a node relays by default, with nothing to bump it.
@@ -4842,6 +4975,7 @@ async fn restored(rt: &Regtest, dir: &Path) -> Result<(Arc<Hub>, Arc<Openings>)>
     let keyset = hub.info().keysets[0].clone();
     let openings =
         Openings::with_wallet(dir, source.clone(), source, keyset, Some(STALE_RANGE)).await?;
+    witnessed(&openings, &hub).await?;
     licash_hub_service::answer_from(&openings, hub.clone());
     Ok((hub, openings))
 }
@@ -5541,6 +5675,7 @@ async fn hub_taking_deposits(
     let deposits = deposit::Gateway::open(hub.clone(), source.clone(), regtest, config, &path)?;
     let deposits = Arc::new(deposits);
     let openings = openings.await?;
+    witnessed(&openings, &hub).await?;
     licash_hub_service::close_with_deposits(&openings, deposits.clone());
     // On its lock checkpoints, issuing her funded notes and answering
     // claims from its ledger, as the hub service's.

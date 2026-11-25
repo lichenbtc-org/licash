@@ -182,6 +182,56 @@ impl Responses {
         Ok(response)
     }
 
+    /// The evidence (or proof) `evidence` pinned for `request` of `id` in
+    /// place of what was, which the hub's witnesses agreed on before: the
+    /// one decision the hub signs ([`super::witness`]), the local pin
+    /// written older or otherwise. Refused once its answer is signed, or
+    /// for another request.
+    pub fn adopt(&self, id: &[u8; 32], request: &Transaction, evidence: &[u8]) -> Result<()> {
+        self.0.execute(
+            "INSERT INTO response_pins (id, request) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
+            params![id, serialize(request)],
+        )?;
+        let (pinned, response): (Vec<u8>, Option<Vec<u8>>) = self.0.query_row(
+            "SELECT request, response FROM response_pins WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let pinned: Transaction = deserialize(&pinned).context("pinned request")?;
+        ensure!(
+            same_request(&pinned, request),
+            "the witnesses' decision is of another request than the one pinned"
+        );
+        ensure!(response.is_none(), "its answer is signed already");
+        self.0.execute(
+            "UPDATE response_pins SET evidence = ?2 WHERE id = ?1 AND response IS NULL",
+            params![id, evidence],
+        )?;
+        Ok(())
+    }
+
+    /// The request pinned for `id`, if any.
+    pub fn request(&self, id: &[u8; 32]) -> Result<Option<Transaction>> {
+        let row: Option<Vec<u8>> = self
+            .0
+            .query_row(
+                "SELECT request FROM response_pins WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        row.map(|b| deserialize(&b).context("pinned request"))
+            .transpose()
+    }
+
+    /// Whether nothing is pinned.
+    pub fn is_empty(&self) -> Result<bool> {
+        let n: i64 = self
+            .0
+            .query_row("SELECT count(*) FROM response_pins", [], |r| r.get(0))?;
+        Ok(n == 0)
+    }
+
     #[cfg(test)]
     fn contains(&self, id: &[u8; 32]) -> Result<bool> {
         Ok(self
