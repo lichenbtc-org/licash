@@ -136,22 +136,119 @@ async fn estimating(real: Source, rate: f64) -> Result<Source> {
                 json!({ "result": { "feerate": feerate, "blocks": 6 }, "error": null, "id": id }),
             );
         }
-        Json(match real.rpc_optional::<Value>(method, params).await {
-            Ok(result) => json!({ "result": result, "error": null, "id": id }),
-            Err(e) => {
-                // "...: message (code)", as the client words a node's error.
-                let e = e.to_string();
-                let code = e
-                    .rsplit_once('(')
-                    .and_then(|(_, c)| c.trim_end_matches(')').parse::<i64>().ok())
-                    .unwrap_or(-1);
-                json!({ "result": null, "error": { "code": code, "message": e }, "id": id })
-            }
-        })
+        Json(forwarded(&real, method, params, id).await.0)
     }
     let app = axum::Router::new()
         .fallback(post(answer))
         .with_state((real, rate));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    url.parse()
+}
+
+/// `method` of `real`'s JSON-RPC called with `params`, its reply to call
+/// `id` as a node's: and whether it succeeded.
+async fn forwarded(
+    real: &Source,
+    method: &str,
+    params: serde_json::Value,
+    id: serde_json::Value,
+) -> (serde_json::Value, bool) {
+    use serde_json::{json, Value};
+    match real.rpc_optional::<Value>(method, params).await {
+        Ok(result) => (json!({ "result": result, "error": null, "id": id }), true),
+        Err(e) => {
+            // "...: message (code)", as the client words a node's error.
+            let e = e.to_string();
+            let code = e
+                .rsplit_once('(')
+                .and_then(|(_, c)| c.trim_end_matches(')').parse::<i64>().ok())
+                .unwrap_or(-1);
+            let error = json!({ "code": code, "message": e });
+            (json!({ "result": null, "error": error, "id": id }), false)
+        }
+    }
+}
+
+/// While one lives, the hubs made by [`hub_answering_following`] post
+/// their contracts' transactions through [`apart`] of their node.
+static APART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct Apart;
+
+impl Apart {
+    fn on() -> Self {
+        APART.store(true, std::sync::atomic::Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for Apart {
+    fn drop(&mut self) {
+        APART.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The node of `real` as a chain of a mempool of its own, as another node
+/// or an Esplora not its peer: a transaction spending one in `real`'s
+/// mempool never sent through it is refused, as a node lacking its parent
+/// does (`bad-txns-inputs-missingorspent`, -25); the rest is passed on.
+async fn apart(real: Source) -> Result<Source> {
+    use axum::{extract::State, routing::post, Json};
+    use bitcoin::{consensus::encode::deserialize_hex, Transaction, Txid};
+    use serde_json::{json, Value};
+    type Sent = Arc<std::sync::Mutex<std::collections::HashSet<Txid>>>;
+    async fn answer(
+        State((real, sent)): State<(Source, Sent)>,
+        Json(call): Json<Value>,
+    ) -> Json<Value> {
+        let (method, params, id) = (
+            call["method"].as_str().unwrap_or_default(),
+            call["params"].clone(),
+            call["id"].clone(),
+        );
+        let hexes: Vec<&Value> = match method {
+            "sendrawtransaction" => vec![&params[0]],
+            "submitpackage" => params[0]
+                .as_array()
+                .map(|a| a.iter().collect())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let txs: Vec<Transaction> = hexes
+            .iter()
+            .filter_map(|h| deserialize_hex(h.as_str()?).ok())
+            .collect();
+        let mut known = sent.lock().unwrap().clone();
+        for tx in &txs {
+            let parents = tx.input.iter().map(|i| i.previous_output.txid);
+            for parent in parents.filter(|p| !known.contains(p)) {
+                let pooled: Result<Option<Value>> = real
+                    .rpc_optional("getmempoolentry", json!([parent.to_string()]))
+                    .await;
+                if pooled.is_ok() {
+                    let error = json!({
+                        "code": -25,
+                        "message": "bad-txns-inputs-missingorspent",
+                    });
+                    return Json(json!({ "result": null, "error": error, "id": id }));
+                }
+            }
+            known.insert(tx.compute_txid());
+        }
+        let (reply, ok) = forwarded(&real, method, params, id).await;
+        if ok {
+            sent.lock()
+                .unwrap()
+                .extend(txs.iter().map(Transaction::compute_txid));
+        }
+        Json(reply)
+    }
+    let sent = Sent::default();
+    let app = axum::Router::new()
+        .fallback(post(answer))
+        .with_state((real, sent));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
     tokio::spawn(async move { axum::serve(listener, app).await });
@@ -2187,7 +2284,11 @@ async fn hub_answering_following(
     );
     let source: Source = url.parse()?;
     let keyset = hub.info().keysets[0].clone();
-    let openings = Openings::with_wallet(dir, source.clone(), source.clone(), keyset, range);
+    let chain = match APART.load(std::sync::atomic::Ordering::Relaxed) {
+        true => apart(source.clone()).await?,
+        false => source.clone(),
+    };
+    let openings = Openings::with_wallet(dir, chain, source.clone(), keyset, range);
     let openings = openings.await?;
     // Its ledger against holders' claims, as the hub service's.
     licash_hub_service::answer_from(&openings, hub.clone());
@@ -4492,6 +4593,32 @@ async fn a_hub_funds_again_a_fee_coin_its_wallet_spent_otherwise_and_pays_what_i
             == 1,
         "{alerted:?}"
     );
+    Ok(())
+}
+
+/// Her stale claim at a hub whose chain is apart from its wallet's node
+/// ([`apart`]): another node, or an Esplora, that its fee coins' funding
+/// never reaches but through the hub. The hub hands each funding to it,
+/// so its disclosure spending one relays; it discloses the unlock and she
+/// is paid what is left, uncontested.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_hub_hands_its_fee_coins_funding_to_a_chain_apart_from_its_wallet() -> Result<()> {
+    let apart = Apart::on();
+    let s = stale_claim([20; 32]).await?;
+    drop(apart);
+    let done = played(&s, |_| true).await?;
+    let x = done.response.context("no response")?;
+    ensure!(
+        !s.rt.is_unspent(&bitcoin::OutPoint { txid: x, vout: 2 })?,
+        "never disclosed: {done:?}"
+    );
+    ensure!(done.corrected == Some(98_304), "{done:?}");
+    ensure!(
+        done.assertion.is_none() && done.challenge.is_none(),
+        "{done:?}"
+    );
+    ensure!(done.payout.is_some() && done.timeout.is_none(), "{done:?}");
     Ok(())
 }
 

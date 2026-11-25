@@ -1756,6 +1756,12 @@ impl Openings {
             .iter()
             .position(|o| &o.script_pubkey == script)
             .context("no fee coin output")?;
+        // Handed to the chain the hub posts to as well, which may be
+        // another node than its wallet's: else what spends the coin is
+        // refused there. Once more each round it waits ([`Self::why_gone`]).
+        if let Err(e) = self.source.broadcast(&raw).await {
+            tracing::debug!(%txid, "a fee coin's funding not taken by the chain: {e:#}");
+        }
         Ok((
             OutPoint {
                 txid: raw.compute_txid(),
@@ -2289,7 +2295,13 @@ impl Openings {
         let tx = funding["hex"]
             .as_str()
             .and_then(|hex| bitcoin::consensus::encode::deserialize_hex::<Transaction>(hex).ok())?;
-        let refused = self.wallet.broadcast(&tx).await.err()?;
+        let refused = match self.wallet.broadcast(&tx).await {
+            Ok(_) => {
+                self.relay_funding(id, name, &tx).await;
+                return None;
+            }
+            Err(e) => e,
+        };
         if !matches!(rpc_code(&refused), Some(-25 | -26)) {
             unknown_coin(id, name, &refused);
             return None;
@@ -2302,6 +2314,30 @@ impl Openings {
             tracing::debug!(%txid, "a fee coin's funding not abandoned: {e:#}");
         }
         Some(format!("{refused:#}"))
+    }
+
+    /// Hand `funding`, of a fee coin of transaction `name` of contract
+    /// `id`, which the hub's wallet's node holds unconfirmed, to the chain
+    /// the hub posts to: another node, or an Esplora, may lack it (they
+    /// are not peers, or one dropped it), and refuse what spends the coin.
+    /// Its node's own answer is "already known". Refused, the operator is
+    /// told, once a contract: the coin is not gone, as the wallet's node
+    /// holds it, and another funded would wait the same.
+    async fn relay_funding(&self, id: &[u8; 32], name: &str, funding: &Transaction) {
+        let Err(e) = self.source.broadcast(funding).await else {
+            return;
+        };
+        let txid = funding.compute_txid();
+        tracing::debug!(id = %crate::hex_id(id), %txid, "a fee coin's funding not taken by the chain: {e:#}");
+        if self.once(id, "funding unrelayed") {
+            self.alert(&format!(
+                "contract {}: the chain the hub posts to does not take the funding of a fee \
+                 coin of its {name}, {txid}, which its wallet's node holds ({e:#}): what \
+                 spends that coin is refused there until it does. Check that the two nodes \
+                 relay to each other.",
+                crate::hex_id(id)
+            ));
+        }
     }
 
     /// [`Self::why_gone`] of a coin whose funding the hub's wallet does

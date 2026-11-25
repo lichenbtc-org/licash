@@ -402,7 +402,11 @@ locks collateral of the node's wallet behind the wallet's notes at the hub,
 up to a cap, until the contract's close. `--contracts-wallet URL` names
 another node's wallet instead, by its JSON-RPC as `--chain` takes it
 (`http://host:port/wallet/NAME?cookie=PATH`), on the same network: the hub
-may then follow the chain through an Esplora API. A wallet of its own,
+may then follow the chain through an Esplora API. The hub hands each fee
+coin its wallet funds to that chain itself, and again each round the coin
+waits for a block, since a disclosure or fee child spending it is refused
+where its funding never arrived; the operator is told if the chain does not
+take one. A wallet of its own,
 funded with what the hub may lock, bounds the collateral at stake.
 `/v1/info` names its fixed terms: the cap (131,071 sat), the price a wallet
 pays to open one (the holder's 20,000 sat reserve and the hub's opening fee,
