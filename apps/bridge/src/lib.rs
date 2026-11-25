@@ -133,6 +133,10 @@ pub struct Config {
     /// Where it is reached publicly, `https://domain`, if it serves
     /// Lightning Addresses there: at `name@domain`.
     pub public_url: Option<String>,
+    /// Open, the most accounts it keeps, and registers in any hour, if
+    /// bounded: anyone else is refused until then.
+    pub max_accounts: Option<u64>,
+    pub registrations_per_hour: Option<u64>,
 }
 
 /// What the bridge owes and holds, for its operator.
@@ -401,6 +405,24 @@ impl<T: Transport> Bridge<T> {
             }
             let at = now();
             if open {
+                let (accounts, lately): (i64, i64) = tx.query_row(
+                    "SELECT COUNT(*), COUNT(*) FILTER (WHERE created_at > ?1)
+                     FROM bridge_accounts",
+                    [at - 3600],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                let (accounts, lately) = (accounts.unsigned_abs(), lately.unsigned_abs());
+                if let Some(max) = self.config.max_accounts.filter(|max| accounts >= *max) {
+                    return Err(Error::Quota(format!(
+                        "the bridge keeps {max} accounts at most"
+                    )));
+                }
+                let hourly = self.config.registrations_per_hour;
+                if let Some(max) = hourly.filter(|max| lately >= *max) {
+                    return Err(Error::Quota(format!(
+                        "the bridge registers {max} accounts an hour at most: try later"
+                    )));
+                }
                 tx.execute(
                     "INSERT INTO bridge_accounts (key, balance, created_at) VALUES (?1, 0, ?2)",
                     rusqlite::params![key, at],

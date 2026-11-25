@@ -968,3 +968,36 @@ async fn an_open_bridge_exports_to_its_operator_only() {
         exported.notes
     );
 }
+
+#[tokio::test]
+async fn an_open_bridge_registers_so_many_accounts_an_hour_and_in_all() {
+    let net = Net::with(Config {
+        open: true,
+        max_accounts: Some(3),
+        registrations_per_hour: Some(2),
+        ..Config::default()
+    })
+    .await;
+    net.bridge.register(&key(3), None).unwrap();
+    net.bridge.register(&key(4), None).unwrap();
+    let hourly = net.bridge.register(&key(5), None);
+    assert!(
+        matches!(&hourly, Err(Error::Quota(m)) if m.contains("hour")),
+        "{hourly:?}"
+    );
+    // An account registered again is no new one.
+    net.bridge.register(&key(3), None).unwrap();
+    // An hour on, one more; then no more at all.
+    let db = rusqlite::Connection::open(net.dir.path().join("bridge.sqlite")).unwrap();
+    db.execute(
+        "UPDATE bridge_accounts SET created_at = created_at - 3601",
+        [],
+    )
+    .unwrap();
+    net.bridge.register(&key(5), None).unwrap();
+    let full = net.bridge.register(&key(6), None);
+    assert!(
+        matches!(&full, Err(Error::Quota(m)) if m.contains("at most")),
+        "{full:?}"
+    );
+}

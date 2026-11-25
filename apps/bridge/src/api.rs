@@ -26,11 +26,42 @@ use crate::{now, Bridge, Error};
 /// The most a request body may be.
 const MAX_BODY: usize = 64 * 1024;
 
+/// The most signatures of requests answered kept, for [`MAX_SKEW`] twice:
+/// more are refused until older ones are let go, never forgotten early,
+/// which would let them be replayed.
+const MAX_SEEN: usize = 65_536;
+
 struct Shared<T> {
     bridge: Arc<Bridge<T>>,
-    /// The signatures of the requests answered within [`MAX_SKEW`] of now,
-    /// and their times.
-    seen: Mutex<HashMap<Vec<u8>, i64>>,
+    seen: Mutex<Seen>,
+}
+
+/// The signatures of the requests answered within [`MAX_SKEW`] of now,
+/// and their times.
+#[derive(Default)]
+struct Seen(HashMap<Vec<u8>, i64>);
+
+impl Seen {
+    /// Note the request signed `signature` at `at` answered now: refused
+    /// if it was already, or while [`MAX_SEEN`] others are kept.
+    fn admit(&mut self, signature: &[u8], at: i64, now: i64) -> Result<(), Problem> {
+        // Those past their skew let go only once full: a request of theirs
+        // is refused by its time anyway.
+        if self.0.len() >= MAX_SEEN {
+            self.0.retain(|_, then| (now - *then).abs() <= 2 * MAX_SKEW);
+        }
+        if self.0.contains_key(signature) {
+            return Err(Problem::invalid("a request answered already"));
+        }
+        if self.0.len() >= MAX_SEEN {
+            return Err(Problem::new(
+                licash_api::Code::Unavailable,
+                "too many requests lately: try again in a few minutes",
+            ));
+        }
+        self.0.insert(signature.to_vec(), at);
+        Ok(())
+    }
 }
 
 type Answer<R> = Result<Json<R>, Failure>;
@@ -56,7 +87,7 @@ impl IntoResponse for Failure {
 pub fn router<T: Transport + 'static>(bridge: Arc<Bridge<T>>) -> Router {
     let shared = Arc::new(Shared {
         bridge,
-        seen: Mutex::new(HashMap::new()),
+        seen: Mutex::new(Seen::default()),
     });
     Router::new()
         .route("/health", get(|| async { "ok" }))
@@ -87,10 +118,8 @@ impl<T> Shared<T> {
         let request = serde_json::from_str(&signed.request)
             .map_err(|e| Failure(Problem::invalid(format!("the request: {e}"))))?;
         let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
-        seen.retain(|_, then| (at - *then).abs() <= 2 * MAX_SKEW);
-        if seen.insert(signed.signature.0.clone(), signed.at).is_some() {
-            return Err(Failure(Problem::invalid("a request answered already")));
-        }
+        seen.admit(&signed.signature.0, signed.at, at)
+            .map_err(Failure)?;
         Ok((key, request))
     }
 }
@@ -172,4 +201,27 @@ async fn export<T: Transport>(
     }
     s.bridge.account(&key)?;
     json(s.bridge.export(&key).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_request_is_answered_once_and_none_past_the_most_kept() {
+        let mut seen = Seen::default();
+        seen.admit(b"a", 100, 100).unwrap();
+        assert!(seen.admit(b"a", 100, 101).is_err());
+        for i in 1..MAX_SEEN {
+            seen.admit(&i.to_be_bytes(), 1_000, 1_000).unwrap();
+        }
+        // Full, "a" past its skew twice let go: one more.
+        seen.admit(b"b", 1_000, 1_000).unwrap();
+        let full = seen.admit(b"c", 1_000, 1_000).unwrap_err();
+        assert_eq!(full.code, licash_api::Code::Unavailable);
+        // Never forgotten early: one kept still refused.
+        let kept = seen.admit(&1usize.to_be_bytes(), 1_000, 1_000).unwrap_err();
+        assert_eq!(kept.code, licash_api::Code::Invalid);
+        seen.admit(b"c", 1_000, 1_000 + 2 * MAX_SKEW + 1).unwrap();
+    }
 }
