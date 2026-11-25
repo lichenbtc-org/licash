@@ -17,7 +17,7 @@ use lichen_btc::bitcoin::{
     hashes::Hash as _,
     secp256k1::{Message, Secp256k1, XOnlyPublicKey},
     sighash::{Prevouts, SighashCache, TapSighashType},
-    taproot, OutPoint, ScriptBuf, Transaction, TxOut, Txid,
+    taproot, OutPoint, ScriptBuf, Transaction, TxOut, Txid, Witness,
 };
 use lichen_contract::{sig_name, sign_all, PartyPubKeys, Presign};
 use rand_core::{OsRng, RngCore};
@@ -395,6 +395,40 @@ fn whole(funding: &Transaction, signed: &Transaction) -> Result<()> {
             .iter()
             .all(|i| i.script_sig.is_empty() && !i.witness.is_empty()),
         "F not wholly signed"
+    );
+    Ok(())
+}
+/// Whether every input of `tx` is signed.
+fn wholly_signed(tx: &Transaction) -> bool {
+    tx.input.iter().all(|i| !i.witness.is_empty())
+}
+/// `funding` with her deposit's input, at `deposit`, signed by `witness`,
+/// checked; the hub's inputs as they are in `funding`.
+fn with_deposit(
+    funding: &Transaction,
+    witness: &Witness,
+    deposit: usize,
+    prevouts: &[TxOut],
+) -> Result<Transaction> {
+    ensure!(!witness.is_empty(), "her deposit unsigned");
+    let mut f = funding.clone();
+    f.input[deposit].witness = witness.clone();
+    check_key_spend(&f, deposit, prevouts)?;
+    Ok(f)
+}
+/// Whether `tx` is F with the hub's inputs signed and her deposit's, at
+/// `deposit`, not.
+fn hub_signed(funding: &Transaction, tx: &Transaction, deposit: usize) -> Result<()> {
+    ensure!(tx.compute_txid() == funding.compute_txid(), "another F");
+    ensure!(
+        tx.input[deposit].witness.is_empty()
+            && tx
+                .input
+                .iter()
+                .enumerate()
+                .all(|(i, input)| input.script_sig.is_empty()
+                    && (i == deposit || !input.witness.is_empty())),
+        "hub inputs not signed"
     );
     Ok(())
 }
@@ -818,11 +852,17 @@ impl Holder {
                 out.extend(kept.iter().map(|i| Out::Serve { i: *i }));
                 out
             }
-            Phase::Consented => vec![send(
-                self.id,
-                Kind::Consent,
-                self.consent.as_ref().unwrap().encode(),
-            )],
+            // She signs her deposit into F first: the hub signs its inputs
+            // only once it holds the whole F, which it broadcasts.
+            Phase::Consented => {
+                let o = self.offer.as_ref().unwrap();
+                vec![Out::Sign {
+                    funding: o.funding.clone(),
+                    prevouts: o.prevouts.clone(),
+                    inputs: vec![at(&o.funding, self.deposit())],
+                }]
+            }
+            // Only an opening the hub signed first, under version 2.
             Phase::Signing => {
                 let o = self.offer.as_ref().unwrap();
                 vec![Out::Sign {
@@ -831,15 +871,32 @@ impl Holder {
                     inputs: vec![at(&o.funding, self.deposit())],
                 }]
             }
-            Phase::Funded => vec![send(
-                self.id,
-                Kind::Funded,
-                wire::Funded {
-                    funding: self.funded.as_ref().unwrap().clone(),
+            // Her consent, her deposit signed, until the hub answers F
+            // whole; then F, as a hub that signed first awaits it.
+            Phase::Funded => {
+                let funded = self.funded.as_ref().unwrap();
+                match wholly_signed(funded) {
+                    true => vec![send(
+                        self.id,
+                        Kind::Funded,
+                        wire::Funded {
+                            funding: funded.clone(),
+                        }
+                        .encode(),
+                    )],
+                    false => vec![send(
+                        self.id,
+                        Kind::Consent,
+                        self.consent.as_ref().unwrap().encode(),
+                    )],
                 }
-                .encode(),
-            )],
+            }
         })
+    }
+    /// Whether F is signed whole, as the hub answered it: else she holds
+    /// it with her deposit signed alone, which the hub may complete.
+    pub fn wholly_funded(&self) -> bool {
+        self.funded.as_ref().is_some_and(wholly_signed)
     }
     pub fn instance(&self, i: u32) -> Result<Vec<u8>> {
         ensure!(
@@ -927,49 +984,73 @@ impl Holder {
                         );
                         let consent = wire::Consent {
                             sigs: sign_all(&set, &self.keys.party.payment)?,
+                            deposit: Witness::new(),
                         };
                         self.offer = Some(o);
                         self.consent = Some(consent);
                     }
+                    // A hub that signed first, under version 2, answers her
+                    // signed consent so: F completed with her deposit's
+                    // signature, as she would have.
                     Kind::Signed => {
                         let tx = wire::Signed::decode(&m.body)?.funding;
                         if let Some(previous) = &self.signed {
                             ensure!(*previous == tx, "another signed F");
                             return self.pending();
                         }
-                        ensure!(self.phase() == Phase::Consented, "signed F out of order");
+                        ensure!(self.phase() == Phase::Funded, "signed F out of order");
                         let o = self.offer.as_ref().unwrap();
-                        ensure!(tx.compute_txid() == o.funding.compute_txid(), "another F");
                         let mine = at(&o.funding, self.deposit());
-                        ensure!(
-                            tx.input[mine].witness.is_empty()
-                                && tx
-                                    .input
-                                    .iter()
-                                    .enumerate()
-                                    .all(|(i, input)| input.script_sig.is_empty()
-                                        && (i == mine || !input.witness.is_empty())),
-                            "hub inputs not signed"
-                        );
-                        self.base().unwrap().check(&ctx.trust.program, ctx.tip)?;
-                        self.signed = Some(tx);
+                        hub_signed(&o.funding, &tx, mine)?;
+                        let funded = self.funded.as_ref().unwrap();
+                        if !wholly_signed(funded) {
+                            self.funded = Some(complete_deposit(&tx, funded, mine, &o.prevouts)?);
+                        }
+                    }
+                    // The hub's answer to her signed consent: F whole, her
+                    // deposit's signature hers.
+                    Kind::Funded => {
+                        let tx = wire::Funded::decode(&m.body)?.funding;
+                        ensure!(self.phase() == Phase::Funded, "funded F out of order");
+                        let o = self.offer.as_ref().unwrap();
+                        let funded = self.funded.as_ref().unwrap();
+                        if !wholly_signed(funded) {
+                            whole(&o.funding, &tx)?;
+                            let mine = at(&o.funding, self.deposit());
+                            ensure!(
+                                tx.input[mine].witness == funded.input[mine].witness,
+                                "her deposit signed otherwise"
+                            );
+                            self.funded = Some(tx);
+                        } else {
+                            ensure!(tx.compute_txid() == funded.compute_txid(), "another F");
+                        }
                     }
                     _ => bail!("holder not sent {:?}", m.kind),
                 }
             }
             Input::Signed(tx) => {
+                let phase = self.phase();
                 ensure!(
-                    self.phase() == Phase::Signing,
+                    matches!(phase, Phase::Consented | Phase::Signing),
                     "deposit signature out of order"
                 );
                 let o = self.offer.as_ref().unwrap();
                 self.base().unwrap().check(&ctx.trust.program, ctx.tip)?;
-                self.funded = Some(complete_deposit(
-                    self.signed.as_ref().unwrap(),
-                    &tx,
-                    at(&o.funding, self.deposit()),
-                    &o.prevouts,
-                )?);
+                let mine = at(&o.funding, self.deposit());
+                ensure!(tx.compute_txid() == o.funding.compute_txid(), "another F");
+                // Funded once her deposit is signed: the hub may complete
+                // F and broadcast it from now on, and she holds it so,
+                // before her signature leaves.
+                self.funded = Some(match phase {
+                    Phase::Consented => {
+                        let witness = &tx.input[mine].witness;
+                        let f = with_deposit(&o.funding, witness, mine, &o.prevouts)?;
+                        self.consent.as_mut().unwrap().deposit = witness.clone();
+                        f
+                    }
+                    _ => complete_deposit(self.signed.as_ref().unwrap(), &tx, mine, &o.prevouts)?,
+                });
             }
             Input::Funded { .. } => bail!("holder does not fund"),
         }
@@ -1189,6 +1270,10 @@ impl Hub {
                 out
             }
             HubPhase::Offered => vec![send(id, Kind::Offer, self.offer.as_ref().unwrap().encode())],
+            // Its inputs signed only once her deposit's is: never for a
+            // consent stored under format 5, which carries none, until she
+            // sends it again signed.
+            HubPhase::Consented if self.consent.as_ref().unwrap().deposit.is_empty() => vec![],
             HubPhase::Consented => {
                 let o = self.offer.as_ref().unwrap();
                 let open = self.open.as_ref().unwrap();
@@ -1200,6 +1285,7 @@ impl Hub {
                         .collect(),
                 }]
             }
+            // Only an opening it signed first, under version 2.
             HubPhase::Signed => vec![send(
                 id,
                 Kind::Signed,
@@ -1208,7 +1294,13 @@ impl Hub {
                 }
                 .encode(),
             )],
-            HubPhase::Funded => vec![Out::Broadcast(self.funded.as_ref().unwrap().clone())],
+            HubPhase::Funded => {
+                let funding = self.funded.as_ref().unwrap().clone();
+                vec![
+                    Out::Broadcast(funding.clone()),
+                    send(id, Kind::Funded, wire::Funded { funding }.encode()),
+                ]
+            }
         })
     }
     fn maybe_offer(&mut self) -> Result<()> {
@@ -1355,14 +1447,25 @@ impl Hub {
                             bytes: inst.bytes,
                         });
                     }
+                    // Her consent, her deposit signed into F: checked here,
+                    // before the hub signs its inputs of F.
                     Kind::Consent => {
                         let c = wire::Consent::decode(&m.body)?;
+                        let o = self.offer.as_ref().context("consent before an offer")?;
+                        let mine = at(&o.funding, self.open.as_ref().unwrap().deposit);
                         if let Some(previous) = &self.consent {
-                            ensure!(*previous == c, "another consent");
+                            ensure!(previous.sigs == c.sigs, "another consent");
+                            // One stored under format 5, of no signature
+                            // of her deposit, completed by hers.
+                            let unsigned = previous.deposit.is_empty();
+                            if unsigned && self.phase() == HubPhase::Consented {
+                                with_deposit(&o.funding, &c.deposit, mine, &o.prevouts)?;
+                                self.consent = Some(c);
+                            }
                             return self.pending();
                         }
                         ensure!(self.phase() == HubPhase::Offered, "consent out of order");
-                        let (_, set) = self.graph(&self.offer.as_ref().unwrap().funding)?;
+                        let (_, set) = self.graph(&o.funding)?;
                         let b = self.base.as_ref().unwrap();
                         b.check(&ctx.trust.program, ctx.tip)?;
                         check_sigs(
@@ -1371,6 +1474,7 @@ impl Hub {
                             &c.sigs,
                             |_| false,
                         )?;
+                        with_deposit(&o.funding, &c.deposit, mine, &o.prevouts)?;
                         self.consent = Some(c);
                     }
                     Kind::Funded => {
@@ -1414,22 +1518,18 @@ impl Hub {
                 );
                 let o = self.offer.as_ref().unwrap();
                 let mine = at(&o.funding, self.open.as_ref().unwrap().deposit);
-                ensure!(tx.compute_txid() == o.funding.compute_txid(), "another F");
-                ensure!(
-                    tx.input[mine].witness.is_empty()
-                        && tx
-                            .input
-                            .iter()
-                            .enumerate()
-                            .all(|(i, v)| v.script_sig.is_empty()
-                                && (i == mine || !v.witness.is_empty())),
-                    "hub inputs not signed"
-                );
+                let deposit = &self.consent.as_ref().unwrap().deposit;
+                hub_signed(&o.funding, &tx, mine)?;
                 self.base
                     .as_ref()
                     .unwrap()
                     .check(&ctx.trust.program, ctx.tip)?;
+                // F whole at once, of her deposit's signature it holds:
+                // its own never leave but in it.
+                let funded = with_deposit(&tx, deposit, mine, &o.prevouts)?;
+                whole(&o.funding, &funded)?;
                 self.signed = Some(tx);
+                self.funded = Some(funded);
             }
         }
         self.maybe_offer()?;
@@ -1602,7 +1702,7 @@ mod tests {
         assert_eq!(holder.to_bytes(), a);
         assert_eq!(hub.to_bytes(), h);
     }
-    fn sign_deposit(
+    pub(super) fn sign_deposit(
         tx: &mut Transaction,
         i: usize,
         prevouts: &[TxOut],
@@ -2255,38 +2355,76 @@ mod tests {
             assert!(matches!(offer.first(), Some(Out::Keep { i: n, .. }) if *n == i));
             reload(&mut a, &mut h, &ctx);
         }
-        let consent = a
-            .step(Input::Message(sent(&offer, Kind::Offer)), &ctx)
-            .unwrap();
-        reload(&mut a, &mut h, &ctx);
-        let sign = h
-            .step(Input::Message(sent(&consent, Kind::Consent)), &ctx)
-            .unwrap();
-        let Out::Sign { mut funding, .. } = sign[0].clone() else {
-            panic!("not signing");
-        };
-        sign_deposit(&mut funding, 1, &prevouts, &key);
-        let signed = h.step(Input::Signed(funding), &ctx).unwrap();
-        reload(&mut a, &mut h, &ctx);
+        // She signs her deposit into F first, before her consent leaves.
         let sign = a
-            .step(Input::Message(sent(&signed, Kind::Signed)), &ctx)
+            .step(Input::Message(sent(&offer, Kind::Offer)), &ctx)
             .unwrap();
         let Out::Sign { mut funding, .. } = sign[0].clone() else {
             panic!("not signing");
         };
         sign_deposit(&mut funding, 0, &prevouts, &key);
-        // A wallet's result cannot overwrite the hub's signed witnesses.
+        // A wallet's result cannot sign the hub's inputs for it.
         funding.input[1].witness = Witness::from_slice(&[b"spoiled"]);
-        let funded = a.step(Input::Signed(funding), &ctx).unwrap();
+        let consent = a.step(Input::Signed(funding), &ctx).unwrap();
+        assert_eq!(a.phase(), Phase::Funded);
+        assert!(!a.wholly_funded());
         reload(&mut a, &mut h, &ctx);
-        assert!(!a.abandonable());
-        assert!(!h.abandonable());
-        let envelope = Envelope::from_bytes(&sent(&funded, Kind::Funded)).unwrap();
-        let mut poisoned = wire::Funded::decode(&envelope.body).unwrap();
-        poisoned.funding.input[1].witness = Witness::from_slice(&[b"spoiled"]);
-        h.step(message(id, Kind::Funded, poisoned.encode()), &ctx)
+        assert_eq!(
+            sent(&a.pending().unwrap(), Kind::Consent),
+            sent(&consent, Kind::Consent)
+        );
+        // A consent whose deposit she did not sign is refused, the hub
+        // unchanged.
+        let envelope = Envelope::from_bytes(&sent(&consent, Kind::Consent)).unwrap();
+        let mut unsigned = wire::Consent::decode(&envelope.body).unwrap();
+        let theirs = unsigned.deposit.clone();
+        let before = h.to_bytes();
+        for witness in [Witness::new(), Witness::from_slice(&[[7u8; 64]])] {
+            unsigned.deposit = witness;
+            assert!(h
+                .step(message(id, Kind::Consent, unsigned.encode()), &ctx)
+                .is_err());
+            assert_eq!(h.to_bytes(), before);
+        }
+        unsigned.deposit = theirs;
+        let sign = h
+            .step(message(id, Kind::Consent, unsigned.encode()), &ctx)
             .unwrap();
         reload(&mut a, &mut h, &ctx);
+        let Out::Sign { mut funding, .. } = sign[0].clone() else {
+            panic!("not signing");
+        };
+        assert!(funding.input[0].witness.is_empty());
+        sign_deposit(&mut funding, 1, &prevouts, &key);
+        // The hub's wallet signs its inputs alone, and F leaves whole.
+        let funded = h.step(Input::Signed(funding), &ctx).unwrap();
+        assert!(matches!(&funded[0], Out::Broadcast(f) if wholly_signed(f)));
+        reload(&mut a, &mut h, &ctx);
+        assert_eq!(h.phase(), HubPhase::Funded);
+        assert!(!a.abandonable());
+        assert!(!h.abandonable());
+        // Her deposit signed otherwise in the hub's answer is refused.
+        let envelope = Envelope::from_bytes(&sent(&funded, Kind::Funded)).unwrap();
+        let mut poisoned = wire::Funded::decode(&envelope.body).unwrap();
+        poisoned.funding.input[0].witness = Witness::from_slice(&[b"spoiled"]);
+        assert!(a
+            .step(message(id, Kind::Funded, poisoned.encode()), &ctx)
+            .is_err());
+        assert!(!a.wholly_funded());
+        a.step(Input::Message(sent(&funded, Kind::Funded)), &ctx)
+            .unwrap();
+        reload(&mut a, &mut h, &ctx);
+        assert!(a.wholly_funded());
+        // Either side asked again answers F as it stands.
+        let again = h
+            .step(Input::Message(sent(&consent, Kind::Consent)), &ctx)
+            .unwrap();
+        assert_eq!(sent(&again, Kind::Funded), sent(&funded, Kind::Funded));
+        h.step(
+            Input::Message(sent(&a.pending().unwrap(), Kind::Funded)),
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(Hub::peek(&h.to_bytes()).unwrap().phase, HubPhase::Funded);
         let ao = a.signed().unwrap();
         let ho = h.signed().unwrap();

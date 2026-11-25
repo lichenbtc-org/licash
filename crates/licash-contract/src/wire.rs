@@ -19,7 +19,7 @@ use lichen_btc::{
     bitcoin::{
         consensus::{deserialize, serialize},
         secp256k1::{PublicKey, SecretKey, XOnlyPublicKey},
-        OutPoint, ScriptBuf, Transaction, TxOut,
+        OutPoint, ScriptBuf, Transaction, TxOut, Witness,
     },
 };
 use lichen_contract::PartyPubKeys;
@@ -32,7 +32,11 @@ use crate::{
 };
 
 pub const MAGIC: [u8; 4] = *b"LCOP";
-pub const VERSION: u16 = 2;
+/// 3: she signs her deposit into F first, in her Consent, and the hub
+/// signs its inputs only once it holds the whole F, which it broadcasts
+/// and answers ([`Funded`]). Under 2 the hub signed first ([`Signed`]),
+/// handing out its signatures on an F she might never sign.
+pub const VERSION: u16 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -732,6 +736,10 @@ message!(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Consent {
     pub sigs: HashMap<String, Vec<u8>>,
+    /// Her deposit input's witness in F: empty until she signed it, and
+    /// in a consent stored under snapshot format 5, before she signed
+    /// first ([`Consent::decode_legacy`]).
+    pub deposit: Witness,
 }
 message!(
     Consent,
@@ -740,9 +748,29 @@ message!(
     r,
     {
         w.sigs(&self.sigs);
+        w.blob(&serialize(&self.deposit));
     },
-    { Self { sigs: r.sigs()? } }
+    {
+        Self {
+            sigs: r.sigs()?,
+            deposit: deserialize(r.blob()?)?,
+        }
+    }
 );
+impl Consent {
+    /// A consent as snapshot format 5 stored it: her signatures alone.
+    pub fn decode_legacy(bytes: &[u8]) -> Result<Self> {
+        let mut r = Reader(bytes);
+        let sigs = r.sigs()?;
+        r.end()?;
+        Ok(Self {
+            sigs,
+            deposit: Witness::new(),
+        })
+    }
+}
+/// F with the hub's inputs signed and hers not, sent by the hub under
+/// version 2 only: an opening it signed then finishes as it began.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signed {
     pub funding: Transaction,
@@ -757,6 +785,8 @@ message!(
     },
     { Self { funding: r.tx()? } }
 );
+/// F whole: the hub's answer to her signed Consent, once it signed and
+/// broadcast F; under version 2, hers to its Signed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Funded {
     pub funding: Transaction,
