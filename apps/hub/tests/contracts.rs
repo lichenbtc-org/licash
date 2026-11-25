@@ -2653,6 +2653,7 @@ async fn stale_claim_after(
         id,
         rate,
         funded: _,
+        url: _,
     } = stale_copy(seed, Http::new(None)?).await?;
     if scanned {
         while !watch::step(&hub, &source).await? {}
@@ -2685,6 +2686,8 @@ struct StaleCopy<T: licash_wallet::Transport> {
     dir: tempfile::TempDir,
     hub: Arc<Hub>,
     openings: Arc<Openings>,
+    /// The hub's address, as wallets reach it.
+    url: String,
     source: Source,
     chain: Node,
     wallet: Wallet<T>,
@@ -2754,6 +2757,7 @@ async fn stale_copy<T: licash_wallet::Transport>(
         dir,
         hub,
         openings,
+        url,
         source,
         chain,
         wallet,
@@ -4427,6 +4431,345 @@ async fn a_hub_restored_from_its_backup_mid_dispute_answers_her_challenge() -> R
         "{received} of a claim of 131071: {done:?}"
     );
     eprintln!("restored mid-dispute: a challenged claim of 131071 paid {received}");
+    Ok(())
+}
+
+/// Litestream, as `LICASH_LITESTREAM` names it, else in the pinned image
+/// (`regtest/litestream-docker.sh`).
+fn litestream() -> std::process::Command {
+    let pinned = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../regtest/litestream-docker.sh");
+    let program = std::env::var_os("LICASH_LITESTREAM").unwrap_or(pinned.into_os_string());
+    std::process::Command::new(program)
+}
+
+/// Litestream replicating the database `db` to a file replica in `dir`,
+/// for as long as it lives, as an operator runs it beside the hub.
+struct Replica {
+    child: std::process::Child,
+    db: std::path::PathBuf,
+    socket: std::path::PathBuf,
+    replica: std::path::PathBuf,
+    log: std::path::PathBuf,
+}
+
+impl Replica {
+    fn start(db: &Path, dir: &Path) -> Result<Self> {
+        let replica = dir.join("replica");
+        std::fs::create_dir_all(&replica)?;
+        let socket = dir.join("ls.sock");
+        let config = dir.join("litestream.yml");
+        std::fs::write(
+            &config,
+            format!(
+                "socket:\n  enabled: true\n  path: {}\ndbs:\n  - path: {}\n    replica:\n      \
+                 type: file\n      path: {}\n",
+                socket.display(),
+                db.display(),
+                replica.display()
+            ),
+        )?;
+        let log = dir.join("litestream.log");
+        let file = std::fs::File::create(&log)?;
+        let child = litestream()
+            .arg("replicate")
+            .arg("-config")
+            .arg(&config)
+            .stdout(file.try_clone()?)
+            .stderr(file)
+            .spawn()
+            .context("litestream")?;
+        let started = Self {
+            child,
+            db: db.to_path_buf(),
+            socket,
+            replica,
+            log,
+        };
+        for _ in 0..240 {
+            if started.socket.exists() {
+                return Ok(started);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        anyhow::bail!("litestream never listened: see {}", dir.display())
+    }
+
+    /// Every write committed to its database so far, shipped to the replica.
+    fn sync(&self) -> Result<()> {
+        let out = litestream()
+            .args(["sync", "-wait", "-timeout", "60", "-socket"])
+            .arg(&self.socket)
+            .arg(&self.db)
+            .output()?;
+        ensure!(out.status.success(), "{out:?}");
+        Ok(())
+    }
+
+    /// The errors Litestream logged so far, as of a sync it failed.
+    fn errors(&self) -> Result<Vec<String>> {
+        let log = std::fs::read_to_string(&self.log)?;
+        Ok((log.lines())
+            .filter(|l| l.contains("level=ERROR"))
+            .map(str::to_owned)
+            .collect())
+    }
+
+    /// The replica restored as a new database at `to`, as on another host.
+    fn restore(&self, to: &Path) -> Result<()> {
+        let from = format!("file://{}", self.replica.display());
+        let out = litestream()
+            .args(["restore", "-integrity-check", "full", "-o"])
+            .arg(to)
+            .arg(from)
+            .output()?;
+        ensure!(out.status.success(), "{out:?}");
+        Ok(())
+    }
+}
+
+impl Drop for Replica {
+    fn drop(&mut self) {
+        // Asked to stop, so that its container goes with it.
+        let _ = std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(self.child.id().to_string())
+            .status();
+        let _ = self.child.wait();
+    }
+}
+
+/// The files of the hub's data directory `from` synced into `to` after
+/// its database was restored there, as docs/hub.md tells: every file but
+/// the databases, their journals and locks, and Litestream's own.
+fn synced_files(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let target = to.join(entry.file_name());
+        if name.ends_with("-litestream") {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            synced_files(&entry.path(), &target)?;
+        } else if ![".sqlite", "-wal", "-shm", ".lock"]
+            .iter()
+            .any(|end| name.ends_with(end))
+        {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+/// The write count and the spends of the hub's ledger at `db`, and that
+/// it is whole.
+fn ledger_at(db: &Path) -> Result<(i64, i64)> {
+    let db = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let check: String = db.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    ensure!(check == "ok", "{check}");
+    let seq = db.query_row("SELECT seq FROM meta", [], |r| r.get(0))?;
+    let spent = db.query_row("SELECT count(*) FROM spent", [], |r| r.get(0))?;
+    Ok((seq, spent))
+}
+
+/// Litestream replicates a hub's database while the hub serves a stream of
+/// payments and plays two holders' exits: hers, a stale claim it responds
+/// to with less, which she contests, and his, of what he holds. The hub's
+/// machine is lost once she contested, before it asserts. A hub restored
+/// on another host from the replica, its files synced after, holds every
+/// write the replica was told of, and finishes both exits as the lost hub
+/// would have: it signs no other response, proves and asserts on the
+/// evidence it had pinned, and answers her (wrong) challenge with a kept
+/// instance, paying her only what is left; his claim is paid whole.
+/// Litestream is waited on before the restore: what it had not shipped
+/// when a machine is lost (a second's writes, by default) is lost with it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind, Docker and a release build"]
+async fn a_hub_restored_from_a_litestream_replica_under_load_finishes_its_disputes() -> Result<()> {
+    use licash_contracts::holder::recovery::{self, Stage};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let StaleCopy {
+        rt,
+        dir,
+        hub,
+        openings,
+        url,
+        source,
+        chain,
+        wallet,
+        mine,
+        id,
+        rate,
+        ..
+    } = stale_copy([43; 32], Http::new(None)?).await?;
+    let at = dir.path().join("hub");
+    let replica = Replica::start(&at.join("hub.sqlite"), &dir.path().join("ls"))?;
+
+    // His contract at the same hub, and notes of his it protects.
+    std::fs::create_dir(dir.path().join("his"))?;
+    let (his, theirs) = holder_wallet(
+        &rt,
+        &chain,
+        &dir.path().join("his"),
+        &url,
+        [44; 32],
+        &[COIN],
+    )
+    .await?;
+    let opened = holder::open(&theirs, &chain, &his.join("wallet.sqlite"), &url, ask()).await?;
+    funded_in(
+        &rt,
+        &hub,
+        &source,
+        &theirs,
+        &chain,
+        &his.join("wallet.sqlite"),
+    )
+    .await?;
+    for _ in 0..2 {
+        let payment = pay(&hub, &at.join("seed"), &url, &theirs.address(), 4_096)?;
+        theirs.receive(&payment)?;
+    }
+    rt.mine(1)?;
+    holder::resume(&theirs, &chain, &his.join("wallet.sqlite")).await?;
+
+    // Payments at the hub, one after another, until the machine is lost.
+    let stop = Arc::new(AtomicBool::new(false));
+    let load = {
+        let (hub, seed, url, stop) = (hub.clone(), at.join("seed"), url.clone(), stop.clone());
+        tokio::task::spawn_blocking(move || -> Result<u32> {
+            let to = licash::address::OwnerKeys::from_seed(&[0xcc; 32])?.address();
+            let mut paid = 0;
+            while !stop.load(Ordering::SeqCst) {
+                pay(&hub, &seed, &url, &to, 1_000)?;
+                paid += 1;
+            }
+            Ok(paid)
+        })
+    };
+
+    // Both force their contracts closed, while the hub serves.
+    let files = (mine.join("wallet.sqlite"), his.join("wallet.sqlite"));
+    let hers = recovery::force_close(&wallet, &chain, &files.0, &id, rate).await?;
+    ensure!((hers.claimed, hers.notes) == (131_071, 4), "{hers:?}");
+    let his_claim = recovery::force_close(&theirs, &chain, &files.1, &opened.id, rate).await?;
+    ensure!(his_claim.claimed >= 8_192, "{his_claim:?}");
+    let lock = hers.next_at.max(his_claim.next_at).context("no lock")?;
+    rt.mine_to_height(lock - 1)?;
+    recovery::advance(&wallet, &chain, &files.0, rate).await?;
+    recovery::advance(&theirs, &chain, &files.1, rate).await?;
+    rt.mine(1)?;
+    // A coin for a challenge's fee, set aside from her next round.
+    let to = wallet.fallback_address()?.script_pubkey();
+    rt.fund(&to, Amount::from_sat(100_000))?;
+    rt.mine(1)?;
+    scan(&wallet, &chain).await?;
+
+    // The hub plays until she contested its response.
+    openings.refuse_evidence();
+    let mut contested = None;
+    for _ in 0..200 {
+        rt.mine(1)?;
+        let round = openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        let her = recovery::advance(&wallet, &chain, &files.0, rate).await?[0].clone();
+        recovery::advance(&theirs, &chain, &files.1, rate).await?;
+        ensure!(
+            her.stage != Stage::Lost && her.stage != Stage::Done,
+            "{her:?}"
+        );
+        if her.stage == Stage::Contested {
+            contested = Some(her);
+            break;
+        }
+    }
+    let contested = contested.context("never contested")?;
+    let response = contested.response.context("no response")?;
+
+    // The machine lost: no more payments, and it plays no more. What it
+    // wrote is in the replica once Litestream says so.
+    stop.store(true, Ordering::SeqCst);
+    let paid = load.await??;
+    ensure!(paid >= 10, "{paid} payments");
+    drop(openings);
+    let live = ledger_at(&at.join("hub.sqlite"))?;
+    replica.sync()?;
+    let errors = replica.errors()?;
+    ensure!(errors.is_empty(), "{errors:?}");
+    drop(hub);
+
+    // Restored on another host: the database first, then the files.
+    let restored_dir = dir.path().join("restored");
+    std::fs::create_dir_all(&restored_dir)?;
+    replica.restore(&restored_dir.join("hub.sqlite"))?;
+    drop(replica);
+    synced_files(&at, &restored_dir)?;
+    let restored_ledger = ledger_at(&restored_dir.join("hub.sqlite"))?;
+    // Every write before the sync (the lost hub's deposits may write on).
+    ensure!(
+        restored_ledger.0 >= live.0 && restored_ledger.1 >= live.1,
+        "{restored_ledger:?} of {live:?}"
+    );
+    eprintln!(
+        "{paid} payments under load; ledger at write {} restored",
+        live.0
+    );
+
+    let (_hub, openings) = restored(&rt, &restored_dir).await?;
+    let alerts = told(&openings);
+    openings.refuse_evidence();
+    let _doubting = Doubting::of();
+    let (mut hers, mut his) = (None, None);
+    for _ in 0..800 {
+        rt.mine(1)?;
+        let round = openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        let her = recovery::advance(&wallet, &chain, &files.0, rate).await?[0].clone();
+        let him = recovery::advance(&theirs, &chain, &files.1, rate).await?[0].clone();
+        ensure!(
+            her.stage != Stage::Lost && him.stage != Stage::Lost,
+            "{her:?} {him:?}"
+        );
+        let done = her.stage == Stage::Done && him.stage == Stage::Done;
+        (hers, his) = (Some(her), Some(him));
+        if done {
+            break;
+        }
+    }
+    let (her, him) = (hers.context("never played")?, his.context("never played")?);
+    ensure!(
+        her.stage == Stage::Done && him.stage == Stage::Done,
+        "{her:?} {him:?}"
+    );
+    let told = alerts.lock().unwrap().clone();
+    ensure!(
+        told.iter().all(|m| !m.contains("kept instances")),
+        "{told:?}"
+    );
+    // Hers: the response the lost hub signed, asserted on and defended.
+    ensure!(her.response == Some(response), "{her:?}");
+    ensure!(
+        her.assertion.is_some() && her.challenge.is_some(),
+        "{her:?}"
+    );
+    ensure!(her.corrected == Some(98_304), "{her:?}");
+    ensure!(her.payout.is_some() && her.timeout.is_none(), "{her:?}");
+    let received = her.received.context("nothing received")?;
+    ensure!(
+        received < 131_071,
+        "{received} of a claim of 131071: {her:?}"
+    );
+    // His: all he claimed.
+    let his_received = him.received.context("nothing received")?;
+    ensure!(
+        his_received >= his_claim.claimed,
+        "{his_received} of {}: {him:?}",
+        his_claim.claimed
+    );
+    eprintln!("restored from Litestream: hers paid {received} of 131071, his {his_received}");
     Ok(())
 }
 

@@ -18,6 +18,12 @@ Rust and Docker. Each node runs in its own throwaway `bitcoin/bitcoin:30.0` cont
 fresh datadir under `tmp/`. `LICHEN_BITCOIND` selects another `bitcoind`
 binary and `LICASH_BITCOIN_IMAGE` another image.
 
+The test of a hub restored from a Litestream replica runs Litestream in
+throwaway `litestream/litestream:0.5.18` containers, `tmp/regtest`
+mounted at its own path (`regtest/litestream-docker.sh`).
+`LICASH_LITESTREAM` selects another `litestream` binary and
+`LICASH_LITESTREAM_IMAGE` another image.
+
 ## Run
 
 From the repository root:

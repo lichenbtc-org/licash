@@ -13,6 +13,12 @@ if [[ "$LICHEN_BITCOIND" == "$root/regtest/bitcoind-docker.sh" ]]; then
     docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image"
     docker image inspect "$image" --format 'Bitcoin image: {{.Id}}'
 fi
+export LICASH_LITESTREAM="${LICASH_LITESTREAM:-$root/regtest/litestream-docker.sh}"
+if [[ "$LICASH_LITESTREAM" == "$root/regtest/litestream-docker.sh" ]]; then
+    image="${LICASH_LITESTREAM_IMAGE:-litestream/litestream:0.5.18}"
+    docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image"
+    docker image inspect "$image" --format 'Litestream image: {{.Id}}'
+fi
 
 cd "$root"
 exec cargo test --release --locked --manifest-path apps/Cargo.toml \
