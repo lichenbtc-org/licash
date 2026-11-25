@@ -36,10 +36,8 @@ fn finish(mut w: Writer) -> Vec<u8> {
     w.bytes(&digest);
     w.0
 }
-/// A snapshot's body after its header, its phase, and its consent's
-/// decoder, as its format wrote it.
-type Read<'a> = (Reader<'a>, u8, fn(&[u8]) -> Result<wire::Consent>);
-fn read(bytes: &[u8], side: u8) -> Result<Read<'_>> {
+/// A snapshot's body after its header, its phase, and its format.
+fn read(bytes: &[u8], side: u8) -> Result<(Reader<'_>, u8, u16)> {
     ensure!(bytes.len() >= 41, "state cut short");
     let (body, digest) = bytes.split_at(bytes.len() - 32);
     ensure!(
@@ -48,15 +46,22 @@ fn read(bytes: &[u8], side: u8) -> Result<Read<'_>> {
     );
     let mut r = Reader(body);
     ensure!(r.array::<4>()? == MAGIC, "not opening state");
-    let consent: fn(&[u8]) -> Result<wire::Consent> = match r.u16()? {
-        FORMAT => wire::Consent::decode,
-        LEGACY => wire::Consent::decode_legacy,
-        _ => bail!("unsupported opening state format"),
-    };
+    let format = r.u16()?;
+    ensure!(
+        matches!(format, FORMAT | LEGACY),
+        "unsupported opening state format"
+    );
     ensure!(r.u8()? == DERIVATION, "another key derivation");
     ensure!(r.u8()? == side, "another opening side");
     let phase = r.u8()?;
-    Ok((r, phase, consent))
+    Ok((r, phase, format))
+}
+/// Her consent's decoder, as `format` wrote it.
+fn consent(format: u16) -> fn(&[u8]) -> Result<wire::Consent> {
+    match format {
+        LEGACY => wire::Consent::decode_legacy,
+        _ => wire::Consent::decode,
+    }
 }
 fn put<T>(w: &mut Writer, value: Option<&T>, encode: impl FnOnce(&T) -> Vec<u8>) {
     w.u8(value.is_some() as u8);
@@ -110,10 +115,13 @@ impl Holder {
         put(&mut w, self.consent.as_ref(), wire::Consent::encode);
         put(&mut w, self.signed.as_ref(), serialize);
         put(&mut w, self.funded.as_ref(), serialize);
+        put(&mut w, self.signed_at.as_ref(), |h| {
+            h.to_be_bytes().to_vec()
+        });
         finish(w)
     }
     pub fn load(bytes: &[u8], seed: &[u8; 32], ctx: &Context) -> Result<Self> {
-        let (mut r, phase, consent) = read(bytes, 0)?;
+        let (mut r, phase, format) = read(bytes, 0)?;
         let phase = *Phase::ALL
             .get(phase as usize)
             .context("unknown holder phase")?;
@@ -126,9 +134,17 @@ impl Holder {
         let hmsg = r.hashes()?;
         let kept = get(&mut r, |b| Ok(wire::Choose::decode(b)?.kept))?;
         let offer = get(&mut r, wire::Offer::decode)?;
-        let consent = get(&mut r, consent)?;
+        let consent = get(&mut r, consent(format))?;
         let signed = get(&mut r, tx)?;
         let funded = get(&mut r, tx)?;
+        let signed_at = match format {
+            LEGACY => None,
+            _ => get(&mut r, |b| {
+                Ok(u32::from_be_bytes(
+                    b.try_into().context("a height is 4 bytes")?,
+                ))
+            })?,
+        };
         r.end()?;
         let h = Self {
             id,
@@ -144,6 +160,7 @@ impl Holder {
             consent,
             signed,
             funded,
+            signed_at,
         };
         same_kind(h.open.mock, ctx)?;
         ensure!(
@@ -167,7 +184,8 @@ impl Holder {
                 && h.consent.is_some() == (phase >= Phase::Consented)
                 // Signed by the hub first only under version 2.
                 && (h.signed.is_none() || phase >= Phase::Signing)
-                && h.funded.is_some() == (phase >= Phase::Funded),
+                && h.funded.is_some() == (phase >= Phase::Funded)
+                && (h.signed_at.is_none() || phase >= Phase::Funded),
             "holder sections mismatch"
         );
         let ctx = stored_context(h.base(), phase >= Phase::Funded, ctx);
@@ -245,6 +263,7 @@ impl Holder {
             match wholly_signed(funded) {
                 true => whole(&o.funding, funded)?,
                 false => {
+                    ensure!(h.signed_at.is_some(), "her F signed first, at no height");
                     let deposit = &h.consent.as_ref().unwrap().deposit;
                     let alone = with_deposit(&o.funding, deposit, mine, &o.prevouts)?;
                     ensure!(alone == *funded, "stored F signed otherwise");
@@ -295,7 +314,7 @@ impl Hub {
         finish(w)
     }
     pub fn load(bytes: &[u8], ctx: &Context) -> Result<Self> {
-        let (mut r, phase, consent) = read(bytes, 1)?;
+        let (mut r, phase, format) = read(bytes, 1)?;
         let phase = *HubPhase::ALL
             .get(phase as usize)
             .context("unknown hub phase")?;
@@ -332,7 +351,7 @@ impl Hub {
             Ok((tx, prevouts))
         })?;
         h.offer = get(&mut r, wire::Offer::decode)?;
-        h.consent = get(&mut r, consent)?;
+        h.consent = get(&mut r, consent(format))?;
         h.signed = get(&mut r, tx)?;
         h.funded = get(&mut r, tx)?;
         r.end()?;
@@ -488,7 +507,7 @@ impl Hub {
     }
     /// Cheap, untrusted metadata for routing only. Never authorizes funding.
     pub fn peek(bytes: &[u8]) -> Result<Peek> {
-        let (mut r, phase, consent) = read(bytes, 1)?;
+        let (mut r, phase, format) = read(bytes, 1)?;
         let phase = *HubPhase::ALL
             .get(phase as usize)
             .context("unknown hub phase")?;
@@ -514,7 +533,7 @@ impl Hub {
             Ok(tx)
         })?;
         get(&mut r, wire::Offer::decode)?;
-        get(&mut r, consent)?;
+        get(&mut r, consent(format))?;
         let signed = get(&mut r, tx)?;
         let funded = get(&mut r, tx)?;
         r.end()?;
@@ -557,6 +576,7 @@ mod format5 {
     fn a_funded_contract_is_read_and_played_by_either_side() {
         let a = holder(HOLDER_FUNDED);
         assert_eq!(a.phase(), Phase::Funded);
+        assert!(a.wholly_funded() && a.signed_at().is_none());
         let h = Hub::load(HUB_FUNDED, &ctx()).unwrap();
         assert_eq!(h.phase(), HubPhase::Funded);
         assert_eq!(Hub::peek(HUB_FUNDED).unwrap().phase, HubPhase::Funded);

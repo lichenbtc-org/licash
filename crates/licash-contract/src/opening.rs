@@ -692,6 +692,9 @@ pub struct Holder {
     consent: Option<wire::Consent>,
     signed: Option<Transaction>,
     funded: Option<Transaction>,
+    /// The tip as she signed her deposit into F first, before the hub
+    /// signed: none if the hub signed first, under version 2.
+    signed_at: Option<u32>,
 }
 impl Holder {
     pub fn start(s: Start, ctx: &Context) -> Result<(Self, Vec<Out>)> {
@@ -757,6 +760,7 @@ impl Holder {
             consent: None,
             signed: None,
             funded: None,
+            signed_at: None,
         };
         let out = h.pending()?;
         Ok((h, out))
@@ -897,6 +901,10 @@ impl Holder {
     /// it with her deposit signed alone, which the hub may complete.
     pub fn wholly_funded(&self) -> bool {
         self.funded.as_ref().is_some_and(wholly_signed)
+    }
+    /// The tip as she signed her deposit into F, if she signed it first.
+    pub fn signed_at(&self) -> Option<u32> {
+        self.signed_at
     }
     pub fn instance(&self, i: u32) -> Result<Vec<u8>> {
         ensure!(
@@ -1047,6 +1055,7 @@ impl Holder {
                         let witness = &tx.input[mine].witness;
                         let f = with_deposit(&o.funding, witness, mine, &o.prevouts)?;
                         self.consent.as_mut().unwrap().deposit = witness.clone();
+                        self.signed_at = Some(ctx.tip);
                         f
                     }
                     _ => complete_deposit(self.signed.as_ref().unwrap(), &tx, mine, &o.prevouts)?,
@@ -2369,6 +2378,7 @@ mod tests {
         assert_eq!(a.phase(), Phase::Funded);
         assert!(!a.wholly_funded());
         reload(&mut a, &mut h, &ctx);
+        assert_eq!(a.signed_at(), Some(ctx.tip));
         assert_eq!(
             sent(&a.pending().unwrap(), Kind::Consent),
             sent(&consent, Kind::Consent)
