@@ -406,7 +406,10 @@ buffering or node RPC. Four concurrent instance downloads remain supported.
 Admission lasts through response delivery, with a five-minute deadline for
 request handling. Requests about a contract opened (folds, evidence,
 proofs) take bodies of at most 256 KiB, which must arrive within 30
-seconds. An instance upload is read only once its opening is known to
+seconds. Each such route reads up to 32 bodies at once, and answers two
+requests at a time only once their bodies have arrived, so clients
+stalling their bodies hold no place to be answered in. An instance upload
+is read only once its opening is known to
 await instances: of an opening unknown or past them, it is refused unread.
 A holder turned away as unavailable asks again after a
 jittered wait that doubles from about 2 seconds to 30, for up to 3 minutes:

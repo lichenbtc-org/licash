@@ -116,9 +116,17 @@ const INSTANCE_TIME: Duration = Duration::from_secs(30 * 60);
 /// spare. One larger is refused unread past it.
 const SMALL_BODY: usize = 256 << 10;
 
-/// How long a small request's body ([`SMALL_BODY`]) may take to arrive:
-/// a client stalling it holds a route's place no longer.
+/// How long a small request's body ([`SMALL_BODY`]) may take to arrive.
 const SMALL_BODY_TIME: Duration = Duration::from_secs(30);
+
+/// How many small requests' bodies a route reads at once: before one of
+/// its few places to be answered is taken, so that clients stalling their
+/// bodies keep none of those.
+const SMALL_READING: usize = 32;
+
+/// How long a small request whose body arrived waits for a place to be
+/// answered in.
+const SMALL_WAIT: Duration = Duration::from_secs(5);
 
 /// A hub's openings, with its node, whose wallet funds and signs F.
 pub struct Openings {
@@ -1063,12 +1071,12 @@ pub fn router(openings: Arc<Openings>) -> Router {
         let limit = Arc::new(tokio::sync::Semaphore::new(count));
         middleware::from_fn_with_state((limit, time, time), admit)
     };
-    // Small, each body bounded and read within its time.
+    // Small: each body bounded and read first, within its time.
     let small = |count| {
+        let reading = Arc::new(tokio::sync::Semaphore::new(SMALL_READING));
         let limit = Arc::new(tokio::sync::Semaphore::new(count));
-        let admitted =
-            middleware::from_fn_with_state((limit, REQUEST_TIME, SMALL_BODY_TIME), admit);
-        (admitted, DefaultBodyLimit::max(SMALL_BODY))
+        let admitted = middleware::from_fn_with_state((reading, limit), admit_small);
+        (DefaultBodyLimit::max(SMALL_BODY), admitted)
     };
     Router::new()
         .route(QUOTE, get(quote).layer(budget(2, REQUEST_TIME)))
@@ -1102,6 +1110,47 @@ async fn admit(
     };
     let request = within(request, body_time);
     let response = match tokio::time::timeout(time, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
+    };
+    response.map(|body| {
+        Body::from_stream(body.into_data_stream().map(move |chunk| {
+            let _held = &permit;
+            chunk
+        }))
+    })
+}
+
+/// A small request: its body read whole (at most [`SMALL_BODY`], within
+/// [`SMALL_BODY_TIME`]) if `reading` has a place free, then answered once
+/// `limit` has one ([`SMALL_WAIT`]), held until its answer is sent.
+async fn admit_small(
+    State((reading, limit)): State<(Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>)>,
+    request: Request,
+    next: Next,
+) -> Response {
+    use axum::extract::FromRequest as _;
+    let busy = || {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many contract requests: retry later",
+        )
+            .into_response()
+    };
+    let Ok(read) = reading.try_acquire_owned() else {
+        return busy();
+    };
+    let (parts, body) = within(request, SMALL_BODY_TIME).into_parts();
+    let body = match Bytes::from_request(Request::from_parts(parts.clone(), body), &()).await {
+        Ok(body) => body,
+        Err(e) => return e.into_response(),
+    };
+    drop(read);
+    let Ok(Ok(permit)) = tokio::time::timeout(SMALL_WAIT, limit.acquire_owned()).await else {
+        return busy();
+    };
+    let request = Request::from_parts(parts, Body::from(body));
+    let response = match tokio::time::timeout(REQUEST_TIME, next.run(request)).await {
         Ok(response) => response,
         Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
     };
@@ -1375,17 +1424,34 @@ mod tests {
             let response = app.clone().oneshot(large).await.unwrap();
             assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{route}");
             drop(response);
-            // Stalled: refused once its time is up, both places free again.
+            let busy = |app: Router| {
+                let url = url.clone();
+                async move {
+                    let request = HttpRequest::post(&url).body(Body::empty()).unwrap();
+                    let response = app.oneshot(request).await.unwrap();
+                    let body = axum::body::to_bytes(response.into_body(), 1 << 16).await;
+                    String::from_utf8_lossy(&body.unwrap()).contains("too many contract requests")
+                }
+            };
+            // Stalled bodies keep no place to be answered in: another is
+            // answered while all but one of the places to read are taken.
             let started = tokio::time::Instant::now();
-            let mut stalls = Vec::new();
-            for _ in 0..2 {
+            let stall = || {
                 let request = HttpRequest::post(&url)
                     .body(stalled(Arc::new(AtomicUsize::new(0))))
                     .unwrap();
-                stalls.push(app.clone().oneshot(request));
-            }
+                tokio::spawn(app.clone().oneshot(request))
+            };
+            let mut stalls: Vec<_> = (1..SMALL_READING).map(|_| stall()).collect();
+            tokio::task::yield_now().await;
+            assert!(!busy(app.clone()).await, "{route}");
+            // With every place to read taken, none is read...
+            stalls.push(stall());
+            tokio::task::yield_now().await;
+            assert!(busy(app.clone()).await, "{route}");
+            // ... until the stalled are refused once their time is up.
             for response in futures_util::future::join_all(stalls).await {
-                let response = response.unwrap();
+                let response = response.unwrap().unwrap();
                 assert!(
                     response.status().is_client_error(),
                     "{route}: {}",
@@ -1394,11 +1460,7 @@ mod tests {
             }
             assert!(started.elapsed() >= SMALL_BODY_TIME);
             assert!(started.elapsed() < REQUEST_TIME);
-            let request = HttpRequest::post(&url).body(Body::empty()).unwrap();
-            let response = app.clone().oneshot(request).await.unwrap();
-            let body = axum::body::to_bytes(response.into_body(), 1 << 16).await;
-            let body = String::from_utf8_lossy(&body.unwrap()).into_owned();
-            assert!(!body.contains("too many contract requests"), "{route}");
+            assert!(!busy(app.clone()).await, "{route}");
         }
     }
 
