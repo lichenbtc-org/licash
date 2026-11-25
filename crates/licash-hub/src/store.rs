@@ -266,7 +266,8 @@ impl Store {
         created
     }
 
-    /// The ledger at `path`, as [`Store::create`] made it.
+    /// The ledger at `path`, as [`Store::create`] made it, locked
+    /// ([`lock`]).
     pub(crate) fn open(path: &Path) -> Result<Self, Error> {
         if !path.is_file() {
             return Err(Error::Setup(format!(
@@ -274,22 +275,7 @@ impl Store {
                 path.display()
             )));
         }
-        // One lock per file, by whatever path the hub is given.
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(suffixed(&path.canonicalize()?, ".lock"))?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => {
-                return Err(Error::Setup(format!(
-                    "another hub is running on {}",
-                    path.display()
-                )))
-            }
-            Err(TryLockError::Error(e)) => return Err(e.into()),
-        }
+        let lock = lock(path)?;
         let mut conn = licash_store::open(path, Kind::Hub).map_err(setup)?;
         check_version(&conn)?;
         // A file of before claims showed locks: the tables, empty.
@@ -410,4 +396,22 @@ fn suffixed(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
     name.into()
+}
+
+/// The lock of the ledger at `path`, held while it is open: refused while
+/// a hub holds it. One lock per file, by whatever path the hub is given.
+pub(crate) fn lock(path: &Path) -> Result<std::fs::File, Error> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(suffixed(&path.canonicalize()?, ".lock"))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(TryLockError::WouldBlock) => Err(Error::Setup(format!(
+            "another hub is running on {}",
+            path.display()
+        ))),
+        Err(TryLockError::Error(e)) => Err(e.into()),
+    }
 }

@@ -440,6 +440,8 @@ pub struct Hub {
     nostr: ([u8; 32], String),
     /// What each deposit's key derives from.
     deposit: [u8; 32],
+    /// The key the hub signs what its contract witnesses keep with.
+    witness: [u8; 32],
     /// This process's public boot id and its key, never stored.
     boot: [u8; 16],
     boot_key: [u8; 32],
@@ -533,6 +535,7 @@ impl Hub {
             unlock_secret: tagged_hash("licash-hub/unlock", &[&secret]),
             nostr: nostr_key(tagged_hash("licash-hub/nostr", &[&secret]))?,
             deposit: tagged_hash("licash-hub/deposit", &[&secret]),
+            witness: witness_of(&secret),
             boot,
             boot_key: tagged_hash("licash-hub/boot", &[&secret, &drawn]),
             answered: Mutex::default(),
@@ -562,6 +565,14 @@ impl Hub {
     /// public key is the `nostr` of [`Hub::advertise`].
     pub fn nostr_secret(&self) -> [u8; 32] {
         self.nostr.0
+    }
+
+    /// The secret key the hub signs each entry its contract witnesses keep
+    /// with, and they check: of its seed alone, the same across restores,
+    /// and of no use but to them. Not a valid key, by chance of about one
+    /// in 2^128, is the caller's to refuse.
+    pub fn witness_secret(&self) -> [u8; 32] {
+        self.witness
     }
 
     /// The secret key the hub claims a deposit on Bitcoin under `hash`
@@ -716,6 +727,25 @@ fn write_seed(path: &Path, seed: &[u8; 32]) -> Result<(), Error> {
         std::fs::File::open(dir)?.sync_all()?;
     }
     Ok(())
+}
+
+/// The hub's witness key ([`Hub::witness_secret`]) of its seed's secret.
+fn witness_of(secret: &[u8; 32]) -> [u8; 32] {
+    tagged_hash("licash-hub/witness", &[secret])
+}
+
+/// The ledger at `db` held as no hub runs on it, until the file returned is
+/// dropped: refused while one runs. For a command that must not run beside
+/// the hub.
+pub fn stopped(db: &Path) -> Result<std::fs::File, Error> {
+    store::lock(db)
+}
+
+/// The hub's witness key ([`Hub::witness_secret`]) of the seed at `seed`,
+/// without opening its ledger: for a command run beside the hub, or with
+/// it stopped.
+pub fn witness_secret_of(seed: &Path) -> Result<[u8; 32], Error> {
+    Ok(witness_of(&read_seed(seed)?))
 }
 
 fn read_seed(path: &Path) -> Result<[u8; 32], Error> {

@@ -34,6 +34,12 @@ use crate::{
     opening::{HubOpening, Opening},
 };
 
+/// The digits of π1 of `proof` the hub's assertion signs with its
+/// one-time Lamport key: two proofs of the same digits sign the same.
+pub fn asserted_digits(proof: &Proof<Bn254>) -> Vec<u8> {
+    lichen_babe::setup::digits(&gadget::input(&proof.a))
+}
+
 pub fn presign<'a>(set: &'a [Presign], name: &str) -> Result<&'a Presign> {
     set.iter()
         .find(|p| p.name == name)
@@ -297,7 +303,7 @@ impl HubOpening {
     }
     pub fn assert(&self, keys: &HubKeys, proof: &Proof<Bn254>) -> Result<Transaction> {
         ensure!(keys.public() == self.hub, "another hub's keys");
-        let digits = lichen_babe::setup::digits(&gadget::input(&proof.a));
+        let digits = asserted_digits(proof);
         let (pi2, pi3) = statement::pi23_to_bytes(proof);
         self.finish(
             "assert",
