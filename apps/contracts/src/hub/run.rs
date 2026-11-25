@@ -354,11 +354,19 @@ impl Openings {
                         .map_err(Refused::unavailable)?;
                     let signed = self.sign(&funding, &theirs).await;
                     let signed = signed.map_err(Refused::unavailable)?;
+                    let tip = ctx.tip;
                     let (next, more) =
                         stepped(&self.heavy, hub, Input::Signed(signed), ctx).await?;
                     hub = next;
                     let more = self.keep(&id, more)?;
                     self.save(&id, &hub, &last)?;
+                    // Counted signed and unfunded now, as admission counts
+                    // it ([`MAX_UNFUNDED`]), not at the responder's next pass:
+                    // till then, past its signatures, no longer under way,
+                    // it was counted in neither.
+                    self.store()
+                        .unfunded(&id, tip)
+                        .map_err(Refused::unavailable)?;
                     tracing::info!(id = %crate::hex_id(&id), "F signed");
                     queue.extend(more);
                 }
