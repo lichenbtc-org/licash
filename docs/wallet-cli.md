@@ -446,12 +446,17 @@ contract opened before graph id 8, or once the hub answered and failed to
 prove its answer). A hub that answers the request instead
 (`answered`) says what the claim is owed and shows its evidence: the
 wallet checks it, and if it bears the answer out leaves it alone, paid
-what it says by the answer's own terminal. Otherwise, or if the evidence
+what it says by the answer's own terminal. Whatever pays the claim on
+Bitcoin pays it in whole units of the contract's smallest output (512 sat
+on current hubs): the part below goes to the hub, up to 511 sat, as an
+answer of 35,322 sat pays 34,816. Otherwise, or if the evidence
 cannot be had in time, the wallet contests it (`contesting`, `contested`),
 and the hub must prove its answer on Bitcoin before the block `recoveries`
 shows, or the wallet's timeout pays the whole claim. `recoveries` shows
 what the hub said was owed and, once `done`, what the wallet received
-(`corrected` and `received` with `--json`). The wallet proves nothing: it checks the hub's proof once
+(`corrected` and `received` with `--json`): its sweep's output, after
+the sweep's fee, besides the wallet's reserve, which is paid to it
+directly. The wallet proves nothing: it checks the hub's proof once
 asserted (`asserted`), challenges one that does not verify (`challenging`,
 `challenged`), and carries the payout on to `done` (`succeeding`, `paid`,
 `sweeping`), collecting what the outcome pays it and its reserve. From the
