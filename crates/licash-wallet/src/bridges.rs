@@ -9,8 +9,8 @@
 
 use licash::crypto::tagged_hash;
 use licash_api::bridge::{
-    self, Account, Connect, Connected, Connection, Info, Invoice, Payment, Register, Revoke,
-    Signed, State, TopUp, Username, Withdraw,
+    self, Account, Connect, Connected, Connection, Empty, Exported, Info, Invoice, Payment,
+    Register, Revoke, Signed, State, TopUp, Username, Withdraw,
 };
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde::{de::DeserializeOwned, Serialize};
@@ -225,7 +225,7 @@ impl<T: Transport> Wallet<T> {
     }
 
     /// The wallet's secret key at the bridge answering as `nostr`.
-    fn bridge_secret(&self, nostr: &[u8; 32]) -> [u8; 32] {
+    pub(crate) fn bridge_secret(&self, nostr: &[u8; 32]) -> [u8; 32] {
         tagged_hash("licash/bridge/account", &[&self.keys.bridges, nostr])
     }
 
@@ -391,6 +391,24 @@ impl<T: Transport> Wallet<T> {
         };
         self.bridge_call(&added.url, &added.info, bridge::USERNAME, &named)
             .await
+    }
+
+    /// Freeze the bridge at `url` for good and import its notes, sealed to
+    /// the wallet's key there, for the wallet's recoveries to claim should
+    /// its hub stop cooperating ([`Wallet::import_notes`]): what was
+    /// imported, and the export, to keep. Of a bridge for this wallet
+    /// alone; it pays nothing out from then on, until unfrozen by its
+    /// operator once the import is discarded.
+    pub async fn export_bridge(&self, url: &str) -> Result<(crate::Imported, Vec<u8>), Error> {
+        let added = self.bridge(url)?;
+        let exported: Exported = self
+            .bridge_call(&added.url, &added.info, bridge::EXPORT, &Empty {})
+            .await?;
+        let imported = self.import_notes(&exported.export.0)?;
+        if imported.source != added.info.nostr {
+            tracing::warn!(url = %added.url, "a bridge's export of another Nostr key");
+        }
+        Ok((imported, exported.export.0))
     }
 
     /// Revoke the NWC connection of key `client`, in hex, for good.

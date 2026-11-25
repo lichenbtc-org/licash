@@ -41,6 +41,7 @@ mod coins;
 mod cold;
 mod delivery;
 mod deposits;
+mod imports;
 mod inquiry;
 mod journal;
 mod lane;
@@ -94,6 +95,7 @@ pub use delivery::{Delivery, Due, Inboxed, ACK_WITHIN, PAGES_AT_ONCE};
 pub use deposits::{
     Close, CloseDeposit, Deposit, DepositState, DepositTerms, CLOSE_ATTEMPTS, GAP as DEPOSIT_GAP,
 };
+pub use imports::{Imported, ImportedSource, SealedNotes};
 pub use inquiry::Checked;
 pub use journal::{CoinSpan, Journal, NoteSpan};
 pub use lane::{current_lane, in_background, in_background_now, in_lane, Background, Lane};
