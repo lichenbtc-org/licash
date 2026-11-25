@@ -26,6 +26,10 @@ use lichen_btc::regtest::Regtest;
 #[path = "contracts/load.rs"]
 mod load;
 
+/// The hub's node out of reach during a dispute ([`outage`]).
+#[path = "contracts/outage.rs"]
+mod outage;
+
 /// Whether the wallet's file at `wallet` holds the holder's contracts: made
 /// with the first contract opened, and by no reading of them.
 fn holds_contracts(wallet: &std::path::Path) -> Result<bool> {
@@ -2511,9 +2515,10 @@ async fn hub_answering_following(
     let keyset = hub.info().keysets[0].clone();
     let chain = match APART.load(std::sync::atomic::Ordering::Relaxed) {
         true => apart(source.clone()).await?,
-        false => source.clone(),
+        false => outage::reached(source.clone()).await?,
     };
-    let openings = Openings::with_wallet(dir, chain, source.clone(), keyset, range);
+    let wallet = outage::reached(source.clone()).await?;
+    let openings = Openings::with_wallet(dir, chain, wallet, keyset, range);
     let openings = openings.await?;
     openings.charge_opening(OPENING_FEE);
     witnessed(&openings, &hub).await?;
