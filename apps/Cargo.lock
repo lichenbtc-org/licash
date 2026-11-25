@@ -3597,6 +3597,7 @@ dependencies = [
  "ipnet",
  "licash",
  "licash-api",
+ "licash-bridge",
  "licash-chain-client",
  "licash-contracts",
  "licash-dashboard",

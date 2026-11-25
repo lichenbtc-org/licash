@@ -1297,6 +1297,151 @@ async fn a_holder_claims_the_notes_she_funded_that_a_silent_hub_never_issued() -
 }
 
 /// Her wallet's coins on Bitcoin, all spent away, mined.
+/// The notes a bridge kept at the hub, frozen and exported to a holder of
+/// a contract there, are claimed with her own once she forces it closed on
+/// the silent hub, and swept to her with them.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_holder_claims_the_notes_a_frozen_bridge_exported_her_on_a_silent_hub() -> Result<()> {
+    use bitcoin::FeeRate;
+    use licash_contracts::holder::recovery::{self, Stage};
+
+    let rt = Regtest::start_standard()?;
+    let dir = tempfile::tempdir()?;
+    let at = dir.path().join("hub");
+    let (url, source, hub) = hub_serving(&rt, &at, None).await?;
+    let chain = Node(source);
+    let mine = dir.path().join("wallet");
+    std::fs::create_dir(&mine)?;
+    let file = mine.join("wallet.sqlite");
+    let regtest = ChainProfile::Core30DefaultRegtest;
+    let wallet = Wallet::create(&file, &[9; 32], regtest, Http::new(None)?)?;
+    wallet.add_hub(&url).await?;
+    wallet.watch_silent(None, rt.height()?)?;
+    for sats in [COIN, COIN] {
+        let to = wallet.fallback_address()?.script_pubkey();
+        rt.fund(&to, Amount::from_sat(sats))?;
+    }
+    rt.mine(1)?;
+    ensure!(scan(&wallet, &chain).await? == 2 * COIN);
+    let opened = holder::open(&wallet, &chain, &file, &url, ask()).await?;
+    let rate = FeeRate::from_sat_per_vb(2).context("a rate")?;
+    let payment = pay(&hub, &at.join("seed"), &url, &wallet.address(), 3_000)?;
+    wallet.receive(&payment)?;
+
+    // A bridge of hers at the hub, holding 2 000 sat of notes: frozen and
+    // exported to her key there, imported apart from her balance.
+    let bridged = dir.path().join("bridge");
+    std::fs::create_dir(&bridged)?;
+    let kept = Wallet::create(
+        &bridged.join("wallet.sqlite"),
+        &[11; 32],
+        regtest,
+        Http::new(None)?,
+    )?;
+    kept.add_hub(&url).await?;
+    licash_bridge::Bridge::init(&kept)?;
+    kept.receive(&pay(&hub, &at.join("seed"), &url, &kept.address(), 2_000)?)?;
+    let config = licash_bridge::Config {
+        hub: url.clone(),
+        relays: vec!["ws://127.0.0.1:1".into()],
+        ..licash_bridge::Config::default()
+    };
+    let bridge = licash_bridge::Bridge::open(kept, config)?;
+    // Her key there, of the bridge's Nostr key: its hub takes no Lightning
+    // payments, which the rest of its info says of it.
+    let info = licash_api::bridge::Info {
+        name: None,
+        network: "regtest".into(),
+        hub: url.clone(),
+        nostr: bridge.keys().public_key().to_hex(),
+        relays: Vec::new(),
+        open: false,
+        max_balance: None,
+        max_payment: None,
+        receive_fee: licash_api::Fee { base: 0, ppm: 0 },
+        lightning_address: None,
+    };
+    let mut to = [0; 32];
+    hex::decode_to_slice(wallet.bridge_key(&info)?, &mut to)?;
+    let exported = bridge.export(&to).await?;
+    ensure!(
+        exported.amount == 2_000 && bridge.status()?.frozen,
+        "{exported:?}"
+    );
+    let imported = wallet.import_notes(&exported.export.0)?;
+    ensure!(imported.amount == 2_000, "{imported:?}");
+    let available =
+        |w: &Wallet<Http>| -> Result<u64> { Ok(w.balance()?.iter().map(|b| b.available).sum()) };
+    ensure!(available(&wallet)? == 3_000);
+
+    rt.mine(1)?;
+    holder::resume(&wallet, &chain, &file).await?;
+    empty(&rt, &wallet, &chain).await?;
+    // Her notes first, then the bridge's, within the cap left.
+    let forced = recovery::force_close(&wallet, &chain, &file, &opened.id, rate).await?;
+    ensure!(
+        forced.stage == Stage::Claimed && forced.error.is_none(),
+        "{forced:?}"
+    );
+    let notes = 7 + exported.notes as usize;
+    ensure!(
+        (forced.claimed, forced.notes) == (3_000 + 2_000 + opened.funded, notes),
+        "{forced:?}"
+    );
+    let sources = wallet.imported_notes()?;
+    ensure!(
+        sources.len() == 1 && sources[0].claimed as u64 == exported.notes && sources[0].void == 0,
+        "{sources:?}"
+    );
+    // Claimed, not discarded: the bridge stays frozen.
+    let refused = wallet.discard_imported(&sources[0].source);
+    ensure!(refused.is_err(), "{refused:?}");
+
+    // Through to the sweep, as with her own notes alone.
+    let lock_end = forced.next_at.context("no lock")?;
+    rt.mine_to_height(lock_end - 1)?;
+    let sent = recovery::advance(&wallet, &chain, &file, rate).await?;
+    ensure!(sent[0].stage == Stage::Published, "{sent:?}");
+    rt.mine(1)?;
+    let requested = &recovery::advance(&wallet, &chain, &file, rate).await?[0];
+    ensure!(requested.stage == Stage::Requested, "{requested:?}");
+    let window_end = requested.next_at.context("no window")?;
+    rt.mine_to_height(window_end - 1)?;
+    let timing_out = &recovery::advance(&wallet, &chain, &file, rate).await?[0];
+    ensure!(timing_out.stage == Stage::TimingOut, "{timing_out:?}");
+    rt.mine(1)?;
+    let timed_out = &recovery::advance(&wallet, &chain, &file, rate).await?[0];
+    ensure!(timed_out.stage == Stage::TimedOut, "{timed_out:?}");
+    let delay_end = timed_out.next_at.context("no delay")?;
+    rt.mine_to_height(delay_end - 1)?;
+    let before = scan(&wallet, &chain).await?;
+    let sweeping = &recovery::advance(&wallet, &chain, &file, rate).await?[0];
+    ensure!(sweeping.stage == Stage::Sweeping, "{sweeping:?}");
+    let sweep = sweeping.sweep.context("no sweep")?;
+    rt.mine(1)?;
+    let done = &recovery::advance(&wallet, &chain, &file, rate).await?[0];
+    ensure!(done.stage == Stage::Done, "{done:?}");
+    let found: serde_json::Value = chain
+        .0
+        .rpc(
+            "getrawtransaction",
+            serde_json::json!([sweep.to_string(), true]),
+        )
+        .await?;
+    let paid = found["vout"][0]["value"].as_f64().context("no output")?;
+    let paid = (paid * 1e8).round() as u64;
+    ensure!(scan(&wallet, &chain).await? == before + paid);
+    // As her notes alone would, but of the claim's bits for 5 000, 4 096
+    // at least: more than her 3 000 alone could sweep (2 560 of bits and
+    // her 20 000).
+    ensure!(
+        paid > 2_560 + 20_000 && paid < 5_000 + 20_000,
+        "{paid} swept"
+    );
+    Ok(())
+}
+
 async fn empty(rt: &Regtest, wallet: &Wallet<Http>, chain: &Node) -> Result<()> {
     if scan(wallet, chain).await? > 0 {
         let away =
