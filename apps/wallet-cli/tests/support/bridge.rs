@@ -24,6 +24,11 @@ impl Bridged {
     /// A bridge for its owner alone, paying and paid through `hub`, all in
     /// the runtime of its own thread, as its wallet's client is.
     pub fn start(hub: &Server) -> Self {
+        Self::with(hub, false)
+    }
+
+    /// [`Bridged::start`], open to anyone if `open`.
+    pub fn with(hub: &Server, open: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wallet.sqlite");
         let url = hub.url();
@@ -47,6 +52,7 @@ impl Bridged {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let config = Config {
                     hub: url,
+                    open,
                     relays: vec!["ws://127.0.0.1:1".into()],
                     public_url: Some(format!("http://{}", listener.local_addr().unwrap())),
                     ..Config::default()

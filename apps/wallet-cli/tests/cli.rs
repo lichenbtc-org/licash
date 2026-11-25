@@ -915,6 +915,62 @@ fn swap_providers_announced_on_nostr_are_discovered_where_they_answer() {
     );
 }
 
+#[test]
+fn open_bridges_announced_on_nostr_are_found_those_at_trusted_hubs_first() {
+    use licash_nostr::{Announcement, Announcer, Role, Route};
+    let (a, b) = (Server::with_lightning(FEE), Server::with_lightning(FEE));
+    let (at_a, at_b) = (Bridged::with(&a, true), Bridged::with(&b, true));
+    let owned = Bridged::start(&a);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let (_relay, relay) = support::relay(&runtime);
+    let relays = [relay];
+    let announce = |secret: [u8; 32], url: String| {
+        let announcement = Announcement {
+            urls: vec![url],
+            network: "regtest".into(),
+            name: Some("bridge".into()),
+        };
+        runtime.block_on(async {
+            let announcer = Announcer::new(&secret, Role::Bridge, &relays, &Route::Direct)
+                .await
+                .unwrap();
+            announcer.announce(&announcement).await.unwrap();
+        });
+    };
+    let secret = |b: &Bridged| b.bridge.keys().secret_key().to_secret_bytes();
+    // B's first: found in the order announced, but for the wallet's hubs.
+    announce(secret(&at_b), at_b.url());
+    announce(secret(&at_a), at_a.url());
+    // For its owner alone, and another key announcing A's: left out.
+    announce(secret(&owned), owned.url());
+    announce([3; 32], at_a.url());
+
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = party(dir.path(), "alice", Some(&a));
+    let args = ["discover", "--bridges", "--relay", &relays[0]];
+    let found = json(&alice, &args);
+    let urls: Vec<_> = (found.as_array().unwrap().iter())
+        .map(|f| f["urls"][0].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(urls, [at_a.url(), at_b.url()], "{found}");
+    assert_eq!(
+        (found[0]["trusted"].as_bool(), found[1]["trusted"].as_bool()),
+        (Some(true), Some(false))
+    );
+    assert_eq!(found[0]["hub"], a.url());
+    let text = ok(wallet(&alice, &args, None));
+    assert!(text.lines().next().unwrap().contains("(trusted)"), "{text}");
+    failed(
+        wallet(
+            &alice,
+            &["discover", "--bridges", "--swaps", "--relay", &relays[0]],
+            None,
+        ),
+        2,
+        "cannot be used",
+    );
+}
+
 /// Announce the swap provider at `url` on `relays` as the key of `secret`.
 fn announce_provider(
     runtime: &tokio::runtime::Runtime,
