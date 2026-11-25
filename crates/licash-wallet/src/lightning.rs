@@ -904,21 +904,27 @@ impl<T: Transport> Wallet<T> {
     /// An invoice from the hub at `url` asking exactly `msat`, the hub's
     /// fee taken from it: this wallet is paid the most whole notes the rest
     /// comes to, and the hub keeps the under 2 sat beyond. Committing to
-    /// `description_hash`, if given, instead of saying a memo, as LNURL-pay
-    /// and Nostr zaps want. Refused at a hub not naming
-    /// [`licash_api::FEATURE_LNURL`], and checked in the invoice it
-    /// answers.
+    /// `description_hash`, if given, as LNURL-pay and Nostr zaps want, or
+    /// else saying `memo`, if given ([`Wallet::invoice_saying`]). Refused
+    /// at a hub not naming [`licash_api::FEATURE_LNURL`], and checked in
+    /// the invoice it answers.
     pub async fn invoice_exact(
         &self,
         url: &str,
         msat: u64,
+        memo: Option<&str>,
         description_hash: Option<[u8; 32]>,
     ) -> Result<Invoice, Error> {
+        if memo.is_some() && description_hash.is_some() {
+            return Err(Error::Invalid(
+                "a memo or a description hash, not both".into(),
+            ));
+        }
         let exact = Exact {
             msat,
             description_hash,
         };
-        self.invoice_asking(url, None, false, None, Some(exact))
+        self.invoice_asking(url, None, false, memo, Some(exact))
             .await
     }
 

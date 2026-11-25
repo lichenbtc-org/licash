@@ -520,7 +520,7 @@ async fn an_exact_invoice_asks_its_total_and_commits_to_its_description() {
     let alice = net.wallet("alice");
     // 12.5 sat: 11 in notes, the 1 sat fee, and half a sat the hub's.
     let invoice = alice
-        .invoice_exact(HUB, 12_500, Some([7; 32]))
+        .invoice_exact(HUB, 12_500, None, Some([7; 32]))
         .await
         .unwrap();
     assert_eq!(invoice.amount, 11);
@@ -535,7 +535,7 @@ async fn an_exact_invoice_asks_its_total_and_commits_to_its_description() {
     assert_eq!(received.state, InvoiceState::Received);
     assert_eq!(available(&alice), 11);
     // What the fee takes all of is refused before the hub hears of it.
-    let refused_here = alice.invoice_exact(HUB, 1_999, None).await;
+    let refused_here = alice.invoice_exact(HUB, 1_999, None, None).await;
     assert!(matches!(
         refused_here,
         Err(licash_wallet::Error::Invalid(_))
@@ -544,8 +544,13 @@ async fn an_exact_invoice_asks_its_total_and_commits_to_its_description() {
     // Paid inside the hub, as a top-up from another wallet of it is.
     let bob = net.funded("bob", 40).await;
     let carol = net.wallet("carol");
-    let invoice = carol.invoice_exact(HUB, 10_000, None).await.unwrap();
+    let invoice = carol
+        .invoice_exact(HUB, 10_000, Some("Top up"), None)
+        .await
+        .unwrap();
     assert_eq!(invoice.amount, 9);
+    let said = description(invoice.request.as_deref().unwrap());
+    assert_eq!(said.as_deref(), Some("Top up"));
     let lock = bob
         .pay_invoice(HUB, invoice.request.as_deref().unwrap())
         .await
