@@ -1036,6 +1036,12 @@ misconfigured proxy shows at once. For Traefik:
 - firewall `--listen` so only Traefik reaches it: a client reaching the
   hub directly from within a trusted block could name any source.
 
+The hub bounds what is asked and not paid, and what runs at once, but not
+how often one client asks. On the clear web, also limit each client's
+request rate at the proxy (Traefik's `rateLimit` middleware, with
+`sourceCriterion.ipStrategy`), keyed by its address, at well above what a
+wallet asks (a few requests a second, in bursts of some tens).
+
 Deposits and receipts recorded by an older release keep the source it
 stored, its peer's address and port: they count against that address
 until paid or ended.
