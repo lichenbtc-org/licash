@@ -1,7 +1,11 @@
 //! She signs her deposit into F before the hub signs its inputs: what they
 //! check is that the hub signs only on her valid signature, and that a hub
-//! which then withholds F, the whole of which it alone holds, has her coin
-//! taken back from it [`holder::F_UNSEEN`] blocks on.
+//! which then withholds F, the whole of which it alone holds, or answers
+//! it signed otherwise, has her coin taken back from it
+//! [`holder::F_UNSEEN`] blocks on.
+
+use licash_contract::wire::{self, Envelope, Kind};
+use licash_contracts::Frame;
 
 use super::*;
 
@@ -12,6 +16,34 @@ enum Meddle {
     Spoil,
     /// The hub's answer to it lost, every time: she never hears F whole.
     Hush,
+    /// The hub's signatures in its answer spoiled: F whole to her, which
+    /// no node takes.
+    Junk,
+}
+
+/// `answer`, the hub's frames, with the signatures of its inputs of each F
+/// answered whole spoiled: all but her `deposit`'s.
+fn spoiled(answer: &[u8], deposit: bitcoin::OutPoint) -> Result<Vec<u8>, String> {
+    let frames = Frame::decode_all(answer).map_err(|e| e.to_string())?;
+    let frames = frames.into_iter().map(|Frame::Message(bytes)| {
+        let Ok(mut envelope) = Envelope::from_bytes(&bytes) else {
+            return Frame::Message(bytes);
+        };
+        if envelope.kind != Kind::Funded {
+            return Frame::Message(bytes);
+        }
+        let mut funded = wire::Funded::decode(&envelope.body).expect("F");
+        for input in &mut funded.funding.input {
+            if input.previous_output != deposit {
+                let mut sig = input.witness.to_vec();
+                sig[0][0] ^= 1;
+                input.witness = bitcoin::Witness::from_slice(&sig);
+            }
+        }
+        envelope.body = funded.encode();
+        Frame::Message(envelope.to_bytes())
+    });
+    Ok(Frame::encode_all(&frames.collect::<Vec<_>>()))
 }
 
 /// [`Http`], but her consent ([`Meddle`]d) as `meddle` says; all else
@@ -19,6 +51,8 @@ enum Meddle {
 struct Meddling {
     http: Http,
     meddle: Meddle,
+    /// Her deposit, once known.
+    deposit: std::sync::Mutex<Option<bitcoin::OutPoint>>,
 }
 
 /// The kind byte of an opening's message: after its magic and version.
@@ -46,6 +80,14 @@ impl licash_wallet::Transport for Meddling {
                 self.http.request(url, body).await?;
                 Err("no answer over Tor in 120 s".into())
             }
+            (true, Meddle::Junk, body) => {
+                let mut answer = self.http.request(url, body).await?;
+                let deposit = self.deposit.lock().unwrap().expect("her deposit");
+                if answer.status == 200 {
+                    answer.body = spoiled(&answer.body, deposit)?;
+                }
+                Ok(answer)
+            }
             (_, _, body) => self.http.request(url, body).await,
         }
     }
@@ -60,11 +102,12 @@ async fn locked(chain: &Node) -> Result<usize> {
     Ok(locked.len())
 }
 
-/// Two holders whose openings stop once each signed her deposit into F:
+/// Three holders whose openings stop once each signed her deposit into F:
 /// one's signature spoiled on the way, which the hub refuses, signing
-/// nothing; the other's taken, the hub signing F and broadcasting it, but
-/// F never relayed and its answer never heard, as from a hub withholding
-/// it. Neither F confirms. [`holder::F_UNSEEN`] blocks after each signed,
+/// nothing; the others' taken, the hub signing F and broadcasting it, but
+/// F never relayed, and its answer never heard, as from a hub withholding
+/// it, or heard with the hub's signatures spoiled, as from a hub keeping
+/// her cancel off with an F no node takes. No F confirms. [`holder::F_UNSEEN`] blocks after each signed,
 /// and not before, each takes her coin back, which her wallet finds as
 /// change; the hub, its coins in the F it signed freed once her cancel is
 /// deep, holds no contract.
@@ -79,20 +122,27 @@ async fn she_takes_her_coin_back_from_a_hub_that_never_completes_f() -> Result<(
     let chain = Node(source.clone());
 
     let mut holders = Vec::new();
-    for (n, meddle) in [Meddle::Spoil, Meddle::Hush].into_iter().enumerate() {
+    let meddles = [Meddle::Spoil, Meddle::Hush, Meddle::Junk];
+    for (n, meddle) in meddles.into_iter().enumerate() {
         let transport = Meddling {
             http: Http::new(None)?,
             meddle,
+            deposit: Default::default(),
         };
         let at = dir.path().join(format!("holder{n}"));
         let seed = [50 + n as u8; 32];
         let (mine, wallet) =
             holder_wallet_over(&rt, &chain, &at, &url, seed, &[COIN], transport).await?;
         let deposit = wallet.silent_coins()?[0].outpoint;
+        *wallet.transport().deposit.lock().unwrap() = Some(deposit);
         severable.withhold(deposit);
         let file = mine.join("wallet.sqlite");
         let opened = holder::open(&wallet, &chain, &file, &url, ask()).await;
-        ensure!(opened.is_err(), "opened: {opened:?}");
+        // Answered F whole, which no node takes: opened, to her.
+        ensure!(
+            opened.is_err() != (meddle == Meddle::Junk),
+            "opened: {opened:?}"
+        );
         let listed = holder::list(&file)?;
         ensure!(listed.len() == 1, "{listed:?}");
         let contract = &listed[0];
@@ -105,9 +155,9 @@ async fn she_takes_her_coin_back_from_a_hub_that_never_completes_f() -> Result<(
         let signed = rt.height()?;
         holders.push((wallet, file, deposit, f, signed));
     }
-    // The hub signed the one whose signature it was given whole, and only
-    // it.
-    ensure!(licash_contracts::hub::signed(&hub_dir)? == 1);
+    // The hub signed those whose signature it was given whole, and only
+    // them.
+    ensure!(licash_contracts::hub::signed(&hub_dir)? == 2);
     openings.answer_requests().await?;
     let held = locked(&chain).await?;
 

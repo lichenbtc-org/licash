@@ -53,6 +53,7 @@ licash-dashboard = { workspace = true, features = ["test-support"] }
 licash-hub-service = { path = ".", features = ["fake"] }
 licash-bridge = { path = "../bridge" }
 licash-contracts = { path = "../contracts", features = ["faults"] }
+licash-contract = { path = "../../crates/licash-contract" }
 lichen-btc = { git = "https://github.com/lichenbtc-org/lichen-btc", rev = "d7d2de04f7f8d51b44f61a68c7e1789f36502071" }
 nostr-sdk = { version = "0.45.6", features = ["local-relay"] }
 tempfile = "3.27"

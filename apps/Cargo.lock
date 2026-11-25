@@ -3599,6 +3599,7 @@ dependencies = [
  "licash-api",
  "licash-bridge",
  "licash-chain-client",
+ "licash-contract",
  "licash-contracts",
  "licash-dashboard",
  "licash-hub",
