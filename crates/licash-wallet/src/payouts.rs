@@ -374,6 +374,35 @@ impl<T: Transport> Wallet<T> {
         Ok((most > 0 && chain.max >= chain.min).then_some(most))
     }
 
+    /// The least the provider saying `info` of itself pays out to `to`
+    /// from a lock at hub `from`, added, by its terms as said: its smallest
+    /// coin less what the coin holds for its claim's fee at `rate` at
+    /// least, and no dust at `to`. None if it pays nothing out on Bitcoin,
+    /// takes no lock at `from`, or pays out nothing at all. A quote may
+    /// still refuse it, for its timing or its fees.
+    pub fn payout_least(
+        &self,
+        info: &swaps::Info,
+        from: &str,
+        to: &str,
+        rate: FeeRate,
+    ) -> Result<Option<u64>, Error> {
+        let from = hub_url(from)?;
+        let (script, _, _) = self.payout_payee(to)?;
+        let (_, from_info) = self.hub(&from)?;
+        let Some(chain) = info.chain else {
+            return Ok(None);
+        };
+        if info.hub(&from_info.address).is_none() || info.address == from_info.address {
+            return Ok(None);
+        }
+        // A claim's size is the same whatever it pays.
+        let budget = claim_budget(&script, chain.max, &chain, rate)?;
+        let dust = script.minimal_non_dust().to_sat();
+        let least = chain.min.saturating_sub(budget).max(dust);
+        Ok((least.saturating_add(budget) <= chain.max).then_some(least))
+    }
+
     /// Pay out as `quote` says, under its ticket: lock the coin's value and
     /// the fees to the provider at its hub, then claim the coin it locks
     /// on Bitcoin. The provider is asked again: refused as

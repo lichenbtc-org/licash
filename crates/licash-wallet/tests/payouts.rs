@@ -1149,6 +1149,51 @@ async fn the_most_a_provider_pays_out_is_its_largest_coin_less_the_claims_fee() 
     );
 }
 
+/// A wallet paying itself a coin raises it to the least a provider pays
+/// out: a provider's smallest coin, risen with fees, refused a contract's
+/// coin of its price and her part on Mutinynet.
+#[tokio::test]
+async fn the_least_a_provider_pays_out_is_its_smallest_coin_less_the_claims_fee() {
+    let eco = Eco::new().await;
+    let terms = swaps::Chain {
+        min: 2_000,
+        ..TERMS
+    };
+    *eco.desk.terms.lock().unwrap() = Some(terms);
+    let info = eco.client.provider_info(PROVIDER).await.unwrap();
+    let least = eco
+        .client
+        .payout_least(&info, A, PAYEE, ONE_SAT)
+        .unwrap()
+        .expect("it pays out from A");
+    assert!(least < terms.min, "{least}");
+    let quote = |amount| {
+        eco.client
+            .payout_quote(PROVIDER, A, PAYEE, amount, MAX_FEE, ONE_SAT)
+    };
+    assert_eq!(quote(least).await.unwrap().value(), terms.min);
+    match quote(least - 1).await {
+        Err(Error::Invalid(reason)) => assert!(reason.contains("pays out coins of"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+    // Its smallest coin all claim fee: what pays no dust, at least.
+    let all = swaps::Info {
+        chain: Some(swaps::Chain { min: 1, ..terms }),
+        ..info.clone()
+    };
+    let dust = eco.client.payout_least(&all, A, PAYEE, ONE_SAT).unwrap();
+    assert_eq!(dust, Some(294));
+    // A provider paying nothing out on Bitcoin pays out no least.
+    let none = swaps::Info {
+        chain: None,
+        ..info
+    };
+    assert_eq!(
+        eco.client.payout_least(&none, A, PAYEE, ONE_SAT).unwrap(),
+        None
+    );
+}
+
 #[tokio::test]
 async fn a_payout_is_refused_beyond_its_terms_before_any_lock() {
     let eco = Eco::new().await;
