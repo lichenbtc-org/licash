@@ -1675,10 +1675,23 @@ mod chained {
             *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
         }
         // On `LICASH_HP_GRAPH` if set, one chained (r0/host's programs before).
+        // Of a graph whose claims are void signed twice, her claim in a
+        // leaf's envelope, owed nothing by her other signature on `E`.
         let on = std::env::var("LICASH_HP_GRAPH").map_or(ON, |n| n.parse().unwrap());
         let (f, spent) = stale_on(on);
-        let x = exit(&f.base, f.b, &f.e, &f.bytes, 64);
-        let evidence = std::slice::from_ref(&spent);
+        let two = licash::recovery::two_claims_void(on);
+        let x = match two {
+            true => {
+                let witness = signed_request(3, &f.e, f.b).1;
+                let leaf = licash_statement::testing::leaf_published;
+                carried_exit(&f.base, &witness, &f.bytes, 64, leaf)
+            }
+            false => exit(&f.base, f.b, &f.e, &f.bytes, 64),
+        };
+        let evidence = match two {
+            true => &[][..],
+            false => std::slice::from_ref(&spent),
+        };
         // the chain through the response's block, in two batches
         let through = Lineage::new(f.base.parts().chain.checkpoint.clone())
             .map(|mut l| {
@@ -1706,7 +1719,16 @@ mod chained {
             },
             headers: x.headers[cut..through as usize].to_vec(),
         };
-        let (input, _) = on_chain(chain, &f.base, &x, evidence, through);
+        let (mut input, _) = on_chain(chain, &f.base, &x, evidence, through);
+        if two {
+            let items = RequestKeys::e_items();
+            input.other_e = Some(signed_request(3, &[0x55; 32], f.b).1[..items].to_vec());
+            let program = program_of(chain);
+            assert_eq!(
+                licash_hp::check_on(&input, &program),
+                Ok(contract(&f.base).journal())
+            );
+        }
         for (name, bytes) in [
             ("batch-1", first.to_bytes()),
             ("batch-2", second.to_bytes()),
