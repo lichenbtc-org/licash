@@ -168,10 +168,9 @@ by default), whoever asked: anyone may ask for them, of any code naming a
 hub the provider holds notes at, and not pay, each holding its place for
 about 11 minutes, until its invoice expires and is canceled. Past them, new
 donations are refused, not those under way. An unpaid one holds none of
-the provider's notes, only its place: to keep places for paying donors,
-limit how often one client may call the callback, at a reverse proxy in
-front of it. A
-provider with donations under way refuses to start without `--lnurl-url`
+the provider's notes, only its place, and one source (a client's address,
+or its Tor circuit over the onion service) holds at most 8 unpaid at once,
+leaving the rest to paying donors. A provider with donations under way refuses to start without `--lnurl-url`
 and `--lnd`. The provider must stay up while donations are under way: down
 past an HTLC's expiry, it may have paid the payee and lose the donation.
 
@@ -203,7 +202,8 @@ blocks on a hub with a day's window. A lock that expired, neither paid nor
 refunded, alerts the operator and never cancels the invoice. At most
 `--receive-max-open` receipts are under way at once (100 by default),
 each holding its amount of the provider's notes at the hub aside while
-unpaid. A provider with receipts under way refuses to start without
+unpaid, and one source holds at most 8 of them unpaid at once, as
+donations. A provider with receipts under way refuses to start without
 `--receive` and `--lnd`. Receipts are kept in tables of their own, made in
 the provider's file when first taken: an existing provider's file is
 otherwise as it was.
@@ -278,6 +278,18 @@ serves its API as an onion service, announced like `--announce-url`'s; back
 up `<data>/tor/state` to keep the address. Under load, the service asks its
 clients for a proof of work (Tor's onion service defense) unless
 `--onion-pow false`.
+
+Sources are counted as the hub counts them (see its `--trusted-proxy` in
+`docs/hub.md`): an onion service's circuit, or else a client's IP address.
+Behind a reverse proxy, name it with `--trusted-proxy`
+(`LICASH_SWAPS_TRUSTED_PROXY`), an address or a CIDR block, repeated or
+comma separated, and firewall `--listen` so only the proxy reaches it: the
+provider then reads the client from `X-Forwarded-For`, and refuses a
+receipt or donation whose header from that proxy does not parse. Without
+it, every client behind the proxy is one source. At most 256 requests are
+served at once, `/health` aside, and a body still arriving 60 seconds after
+its head is refused.
+
 Notification targets are Apprise URLs, as for the hub; `test-notify` checks
 them. `--notify-kinds` picks the kinds of event: by default all but swaps
 accepted (`accepted`), still under way. Each notification lists the swap's

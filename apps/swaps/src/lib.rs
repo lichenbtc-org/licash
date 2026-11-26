@@ -27,6 +27,7 @@ use licash_api::{
 };
 use licash_chain_client::Source;
 use licash_nostr::{Announcement, Announcer, Role, Route};
+use licash_serve::{Admission, AdmissionSource};
 use licash_swaps::{Chain, Provider};
 use licash_wallet::Transport;
 use serde_json::{json, Value};
@@ -84,36 +85,44 @@ struct Served<T: Transport, C> {
     chain: Option<Arc<C>>,
 }
 
-/// The API of `provider`, whose info names `nostr`, the key it announces
-/// itself under, if given. It pays nothing out on Bitcoin.
-pub fn router<T: Transport + 'static>(provider: Arc<Provider<T>>, nostr: Option<String>) -> Router {
-    routes::<T, ChainView>(provider, nostr, None)
+/// How a provider serves its API, beside what it takes.
+#[derive(Default)]
+pub struct Serving {
+    /// The key it announces itself under on Nostr, which its info names.
+    pub nostr: Option<String>,
+    /// The chain it pays out on Bitcoin on ([`Provider::pay_out`]), if it
+    /// does.
+    pub chain: Option<Arc<ChainView>>,
+    /// The proxies in front of it whose clients it admits by: the receipts
+    /// and donations asked and not paid are bounded by source
+    /// ([`licash_swaps::PER_SOURCE`]).
+    pub ingress: Arc<licash_serve::Ingress>,
 }
 
-/// [`router`] without [`HEALTH`] and traces: for a hub serving the swaps
-/// into it beside its own API, which has both.
+/// The API of `provider`, as `serving` says, its donations over LNURL-pay
+/// ([`lnurl`]) if it takes them, and [`HEALTH`]: at most [`MAX_SERVING`]
+/// requests at once, each body still arriving
+/// [`licash_serve::BODY_TIME`] after its head refused, each request's
+/// source resolved before any handler.
+pub fn router<T: Transport + 'static>(provider: Arc<Provider<T>>, serving: Serving) -> Router {
+    let Serving {
+        nostr,
+        chain,
+        ingress,
+    } = serving;
+    let mut routes = paths(provider.clone(), nostr, chain).route(HEALTH, get(|| async { "ok" }));
+    if provider.donations().is_some() {
+        routes = routes.merge(lnurl(provider));
+    }
+    let routes = licash_serve::shed(routes, MAX_SERVING, "the provider is too busy now");
+    licash_serve::resolving(routes, ingress).layer(TraceLayer::new_for_http())
+}
+
+/// The paths of [`router`] alone, without [`HEALTH`], donations, limits
+/// or traces: for a hub serving the swaps into it beside its own API,
+/// which has them, and resolves each request's source.
 pub fn api<T: Transport + 'static>(provider: Arc<Provider<T>>, nostr: Option<String>) -> Router {
     paths::<T, ChainView>(provider, nostr, None)
-}
-
-/// [`router`], for a provider paying out on Bitcoin
-/// ([`Provider::pay_out`]) on `chain`.
-pub fn router_paying_out<T: Transport + 'static, C: Chain + Send + 'static>(
-    provider: Arc<Provider<T>>,
-    nostr: Option<String>,
-    chain: Arc<C>,
-) -> Router {
-    routes(provider, nostr, Some(chain))
-}
-
-fn routes<T: Transport + 'static, C: Chain + Send + 'static>(
-    provider: Arc<Provider<T>>,
-    nostr: Option<String>,
-    chain: Option<Arc<C>>,
-) -> Router {
-    let routes = paths(provider, nostr, chain).route(HEALTH, get(|| async { "ok" }));
-    licash_serve::shed(routes, MAX_SERVING, "the provider is too busy now")
-        .layer(TraceLayer::new_for_http())
 }
 
 fn paths<T: Transport + 'static, C: Chain + Send + 'static>(
@@ -146,7 +155,7 @@ fn paths<T: Transport + 'static, C: Chain + Send + 'static>(
 /// public URL, [`swaps::DONATE_CALLBACK`] a donation's invoice. Answered
 /// as LNURL asks, `{"status": "ERROR", "reason": ...}` when refused, to
 /// any origin.
-pub fn lnurl<T: Transport + 'static>(provider: Arc<Provider<T>>) -> Router {
+fn lnurl<T: Transport + 'static>(provider: Arc<Provider<T>>) -> Router {
     Router::new()
         .route(swaps::DONATE, get(pay_request::<T>))
         .route(swaps::DONATE_CALLBACK, get(donate::<T>))
@@ -185,11 +194,17 @@ async fn donate<T: Transport + 'static>(
     State(provider): State<Arc<Provider<T>>>,
     Path(code): Path<String>,
     Query(query): Query<HashMap<String, String>>,
+    admission: Result<Admission, licash_serve::Malformed>,
 ) -> Response {
+    let source = match admission {
+        Ok(Admission(source)) => source,
+        Err(licash_serve::Malformed(problem)) => return lnurl_answer(Err(problem)),
+    };
     let Some(msat) = query.get("amount").and_then(|a| a.parse::<u64>().ok()) else {
         return lnurl_answer(Err(Problem::invalid("an amount in millisatoshis")));
     };
-    let invoice = provider.donate(&code, msat).await;
+    let source = source.as_ref().map(AdmissionSource::as_bytes);
+    let invoice = provider.donate(&code, msat, source).await;
     lnurl_answer(invoice.map(|pr| json!({ "pr": pr, "routes": [] })))
 }
 
@@ -326,12 +341,18 @@ async fn invoice_state<T: Transport + 'static, C>(
 
 async fn take_receive<T: Transport + 'static, C>(
     State(served): Shared<T, C>,
+    Admission(source): Admission,
     body: Result<Json<ReceiveRequest>, JsonRejection>,
 ) -> Answer<Receiving> {
     let Json(request) = body?;
-    let receiving = served.provider.receive(&request).await.inspect_err(|p| {
-        tracing::debug!(code = ?p.code, message = %p.message, "receipt declined");
-    })?;
+    let source = source.as_ref().map(AdmissionSource::as_bytes);
+    let receiving = served
+        .provider
+        .receive(&request, source)
+        .await
+        .inspect_err(|p| {
+            tracing::debug!(code = ?p.code, message = %p.message, "receipt declined");
+        })?;
     Ok(Json(receiving))
 }
 

@@ -100,11 +100,16 @@ impl Eco {
 
     /// The provider, stopped and opened again over the same node.
     fn restart(&mut self) {
+        self.restart_with(TERMS);
+    }
+
+    /// [`Self::restart`], taking receipts on `terms`.
+    fn restart_with(&mut self, terms: ReceiveTerms) {
         drop(self.provider.take());
         let wallet = Wallet::open(&self.path(), Link(self.net.clone())).unwrap();
         let provider = Provider::open(wallet, Config::default())
             .unwrap()
-            .take_receives(self.node.clone(), TERMS)
+            .take_receives(self.node.clone(), terms)
             .unwrap();
         self.provider = Some(Arc::new(provider));
     }
@@ -147,7 +152,7 @@ impl Eco {
     async fn receive(&self, amount: u64, seed: u8) -> (Bolt11Invoice, [u8; 32]) {
         let receiving = self
             .provider()
-            .receive(&self.request(amount, seed))
+            .receive(&self.request(amount, seed), None)
             .await
             .unwrap();
         (receiving.request.parse().unwrap(), lock_hash(&[seed; 32]))
@@ -216,7 +221,10 @@ async fn a_receipt_paid_is_locked_to_the_wallet_and_settled_once_it_claims() {
     // What it is to lock is set aside from what it swaps.
     let max = |eco: &Eco| eco.provider().info().unwrap().hubs[0].max;
     let before = max(&eco);
-    eco.provider().receive(&eco.request(10, 9)).await.unwrap();
+    eco.provider()
+        .receive(&eco.request(10, 9), None)
+        .await
+        .unwrap();
     assert_eq!(max(&eco), before - 10);
     // Nothing is locked until its invoice is paid.
     eco.follow().await;
@@ -358,21 +366,21 @@ async fn receipts_are_asked_within_the_terms_once_under_each_hash() {
     let provider = eco.provider();
     let (invoice, hash) = eco.receive(100, 5).await;
     // The same request again: the same invoice.
-    let again = provider.receive(&eco.request(100, 5)).await.unwrap();
+    let again = provider.receive(&eco.request(100, 5), None).await.unwrap();
     assert_eq!(again.request, invoice.to_string());
     let refused = |r: Result<licash_api::Receiving, licash_api::Problem>| r.unwrap_err().code;
     // Another under its hash.
     assert_eq!(
-        refused(provider.receive(&eco.request(101, 5)).await),
+        refused(provider.receive(&eco.request(101, 5), None).await),
         Code::Declined
     );
     // Beyond the terms.
     assert_eq!(
-        refused(provider.receive(&eco.request(9, 6)).await),
+        refused(provider.receive(&eco.request(9, 6), None).await),
         Code::Invalid
     );
     assert_eq!(
-        refused(provider.receive(&eco.request(501, 6)).await),
+        refused(provider.receive(&eco.request(501, 6), None).await),
         Code::Invalid
     );
     // To a hub's address, or at a hub the provider does not swap at.
@@ -380,32 +388,76 @@ async fn receipts_are_asked_within_the_terms_once_under_each_hash() {
         address: eco.hub_address(),
         ..eco.request(100, 6)
     };
-    assert_eq!(refused(provider.receive(&to_hub).await), Code::Invalid);
+    assert_eq!(
+        refused(provider.receive(&to_hub, None).await),
+        Code::Invalid
+    );
     let elsewhere = ReceiveRequest {
         hub: eco.payee.address(),
         ..eco.request(100, 6)
     };
-    assert_eq!(refused(provider.receive(&elsewhere).await), Code::Declined);
+    assert_eq!(
+        refused(provider.receive(&elsewhere, None).await),
+        Code::Declined
+    );
     // A memo not as made.
     let memo = ReceiveRequest {
         memo: Some(" Lunch".into()),
         ..eco.request(100, 6)
     };
-    assert_eq!(refused(provider.receive(&memo).await), Code::Invalid);
+    assert_eq!(refused(provider.receive(&memo, None).await), Code::Invalid);
     // More than the provider holds beside what it is to lock.
     eco.receive(500, 6).await;
     assert_eq!(
-        refused(provider.receive(&eco.request(450, 7)).await),
+        refused(provider.receive(&eco.request(450, 7), None).await),
         Code::Declined
     );
     // At most three under way.
     eco.receive(10, 7).await;
     assert_eq!(
-        refused(provider.receive(&eco.request(10, 8)).await),
+        refused(provider.receive(&eco.request(10, 8), None).await),
         Code::Unavailable
     );
     assert_eq!(provider.open_receives().unwrap(), 3);
     assert!(licash_swaps::holds_hash(&eco.path(), &hash).unwrap());
+}
+
+/// From one source only so many receipts are asked and not paid, the
+/// rest of those under way left to others: from another source, or none
+/// known, more, and once one is paid, its place is free.
+#[tokio::test]
+async fn receipts_asked_and_not_paid_from_one_source_are_bounded() {
+    let mut eco = Eco::new().await;
+    eco.restart_with(ReceiveTerms {
+        max_open: 100,
+        ..TERMS
+    });
+    let eco = &eco;
+    let (one, other) = (b"ip 192.0.2.1".as_slice(), b"ip 192.0.2.2".as_slice());
+    let ask = |seed: u8, source: Option<&'static [u8]>| {
+        let request = eco.request(10, seed);
+        async move { eco.provider().receive(&request, source).await }
+    };
+    for seed in 0..licash_swaps::PER_SOURCE as u8 {
+        ask(10 + seed, Some(one)).await.unwrap();
+    }
+    let refused = ask(50, Some(one)).await.unwrap_err();
+    assert_eq!(refused.code, Code::Unavailable, "{refused:?}");
+    assert!(refused.message.contains("source"), "{refused:?}");
+    // One asked, asked again: the same.
+    ask(10, Some(one)).await.unwrap();
+    ask(50, Some(other)).await.unwrap();
+    ask(51, None).await.unwrap();
+    // Paid, one is no longer counted.
+    let hash = lock_hash(&[10; 32]);
+    eco.pay(hash, CLTV);
+    eco.follow().await;
+    assert_eq!(eco.state(&hash), ReceiptState::Locked);
+    ask(52, Some(one)).await.unwrap();
+    assert_eq!(
+        ask(53, Some(one)).await.unwrap_err().code,
+        Code::Unavailable
+    );
 }
 
 #[tokio::test]
@@ -432,7 +484,7 @@ async fn a_hash_of_a_donation_is_no_receipts() {
         .unwrap()
         .to_string();
     let donation: Bolt11Invoice = provider
-        .donate(&code, 100_000)
+        .donate(&code, 100_000, None)
         .await
         .unwrap()
         .parse()
@@ -447,7 +499,7 @@ async fn a_hash_of_a_donation_is_no_receipts() {
         asks: None,
         description_hash: None,
     };
-    let refused = provider.receive(&request).await.unwrap_err();
+    let refused = provider.receive(&request, None).await.unwrap_err();
     assert_eq!(refused.code, Code::Declined, "{refused:?}");
     assert!(provider.receipt(&hash).unwrap().is_none());
 }
@@ -481,7 +533,7 @@ async fn a_file_of_an_older_provider_opens_and_takes_receipts_once_asked() {
     assert!(!licash_swaps::holds_hash(&path, &[1; 32]).unwrap());
     assert!(older.info().unwrap().receive.is_none());
     assert!(older.follow_receives().await.unwrap().is_empty());
-    let declined = older.receive(&eco.request(100, 5)).await.unwrap_err();
+    let declined = older.receive(&eco.request(100, 5), None).await.unwrap_err();
     assert_eq!(declined.code, Code::Declined);
     drop(older);
     // Opened by this version, taking receipts: made then, once.
@@ -518,7 +570,7 @@ impl Client {
             (swaps::SWAPS_INFO, None) => Ok(json(&provider.info().unwrap())),
             (swaps::RECEIVES, Some(body)) => {
                 let request: ReceiveRequest = serde_json::from_slice(&body).unwrap();
-                let receiving = provider.receive(&request).await?;
+                let receiving = provider.receive(&request, None).await?;
                 Ok(json(&self.lie.lock().unwrap().take().unwrap_or(receiving)))
             }
             (path, None) => {
@@ -626,7 +678,11 @@ async fn an_invoice_asked_of_a_provider_is_resumed_and_checked_as_offered() {
     assert_eq!(eco.provider().open_receives().unwrap(), 0);
     // The provider answering an invoice of another payment: dropped,
     // never handed out.
-    let other = eco.provider().receive(&eco.request(100, 9)).await.unwrap();
+    let other = eco
+        .provider()
+        .receive(&eco.request(100, 9), None)
+        .await
+        .unwrap();
     *client.lie.lock().unwrap() = Some(other);
     let lied = wallet
         .invoice_through(PROVIDER, A, 100, None)
@@ -712,38 +768,41 @@ async fn a_provider_makes_an_invoice_asking_what_the_wallet_names_once() {
         asks: Some(101),
         ..eco.request(100, 7)
     };
-    assert_eq!(refused(provider.receive(&short).await), Code::Invalid);
+    assert_eq!(refused(provider.receive(&short, None).await), Code::Invalid);
     let both = ReceiveRequest {
         memo: Some("Lunch".into()),
         description_hash: Some(Hex(vec![5; 32])),
         ..eco.request(100, 7)
     };
-    assert_eq!(refused(provider.receive(&both).await), Code::Invalid);
+    assert_eq!(refused(provider.receive(&both, None).await), Code::Invalid);
     let exact = ReceiveRequest {
         asks: Some(104),
         description_hash: Some(Hex(vec![5; 32])),
         ..eco.request(100, 7)
     };
-    let made = provider.receive(&exact).await.unwrap();
+    let made = provider.receive(&exact, None).await.unwrap();
     let invoice: Bolt11Invoice = made.request.parse().unwrap();
     assert_eq!(invoice.amount_milli_satoshis(), Some(104_000));
     // The same again, the same invoice; asking otherwise under its hash,
     // declined.
     assert_eq!(
-        provider.receive(&exact).await.unwrap().request,
+        provider.receive(&exact, None).await.unwrap().request,
         made.request
     );
     let other = ReceiveRequest {
         asks: Some(105),
         ..exact.clone()
     };
-    assert_eq!(refused(provider.receive(&other).await), Code::Declined);
+    assert_eq!(
+        refused(provider.receive(&other, None).await),
+        Code::Declined
+    );
     let uncommitted = ReceiveRequest {
         description_hash: None,
         ..exact.clone()
     };
     assert_eq!(
-        refused(provider.receive(&uncommitted).await),
+        refused(provider.receive(&uncommitted, None).await),
         Code::Declined
     );
 }

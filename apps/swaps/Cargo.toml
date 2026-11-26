@@ -21,6 +21,7 @@ licash-notify.workspace = true
 licash-store.workspace = true
 licash-swaps.workspace = true
 licash-serve.workspace = true
+ipnet = "2"
 licash-tor.workspace = true
 licash-transport = { workspace = true, features = ["tor"] }
 licash-wallet.workspace = true

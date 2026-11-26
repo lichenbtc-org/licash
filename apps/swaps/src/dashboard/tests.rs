@@ -577,19 +577,18 @@ fn a_wallet_file_of_none_or_of_newer_components_is_not_read() {
     assert!(err.starts_with("no wallet at"), "{err}");
     drop(provider(dir.path()));
     let conn = Connection::open(dir.path().join("wallet.sqlite")).unwrap();
+    let newer = PROVIDER_VERSION + 1;
     conn.execute(
-        "UPDATE schema_versions SET version = 2 WHERE component = 'provider'",
-        [],
+        "UPDATE schema_versions SET version = ?1 WHERE component = 'provider'",
+        [newer],
     )
     .unwrap();
     let err = read(dir.path()).err().unwrap().to_string();
-    assert!(
-        err.ends_with("holds the provider of version 2, newer than this provider reads"),
-        "{err}"
-    );
+    let says = format!("holds the provider of version {newer}, newer than this provider reads");
+    assert!(err.ends_with(&says), "{err}");
     conn.execute(
-        "UPDATE schema_versions SET version = 1 WHERE component = 'provider'",
-        [],
+        "UPDATE schema_versions SET version = ?1 WHERE component = 'provider'",
+        [PROVIDER_VERSION],
     )
     .unwrap();
     // A wallet that holds no provider has no swaps to show.

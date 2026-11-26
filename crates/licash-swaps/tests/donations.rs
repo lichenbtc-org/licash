@@ -100,6 +100,11 @@ impl Eco {
 
     /// The provider, stopped and opened again over the same node.
     fn restart(&mut self) {
+        self.restart_with(TERMS);
+    }
+
+    /// [`Self::restart`], taking donations on `terms`.
+    fn restart_with(&mut self, terms: DonationTerms) {
         drop(self.provider.take());
         let wallet = Wallet::open(
             &self.dir.path().join("wallet.sqlite"),
@@ -108,7 +113,7 @@ impl Eco {
         .unwrap();
         let provider = Provider::open(wallet, Config::default())
             .unwrap()
-            .take_donations(self.node.clone(), TERMS, URL)
+            .take_donations(self.node.clone(), terms, URL)
             .unwrap();
         self.provider = Some(provider);
     }
@@ -129,7 +134,7 @@ impl Eco {
     async fn donate(&self, sat: u64) -> (Bolt11Invoice, [u8; 32]) {
         let request = self
             .provider()
-            .donate(&self.code, sat * 1000)
+            .donate(&self.code, sat * 1000, None)
             .await
             .unwrap();
         let invoice: Bolt11Invoice = request.parse().unwrap();
@@ -246,26 +251,26 @@ async fn donations_are_asked_within_the_terms_and_what_the_provider_holds() {
     let provider = eco.provider();
     let refused = |r: Result<String, licash_api::Problem>| r.unwrap_err().code;
     assert_eq!(
-        refused(provider.donate(&eco.code, 100_500).await),
+        refused(provider.donate(&eco.code, 100_500, None).await),
         Code::Invalid
     );
     assert_eq!(
-        refused(provider.donate(&eco.code, 9_000).await),
+        refused(provider.donate(&eco.code, 9_000, None).await),
         Code::Invalid
     );
     // More than the provider holds at the code's hub.
     assert_eq!(
-        refused(provider.donate(&eco.code, 1_001_000).await),
+        refused(provider.donate(&eco.code, 1_001_000, None).await),
         Code::Invalid
     );
     assert_eq!(
-        refused(provider.donate("licash1nonsense", 100_000).await),
+        refused(provider.donate("licash1nonsense", 100_000, None).await),
         Code::Invalid
     );
     let mut foreign: licash_wallet::LicashCode = eco.code.parse().unwrap();
     foreign.network = ChainProfile::Core30Signet;
     assert_eq!(
-        refused(provider.donate(&foreign.to_string(), 100_000).await),
+        refused(provider.donate(&foreign.to_string(), 100_000, None).await),
         Code::Invalid
     );
     assert!(provider.donation_range(&foreign.to_string()).is_err());
@@ -285,7 +290,10 @@ async fn donations_are_asked_within_the_terms_and_what_the_provider_holds() {
         .unwrap()
         .take_donations(cheap.node.clone(), free, URL)
         .unwrap();
-    let refused = provider.donate(&cheap.code, 100_000).await.unwrap_err();
+    let refused = provider
+        .donate(&cheap.code, 100_000, None)
+        .await
+        .unwrap_err();
     assert_eq!(refused.code, Code::Declined, "{refused:?}");
     cheap.provider = Some(provider);
     assert!(cheap
@@ -304,7 +312,10 @@ async fn donations_are_asked_within_the_terms_and_what_the_provider_holds() {
     .unwrap();
     let none = Provider::create(wallet, Config::default()).unwrap();
     assert_eq!(
-        none.donate(&eco.code, 100_000).await.unwrap_err().code,
+        none.donate(&eco.code, 100_000, None)
+            .await
+            .unwrap_err()
+            .code,
         Code::Declined
     );
     assert!(none.donation_terms().is_none());
@@ -344,7 +355,7 @@ async fn a_donation_unpaid_or_never_made_an_invoice_of_is_canceled() {
     eco.node.down(true);
     assert_eq!(
         eco.provider()
-            .donate(&eco.code, 100_000)
+            .donate(&eco.code, 100_000, None)
             .await
             .unwrap_err()
             .code,
@@ -484,12 +495,45 @@ async fn open_donations_are_capped() {
     for _ in 0..TERMS.max_open {
         hashes.push(eco.donate(20).await.1);
     }
-    let refused = eco.provider().donate(&eco.code, 20_000).await.unwrap_err();
+    let refused = eco
+        .provider()
+        .donate(&eco.code, 20_000, None)
+        .await
+        .unwrap_err();
     assert_eq!(refused.code, Code::Unavailable, "{refused:?}");
     // One ended, another may be made.
     eco.age(&hashes[0], 700);
     eco.follow().await;
     eco.donate(20).await;
+}
+
+/// From one source only so many donations are asked and not paid, the
+/// rest of those open left to others: from another source, or none known,
+/// more, and once one is no longer open, its place is free.
+#[tokio::test]
+async fn donations_asked_and_not_paid_from_one_source_are_bounded() {
+    let mut eco = Eco::new().await;
+    eco.restart_with(DonationTerms {
+        max_open: 100,
+        ..TERMS
+    });
+    let (one, other) = (b"ip 192.0.2.1".as_slice(), b"ip 192.0.2.2".as_slice());
+    let ask = |source: Option<&'static [u8]>| eco.provider().donate(&eco.code, 20_000, source);
+    let mut asked = Vec::new();
+    for _ in 0..licash_swaps::PER_SOURCE {
+        asked.push(ask(Some(one)).await.unwrap());
+    }
+    let refused = ask(Some(one)).await.unwrap_err();
+    assert_eq!(refused.code, Code::Unavailable, "{refused:?}");
+    assert!(refused.message.contains("source"), "{refused:?}");
+    ask(Some(other)).await.unwrap();
+    ask(None).await.unwrap();
+    // One expired and canceled: its place is free.
+    let invoice: Bolt11Invoice = asked[0].parse().unwrap();
+    eco.age(&invoice.payment_hash().to_byte_array(), 700);
+    eco.follow().await;
+    ask(Some(one)).await.unwrap();
+    assert_eq!(ask(Some(one)).await.unwrap_err().code, Code::Unavailable);
 }
 
 /// The test net, and a provider at [`PROVIDER`] answering its info as

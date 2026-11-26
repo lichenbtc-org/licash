@@ -242,7 +242,14 @@ impl<T: Transport> Provider<T> {
 
     /// A donation of `msat` to the wallet of `code`: the invoice the payer
     /// pays, recorded before the node makes it, committing to [`METADATA`].
-    pub async fn donate(&self, code: &str, msat: u64) -> Result<String, Problem> {
+    /// Unavailable past `max_open` open, or past [`crate::PER_SOURCE`] asked
+    /// and not paid from `source`, if known.
+    pub async fn donate(
+        &self,
+        code: &str,
+        msat: u64,
+        source: Option<&[u8]>,
+    ) -> Result<String, Problem> {
         let receiver = self.receiver()?;
         if !msat.is_multiple_of(1000) {
             return Err(Problem::invalid("donations are of whole satoshis"));
@@ -271,19 +278,32 @@ impl<T: Transport> Provider<T> {
                     |r| r.get(0),
                 )?;
                 if open >= max_open {
-                    return Ok(false);
+                    return Ok(Some("too many donations under way: try again later"));
+                }
+                if let Some(source) = source {
+                    let unpaid: u32 = tx.query_row(
+                        "SELECT count(*) FROM provider_donations
+                         WHERE state = 'open' AND source = ?1",
+                        [source],
+                        |r| r.get(0),
+                    )?;
+                    if unpaid >= crate::PER_SOURCE {
+                        return Ok(Some(
+                            "too many donations asked from this source and not paid: \
+                             try again later",
+                        ));
+                    }
                 }
                 tx.execute(
                     "INSERT INTO provider_donations
-                        (hash, preimage, code, sat, amount, state, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?6)",
-                    params![hash, preimage, code, sql(sat)?, sql(amount)?, at],
+                        (hash, preimage, code, sat, amount, state, source, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?7, ?7)",
+                    params![hash, preimage, code, sql(sat)?, sql(amount)?, source, at],
                 )?;
-                Ok(true)
+                Ok(None)
             })
             .map_err(unavailable)?
-            .then_some(())
-            .ok_or_else(|| unavailable("too many donations under way: try again later"))?;
+            .map_or(Ok(()), |busy| Err(unavailable(busy)))?;
         let description = sha256::Hash::hash(METADATA.as_bytes()).to_byte_array();
         let made = receiver
             .node

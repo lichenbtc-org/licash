@@ -43,7 +43,13 @@ fn router(dir: &tempfile::TempDir) -> (Router, Arc<Provider<Offline>>) {
     .unwrap();
     let provider = Provider::create(wallet, Config::default());
     let provider = Arc::new(provider.unwrap());
-    let router = licash_swaps_service::router(provider.clone(), Some("ab".repeat(32)));
+    let router = licash_swaps_service::router(
+        provider.clone(),
+        licash_swaps_service::Serving {
+            nostr: Some("ab".repeat(32)),
+            ..Default::default()
+        },
+    );
     (router, provider)
 }
 
@@ -156,7 +162,7 @@ async fn a_provider_paying_over_lightning_says_so_and_takes_invoices_from_its_hu
         .pay_lightning(node.clone(), terms.clone())
         .unwrap();
     let address = provider.wallet().address();
-    let router = licash_swaps_service::router(Arc::new(provider), None);
+    let router = licash_swaps_service::router(Arc::new(provider), Default::default());
     let (status, body) = call(&router, swaps::SWAPS_INFO, None).await;
     assert_eq!(status, StatusCode::OK);
     let info: swaps::Info = serde_json::from_slice(&body).unwrap();
@@ -496,8 +502,7 @@ async fn donations_over_lnurl_answer_as_lnurl_asks() {
         )
         .unwrap();
     let provider = Arc::new(provider);
-    let router = licash_swaps_service::lnurl(provider.clone())
-        .merge(licash_swaps_service::router(provider, None));
+    let router = licash_swaps_service::router(provider, Default::default());
     let ask = |path: String| {
         let router = router.clone();
         async move {
@@ -553,7 +558,7 @@ async fn receipts_over_lightning_are_asked_and_followed_through_the_api() {
         .unwrap()
         .take_receives(node.clone(), licash_swaps::ReceiveTerms::default())
         .unwrap();
-    let router = licash_swaps_service::router(Arc::new(provider), None);
+    let router = licash_swaps_service::router(Arc::new(provider), Default::default());
     // Its info tells wallets its terms.
     let (status, info) = call(&router, swaps::SWAPS_INFO, None).await;
     assert_eq!(status, StatusCode::OK);
@@ -588,6 +593,96 @@ async fn receipts_over_lightning_are_asked_and_followed_through_the_api() {
     assert_eq!(problem(&answer).code, Code::UnknownLock);
     let (status, _) = call(&router, "/v1/swaps/receive/nonsense", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// Behind a proxy it trusts, the provider counts receipts and donations
+/// by the client the proxy names, and refuses a chain it cannot read,
+/// over LNURL as LNURL asks; another peer's chain is not read at all.
+#[tokio::test]
+async fn a_trusted_proxys_malformed_chain_is_refused_for_receipts_and_donations() {
+    use axum::extract::ConnectInfo;
+    let dir = tempfile::tempdir().unwrap();
+    let wallet = Wallet::create(
+        &dir.path().join("wallet.sqlite"),
+        &[5; 32],
+        ChainProfile::Core30DefaultRegtest,
+        Offline,
+    )
+    .unwrap();
+    let (code, address) = (a_code(&wallet), wallet.address());
+    let node = Arc::new(Fake::new());
+    let provider = Provider::create(wallet, Config::default())
+        .unwrap()
+        .take_donations(
+            node.clone(),
+            licash_swaps::DonationTerms::default(),
+            "https://swaps.test/",
+        )
+        .unwrap()
+        .take_receives(node.clone(), licash_swaps::ReceiveTerms::default())
+        .unwrap();
+    let trusted = licash_serve::trusted_proxy("10.0.0.2").unwrap();
+    let serving = licash_swaps_service::Serving {
+        ingress: Arc::new(licash_serve::Ingress::new(vec![trusted])),
+        ..Default::default()
+    };
+    let router = licash_swaps_service::router(Arc::new(provider), serving);
+    let ask = |peer: &str, forwarded: &str, request: Request<Body>| {
+        let (mut parts, body) = request.into_parts();
+        let peer: std::net::SocketAddr = peer.parse().unwrap();
+        parts.extensions.insert(ConnectInfo(peer));
+        parts
+            .headers
+            .insert("x-forwarded-for", forwarded.parse().unwrap());
+        let router = router.clone();
+        async move {
+            let response = router
+                .oneshot(Request::from_parts(parts, body))
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+    };
+    let receive = || {
+        let request = swaps::ReceiveRequest {
+            hub: address,
+            address,
+            amount: 1_000,
+            hash: licash_api::Hex(vec![1; 32]),
+            memo: None,
+            asks: None,
+            description_hash: None,
+        };
+        Request::post(swaps::RECEIVES)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&request).unwrap()))
+            .unwrap()
+    };
+    let donate = || {
+        let path = format!("/v1/lnurlp/{code}/callback?amount=100000");
+        Request::get(path).body(Body::empty()).unwrap()
+    };
+    let (status, body) = ask("10.0.0.2:80", "garbage", receive()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("X-Forwarded-For"), "{body}");
+    let (status, body) = ask("10.0.0.2:80", "garbage", donate()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(answer["status"], "ERROR", "{answer}");
+    assert!(answer["reason"]
+        .as_str()
+        .unwrap()
+        .contains("X-Forwarded-For"));
+    // From a client it names, or a peer it does not trust: asked as ever.
+    for (peer, forwarded) in [("10.0.0.2:80", "198.51.100.7"), ("192.0.2.1:80", "garbage")] {
+        let (status, body) = ask(peer, forwarded, receive()).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        let (_, body) = ask(peer, forwarded, donate()).await;
+        assert!(body.contains("holds too little"), "{body}");
+    }
+    assert!(node.sent().is_empty());
 }
 
 #[test]

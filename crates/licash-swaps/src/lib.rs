@@ -66,6 +66,13 @@ use rand_core::{OsRng, RngCore};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+/// The receipts over Lightning, and apart the donations, one source may
+/// have asked and not paid: the rest of `max_open` is left to others. A
+/// source is opaque here, as the service resolves it per request (an onion
+/// circuit, a client's address): one with many addresses is bounded by
+/// `max_open` alone.
+pub const PER_SOURCE: u32 = 8;
+
 pub use donations::{
     Donation, DonationState, DonationTerms, INVOICE_CLTV, INVOICE_EXPIRY, METADATA, SETTLE_MARGIN,
     START_ROOM,

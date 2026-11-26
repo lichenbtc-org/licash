@@ -686,6 +686,17 @@ enum Command {
     Run {
         #[arg(long, env = "LICASH_SWAPS_LISTEN", default_value = "127.0.0.1:8340")]
         listen: SocketAddr,
+        /// A reverse proxy in front of `--listen` whose `X-Forwarded-For`
+        /// the provider believes, as an address or a CIDR block; repeat (or
+        /// separate by commas) for more. Receipts and donations asked and
+        /// not paid are bounded by client address: without it, every
+        /// client behind the proxy is the proxy's one address. The proxy
+        /// must replace the header its clients send, and nothing else may
+        /// reach `--listen`.
+        #[arg(long = "trusted-proxy", env = "LICASH_SWAPS_TRUSTED_PROXY",
+              value_name = "CIDR", value_delimiter = ',',
+              value_parser = licash_serve::trusted_proxy)]
+        trusted_proxies: Vec<ipnet::IpNet>,
         #[command(flatten)]
         terms: Terms,
         /// Seconds between rounds over the swaps under way.
@@ -846,6 +857,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
         Command::Init { network } => init(&data, network, cli.log),
         Command::Run {
             listen,
+            trusted_proxies,
             terms,
             step,
             renew_ppm,
@@ -958,16 +970,12 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 Some(_) => Some(licash_nostr::public_key(&provider.nostr_secret()?)?),
                 None => None,
             };
-            let router = match &source {
-                Some(source) => {
-                    licash_swaps_service::router_paying_out(provider.clone(), nostr, source.clone())
-                }
-                None => licash_swaps_service::router(provider.clone(), nostr),
+            let serving = licash_swaps_service::Serving {
+                nostr,
+                chain: source.clone(),
+                ingress: Arc::new(licash_serve::Ingress::new(trusted_proxies)),
             };
-            let router = match donating {
-                Some(_) => router.merge(licash_swaps_service::lnurl(provider.clone())),
-                None => router,
-            };
+            let router = licash_swaps_service::router(provider.clone(), serving);
             let onion = match &client {
                 Some(client) if onion => {
                     let onion = client.serve("licash-swaps", router.clone(), onion_pow)?;

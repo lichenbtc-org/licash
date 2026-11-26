@@ -140,7 +140,7 @@ fn the_provider_keeps_its_tables_in_its_wallets_file_once() {
         .unwrap();
     assert_eq!(
         versions,
-        [("provider".to_owned(), 1), ("wallet".to_owned(), 6)]
+        [("provider".to_owned(), 2), ("wallet".to_owned(), 6)]
     );
     let wallet = Wallet::open(&path, Link(Net::new())).unwrap();
     let again = Provider::create(wallet, Config::default()).err().unwrap();

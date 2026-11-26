@@ -224,7 +224,8 @@ impl Net {
         let path = dir.path().join("bridge.sqlite");
         let reaches = Local(
             app.clone(),
-            (provider.as_ref()).map(|p| licash_swaps_service::router(p.clone(), None)),
+            (provider.as_ref())
+                .map(|p| licash_swaps_service::router(p.clone(), Default::default())),
         );
         let wallet = Wallet::create(&path, &[7; 32], regtest, reaches).unwrap();
         wallet.add_hub(HUB).await.unwrap();

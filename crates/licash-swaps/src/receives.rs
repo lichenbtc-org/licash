@@ -54,7 +54,7 @@ const UNMADE_AFTER: i64 = 60;
 
 /// The component the receipts' tables are, and its version.
 pub(crate) const COMPONENT: &str = "provider_receives";
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 -- Receipts over Lightning for wallets (`crate::receives`). Each is a held
@@ -65,6 +65,7 @@ const SCHEMA: &str = "
 -- shows the `preimage`, which settles the invoice. `state` is open (not
 -- paid, or the lock not certified yet), locked, paid (the preimage known,
 -- not settled yet), settled, canceled or lost (paid on and not settled).
+-- `source` is where it was asked from, as the service tells it, if known.
 CREATE TABLE provider_receives (
     hash BLOB PRIMARY KEY CHECK (length(hash) = 32),
     hub TEXT NOT NULL,
@@ -79,6 +80,7 @@ CREATE TABLE provider_receives (
     state TEXT NOT NULL
         CHECK (state IN ('open', 'locked', 'paid', 'settled', 'canceled', 'lost')),
     reason TEXT,
+    source BLOB,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 ) STRICT;
@@ -333,8 +335,14 @@ impl<T: Transport> Provider<T> {
     /// The invoice of the receipt `request` asks for, recorded before the
     /// node makes it; the same invoice if asked before. Declined unless the
     /// provider swaps at the hub, holds enough there beside what it is to
-    /// lock, and the hash is the receipt's alone.
-    pub async fn receive(&self, request: &ReceiveRequest) -> Result<Receiving, Problem> {
+    /// lock, and the hash is the receipt's alone. Unavailable past
+    /// `max_open` under way, or past [`crate::PER_SOURCE`] asked and not
+    /// paid from `source`, if known.
+    pub async fn receive(
+        &self,
+        request: &ReceiveRequest,
+        source: Option<&[u8]>,
+    ) -> Result<Receiving, Problem> {
         let taker = self
             .receives
             .as_ref()
@@ -408,10 +416,24 @@ impl<T: Transport> Provider<T> {
                             "too many receipts under way: try again later",
                         )));
                     }
+                    if let Some(source) = source {
+                        let unpaid: u32 = tx.query_row(
+                            "SELECT count(*) FROM provider_receives
+                             WHERE state = 'open' AND source = ?1",
+                            [source],
+                            |r| r.get(0),
+                        )?;
+                        if unpaid >= crate::PER_SOURCE {
+                            return Ok(Some(unavailable(
+                                "too many receipts asked from this source and not paid: \
+                                 try again later",
+                            )));
+                        }
+                    }
                     tx.execute(
                         "INSERT INTO provider_receives (hash, hub, address, amount, sat, memo,
-                            state, created_at, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?7)",
+                            state, source, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?8)",
                         params![
                             hash,
                             url,
@@ -419,6 +441,7 @@ impl<T: Transport> Provider<T> {
                             store::sat(request.amount)?,
                             store::sat(sat)?,
                             memo,
+                            source,
                             at
                         ],
                     )?;

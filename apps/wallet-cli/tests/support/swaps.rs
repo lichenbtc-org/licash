@@ -131,8 +131,14 @@ impl Swaps {
                         next.run(request).await
                     }
                 };
-                let router = licash_swaps_service::router(provider, Some(nostr))
-                    .layer(middleware::from_fn(refusing));
+                let router = licash_swaps_service::router(
+                    provider,
+                    licash_swaps_service::Serving {
+                        nostr: Some(nostr),
+                        ..Default::default()
+                    },
+                )
+                .layer(middleware::from_fn(refusing));
                 axum::serve(listener, router)
                     .with_graceful_shutdown(async {
                         stopped.await.ok();

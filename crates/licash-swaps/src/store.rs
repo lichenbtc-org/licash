@@ -25,7 +25,7 @@ pub(crate) fn sat(value: u64) -> Result<i64, crate::Error> {
 
 /// The component the provider's tables are, and its version.
 pub(crate) const COMPONENT: &str = "provider";
-pub(crate) const VERSION: i64 = 1;
+pub(crate) const VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 -- The provider's identity.
@@ -136,6 +136,7 @@ CREATE TABLE provider_payout_scans (
 -- pay_code_keyed`), then settles. `state` is open, owed (settled before that
 -- payment was released, which the provider still follows), settled, canceled
 -- or lost (paid and not settled, or settled and the payment given up).
+-- `source` is where it was asked from, as the service tells it, if known.
 CREATE TABLE provider_donations (
     hash BLOB PRIMARY KEY CHECK (length(hash) = 32),
     preimage BLOB NOT NULL CHECK (length(preimage) = 32),
@@ -145,6 +146,7 @@ CREATE TABLE provider_donations (
     request TEXT,
     state TEXT NOT NULL CHECK (state IN ('open', 'owed', 'settled', 'canceled', 'lost')),
     reason TEXT,
+    source BLOB,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 ) STRICT;
