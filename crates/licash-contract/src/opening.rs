@@ -2676,7 +2676,7 @@ mod tests {
             .unwrap()
             .is_some());
         // Mined with π2 and π3 replaced (the same txid): no proof read
-        // from the block, but the hub's, of the assertion it signed.
+        // from the block, but the hub's own, of the π1 it asserted.
         let mut mined = asserted.clone();
         let mut items = mined.input[0].witness.to_vec();
         items[0] = vec![0xff; items[0].len()];
@@ -2691,14 +2691,13 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(ho
-            .answer(&mined, Some(&asserted), &challenged, *i, bytes)
+            .answer(&mined, Some(proof.clone()), &challenged, *i, bytes)
             .unwrap()
             .is_some());
-        // Not the one in the block: the proof read from the block.
-        let mut other = asserted.clone();
-        other.lock_time = lichen_btc::bitcoin::absolute::LockTime::from_consensus(1);
+        // Of another π1 than the block's: the proof read from the block.
+        let other = lichen_babe::statement::mock_prove(b"another statement");
         assert!(ho
-            .answer(&mined, Some(&other), &challenged, *i, bytes)
+            .answer(&mined, Some(other), &challenged, *i, bytes)
             .unwrap()
             .is_none());
         let mut bad = Instance::from_bytes(bytes).unwrap();

@@ -694,17 +694,16 @@ claim key (nobody else is), checks it herself, and leaves the response
 alone if it bears out, which pays her what it says once her contest window
 has passed and which the hub posts itself, no proof made. Contested, the
 hub proves that statement and asserts the proof; challenged, it answers
-with a kept instance, on the proof of the assertion it signed (pinned in
-`hub.sqlite` before it signs). The assertion's leaf checks π1's digits but
-not π2 and π3 beside them, so whoever relays or mines it can replace those
-without changing its txid; the hub answers whatever the block shows. Its
-answer needs only some π2 and π3 that prove the statement with the chain's
-π1, so the holder, finding an assertion that does not verify as mined,
-first asks the hub for the π2 and π3 it signed
+with a kept instance, on the proof it asserted (pinned in `hub.sqlite`
+before it signs). From graph 16 the assertion carries π1's signed digits
+alone; before, π2 and π3 rode beside them, unchecked by its leaf, so
+whoever relays or mines it can replace those without changing its txid,
+and the hub answers whatever the block shows. A holder finding no proof
+on chain that verifies asks the hub for the π2 and π3 of its proof
 (`/v1/contracts/openings/{id}/proof`, under a signature of her claim key
 over the assertion's txid, 96 bytes back) and leaves the assertion alone if
-they prove it; if the hub shows none that do by halfway through her
-challenge window, she challenges as ever. On regtest the proof is the
+they prove it with the chain's π1; if the hub shows none that do by halfway
+through her challenge window, she challenges as ever. On regtest the proof is the
 mock authority's; on signet the hub proves with `licash-r0` (docs/r0.md,
 `LICASH_HP_PROVER` names another), as described below. It sweeps its outputs of each payout to its
 wallet; a payout's rest and the holder's reserve pay each party's wallet

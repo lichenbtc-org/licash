@@ -4,7 +4,9 @@ use anyhow::{bail, ensure, Result};
 use licash::base::{ChainTerms, Fees, GraphTerms, Limits, Recipe};
 use licash::chain::Checkpoint;
 use licash::note::Keyset;
-use licash::recovery::{CHAINED_FROM, COMPACT_FROM, LEAF_FROM, LEAN_FROM, SIGNED_FROM};
+use licash::recovery::{
+    CHAINED_FROM, COMPACT_FROM, LEAF_FROM, LEAN_FROM, PI1_ALONE_FROM, SIGNED_FROM,
+};
 use licash::spend::ChainProfile;
 use licash_contract::graph::RETURNING;
 use licash_contract::opening::{Bounds, Floors, Quote};
@@ -135,6 +137,9 @@ pub struct Timing {
     /// in nulldata outputs where the program reads leaf envelopes too
     /// ([`Timing::with_nulldata`]).
     nulldata: bool,
+    /// Whether it quotes graphs whose `assert` carries π2 and π3 beside π1
+    /// ([`Timing::with_pair`]).
+    pair: bool,
 }
 
 /// The most blocks of work a hub may ask for beyond its network's floor:
@@ -201,6 +206,7 @@ impl Timing {
             work_depth: Floors::of(profile).work_depth,
             opening_fee: OPENING_FEE,
             nulldata: false,
+            pair: false,
         })
     }
 
@@ -213,6 +219,14 @@ impl Timing {
             nulldata: true,
             ..self
         }
+    }
+
+    /// These terms, quoting graphs whose `assert` carries π2 and π3 beside
+    /// π1 ([`LEAF_FROM`]) where they would quote it carrying π1 alone
+    /// ([`PI1_ALONE_FROM`]): as hubs before that did, so that both are
+    /// played.
+    pub fn with_pair(self) -> Self {
+        Self { pair: true, ..self }
     }
 
     /// These terms, the hub's own fee for an opening `fee` sat, of the
@@ -411,7 +425,12 @@ impl Timing {
     /// program contracts open under decides it, else the last before.
     fn graph_id(&self) -> u32 {
         match crate::trust(self.profile) {
-            Ok(t) if t.chained.is_some() && t.own_claims && t.leaf && !self.nulldata => LEAF_FROM,
+            Ok(t) if t.chained.is_some() && t.own_claims && t.leaf && !self.nulldata => {
+                match self.pair {
+                    true => LEAF_FROM,
+                    false => PI1_ALONE_FROM,
+                }
+            }
             Ok(t) if t.chained.is_some() && t.own_claims => SIGNED_FROM,
             Ok(t) if t.chained.is_some() => CHAINED_FROM,
             Ok(t) if t.lean => LEAN_FROM,
@@ -562,7 +581,7 @@ mod tests {
     /// holders choose prices the fixed terms by its rate as well, at 1% a
     /// year 24 sat more; one that doesn't, at its fixed fee alone (pinned at
     /// 3 000 sat, the default once, its bytes unchanged since). Regtest's
-    /// mock decides the lean filing, so it quotes the graph of its id (10);
+    /// mock decides what every graph does, so it quotes the last (16);
     /// signet's program reads the exit on the hub's header chain and owes a claim
     /// of the same contract no evidence against another, and quotes 14 (its
     /// hub cites spends by their signatures).
@@ -574,7 +593,7 @@ mod tests {
             (
                 None,
                 [
-                    "9fff4c86157d364b801a2f82955baa61f9c0bb321de32ca4ec0351dce12ecd34",
+                    "e79aeb4afefda90c089117e7b29e11efd4b5fb5032d8c939c199b299695aa34b",
                     "5e6993fa884ffe4d0230862f1926f4133104dab7f2fdb51e8021c41d21199569",
                 ],
                 3_000,
@@ -582,7 +601,7 @@ mod tests {
             (
                 Some(RANGE),
                 [
-                    "ed375c93c646ab3388db6bcf940a33098a952fdd9673920cc46cfde56105507e",
+                    "e237ab9009a58222e8d43f9e14aea009f7b35fb7d8fc184b167490883a18396b",
                     "9e15a5920dde659cb2e1ece1e93e72c92ddc100d8dbf3a3108b35c47880a2fd9",
                 ],
                 3_024,
@@ -607,10 +626,15 @@ mod tests {
                 .with_opening_fee(3_000);
             let graph = at.quote(keyset.clone(), checkpoint.clone()).graph.id;
             assert_eq!(graph, licash::recovery::SIGNED_FROM);
-            // Regtest quotes the graph its mock reads, leaf envelopes, and
-            // the signets' told to.
+            // Regtest quotes the graph its mock reads, leaf envelopes and
+            // π1 alone, and the signets' or the one before told to.
             let regtest = Timing::of(ChainProfile::Core30DefaultRegtest, range).unwrap();
             let graph = regtest.quote(keyset.clone(), checkpoint.clone()).graph.id;
+            assert_eq!(graph, licash::recovery::PI1_ALONE_FROM);
+            let graph = (regtest.with_pair())
+                .quote(keyset.clone(), checkpoint.clone())
+                .graph
+                .id;
             assert_eq!(graph, licash::recovery::LEAF_FROM);
             let graph = (regtest
                 .with_nulldata()

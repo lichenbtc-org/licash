@@ -70,6 +70,12 @@ pub(crate) fn opened_leaf() -> &'static Opened {
     static OPENED: OnceLock<Opened> = OnceLock::new();
     OPENED.get_or_init(|| build(licash::recovery::LEAF_FROM))
 }
+/// As [`opened_leaf`], of a graph whose `assert` carries π1 alone
+/// ([`licash::recovery::PI1_ALONE_FROM`]).
+pub(crate) fn opened_pi1_alone() -> &'static Opened {
+    static OPENED: OnceLock<Opened> = OnceLock::new();
+    OPENED.get_or_init(|| build(licash::recovery::PI1_ALONE_FROM))
+}
 fn sign(tx: &mut Transaction, prevouts: &[TxOut], inputs: &[usize], key: &Keypair) {
     for &i in inputs {
         let hash = SighashCache::new(&*tx)

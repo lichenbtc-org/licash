@@ -10,7 +10,6 @@ use lichen_babe::{
     opening::{self, Garbler},
     reveal,
     setup::{Instance, Secret, DIGITS},
-    statement,
     vsss::{deal, Dealing},
 };
 use lichen_btc::{
@@ -271,11 +270,20 @@ impl Opening {
         check_link(&self.set, "assert", tx)?;
         self.babe.assertion(tx)
     }
+    /// Whether `assert`'s proof as the chain shows it verifies: none, in a
+    /// graph whose `assert` carries π1 alone.
     pub fn verify_assertion(&self, tx: &Transaction) -> Result<bool> {
         let a = self.assertion(tx)?;
-        Ok(a.proof.as_ref().is_some_and(|p| {
-            graph::kind(&self.base, self.mock).verify(&graph::journal(&self.base), p)
-        }))
+        Ok(a.proof.as_ref().is_some_and(|p| self.verifies(p)))
+    }
+    /// Whether `assert`'s proof verifies, its π1 the chain's and π2 and π3
+    /// `pair` (96 bytes), as the hub hands them over.
+    pub fn verify_assertion_with(&self, tx: &Transaction, pair: &[u8]) -> Result<bool> {
+        let a = self.assertion(tx)?;
+        Ok(a.proof_with(pair).is_some_and(|p| self.verifies(&p)))
+    }
+    fn verifies(&self, proof: &Proof<Bn254>) -> bool {
+        graph::kind(&self.base, self.mock).verify(&graph::journal(&self.base), proof)
     }
     pub fn challenge(&self, keys: &HolderKeys, asserted: &Transaction) -> Result<Transaction> {
         ensure!(keys.public() == self.holder, "another holder's keys");
@@ -395,25 +403,23 @@ impl HubOpening {
     pub fn assert(&self, keys: &HubKeys, proof: &Proof<Bn254>) -> Result<Transaction> {
         ensure!(keys.public() == self.hub, "another hub's keys");
         let digits = asserted_digits(proof);
-        let (pi2, pi3) = statement::pi23_to_bytes(proof);
         self.finish(
             "assert",
-            HubProves::assert_wire(&keys.lamport.sign(&digits), &pi2, &pi3),
+            self.babe.assert_wire(&keys.lamport.sign(&digits), proof),
         )
     }
     /// Answer with a committed kept instance. Its index in `kept` selects
     /// the graph's wrongly_challenged leaf, not the instance's number.
     ///
-    /// On the proof of `signed`, the assertion as the hub signed it, when
-    /// it is the one in a block (`asserted`, by txid) and signs the same
-    /// π1: π2 and π3 sit in its witness unsigned and unchecked by its leaf,
-    /// so whoever relays or mines it can replace them, and the proof read
-    /// from the block no longer verify. Else on the proof read from the
-    /// block.
+    /// On `own`, the proof the hub made and asserted, when it is of the π1
+    /// in the block (`asserted`): where `assert` carries π2 and π3, they sit
+    /// in its witness unsigned and unchecked by its leaf, so whoever relays
+    /// or mines it can replace them, and where it doesn't, the block has
+    /// none. Else on the proof read from the block, if any.
     pub fn answer(
         &self,
         asserted: &Transaction,
-        signed: Option<&Transaction>,
+        own: Option<Proof<Bn254>>,
         challenge: &Transaction,
         i: u32,
         bytes: &[u8],
@@ -437,12 +443,7 @@ impl HubOpening {
         let (digits, secrets) = reveal::extract(&self.hub.lamport, &self.offer.presigs, &args)
             .context("challenge does not reveal secrets")?;
         ensure!(digits == a.digits, "challenge of another assertion");
-        let kept = signed
-            .filter(|s| s.compute_txid() == asserted.compute_txid())
-            .and_then(|s| self.babe.assertion(s).ok())
-            .filter(|s| s.digits == a.digits)
-            .and_then(|s| s.proof);
-        let Some(proof) = kept.as_ref().or(a.proof.as_ref()) else {
+        let Some(proof) = a.answered_on(own) else {
             return Ok(None);
         };
         // a malformed instance, or one whose evaluation panics, answers
@@ -453,7 +454,7 @@ impl HubOpening {
             &self.opened.opened,
             &a.bits,
             &secrets,
-            proof,
+            &proof,
             |_, e| failed = Some(format!("{e:#}")),
         );
         match (answered, failed) {

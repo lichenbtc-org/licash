@@ -978,11 +978,64 @@ fn each_exit_weighs_its_transactions_and_its_largest_carrier() {
 }
 
 /// [`each_exit_weighs_its_transactions_and_its_largest_carrier`] of a graph
-/// carrying her claim and the hub's disclosure in leaf envelopes: each path
-/// a fraction of nulldata's, its largest transaction a link of the proof's.
+/// carrying her claim and the hub's disclosure in leaf envelopes, and π1
+/// alone in its assertion (as regtest's hub quotes): each path a fraction
+/// of nulldata's, its largest transaction a link of the proof's.
 #[test]
 fn each_exit_weighs_its_transactions_and_its_largest_carrier_in_leaf_envelopes() {
-    exits_weighed(crate::testing::opened_leaf(), true);
+    exits_weighed(crate::testing::opened_pi1_alone(), true);
+}
+
+/// The hub's assertion of a graph that carries π1 alone: π1's preimages
+/// its only arguments, lighter by π2 and π3 than the graph before's, and no
+/// proof to read from the chain. She checks it with the π2 and π3 the hub
+/// shows her, which prove only if they are its proof's, and can challenge
+/// it all the same.
+#[test]
+fn an_assertion_of_pi1_alone_is_checked_with_the_pi2_and_pi3_the_hub_shows() {
+    let ctx = Context {
+        tip: 0,
+        trust: Trust::mock(),
+    };
+    let asserted = |saved: &crate::testing::Opened| {
+        let (o, keys) = signed_of(saved);
+        let hub = Hub::load(&saved.hub, &ctx).unwrap();
+        let proof = lichen_babe::statement::mock_prove(&licash_contract::graph::journal(&o.base));
+        let assertion = hub.signed().unwrap().assert(hub.keys(), &proof).unwrap();
+        (o, keys, proof, assertion)
+    };
+    let (_, _, _, with_pair) = asserted(crate::testing::opened_leaf());
+    let (o, keys, proof, alone) = asserted(crate::testing::opened_pi1_alone());
+    let args = licash_contract::graph::link_args(&alone);
+    assert_eq!(args.len(), lichen_babe::setup::DIGITS);
+    assert!(args.iter().all(|a| a.len() == 20));
+    assert_eq!(
+        licash_contract::graph::link_args(&with_pair).len(),
+        lichen_babe::setup::DIGITS + 2
+    );
+    let (light, heavy) = (alone.weight().to_wu(), with_pair.weight().to_wu());
+    eprintln!(
+        "assert: {} vB alone, {} vB with π2 and π3",
+        alone.vsize(),
+        with_pair.vsize()
+    );
+    assert!(heavy - light >= 96, "{light} WU against {heavy}");
+    // No proof on chain; the hub's π2 and π3 prove, another proof's don't.
+    assert!(o.babe.assertion(&alone).unwrap().pair.is_none());
+    assert!(!o.verify_assertion(&alone).unwrap());
+    let (pi2, pi3) = lichen_babe::statement::pi23_to_bytes(&proof);
+    assert!(o
+        .verify_assertion_with(&alone, &[pi2, pi3].concat())
+        .unwrap());
+    let other = lichen_babe::statement::mock_prove(b"another statement");
+    let (pi2, pi3) = lichen_babe::statement::pi23_to_bytes(&other);
+    assert!(!o
+        .verify_assertion_with(&alone, &[pi2.clone(), pi3].concat())
+        .unwrap());
+    assert!(!o.verify_assertion_with(&alone, &pi2).unwrap());
+    assert!(!o.verify_assertion_with(&alone, &[]).unwrap());
+    // Her challenge reads π1 alone.
+    o.challenge(&keys, &alone).unwrap();
 }
 
 /// `before`, then `published`, then `after`.

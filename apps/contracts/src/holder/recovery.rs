@@ -2519,9 +2519,7 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
         let body = self.keys.sign_as_claim(&digest).to_vec();
         let bytes = super::fold::post(self.wallet, &hub, &url, body).await?;
         ensure!(bytes.len() == 96, "{} bytes, not π2 and π3", bytes.len());
-        let (pi2, pi3) = bytes.split_at(64);
-        self.o
-            .verify_assertion(&HubProves::with_pair(assertion, pi2, pi3)?)
+        self.o.verify_assertion_with(assertion, &bytes)
     }
 
     /// The hub's address her contract was opened with.

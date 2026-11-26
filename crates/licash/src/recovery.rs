@@ -84,6 +84,13 @@ pub const SIGNED_FROM: u32 = 14;
 /// judged as [`SIGNED_FROM`]'s.
 pub const LEAF_FROM: u32 = 15;
 
+/// The first graph id whose `assert` carries π1 alone, its leaf taking no
+/// π2 and π3 beside it (Lichen's `Tail::pair` off): the hub hands them over
+/// off chain, as before, and nothing unsigned rides in its witness for a
+/// relayer to replace ([`pair_on_chain`]); otherwise judged as
+/// [`LEAF_FROM`]'s.
+pub const PI1_ALONE_FROM: u32 = 16;
+
 /// Whether, in a contract of graph `id`, another claim of the same
 /// contract voids the notes it holds ([`OWN_CLAIMS_FROM`]).
 pub fn own_claims_void(id: u32) -> bool {
@@ -101,6 +108,12 @@ pub fn chained(id: u32) -> bool {
 /// as its [`Format`] is.
 pub fn leaf_carried(id: u32) -> bool {
     id >= LEAF_FROM
+}
+
+/// Whether, in a contract of graph `id`, `assert` carries π2 and π3 beside
+/// π1 ([`PI1_ALONE_FROM`]).
+pub fn pair_on_chain(id: u32) -> bool {
+    id < PI1_ALONE_FROM
 }
 
 /// How a contract's filing is written, a function of its Base alone: the

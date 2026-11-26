@@ -16,11 +16,11 @@ ark-groth16 = { version = "0.5", default-features = false, features = ["std"] }
 k256 = "0.13"
 licash = { path = "../licash" }
 licash-hp = { path = "../licash-hp" }
-lichen-babe = { git = "https://github.com/lichenbtc-org/lichen", rev = "ba5aa5b459a10ef5b9a86da75d8c929fe57c2708" }
+lichen-babe = { git = "https://github.com/lichenbtc-org/lichen", rev = "b1176e2d69a85ee3e934bbbe54e9933562f304d1" }
 # as Lichen's workspace takes them
 lichen-btc = { git = "https://github.com/lichenbtc-org/lichen-btc", rev = "d7d2de04f7f8d51b44f61a68c7e1789f36502071" }
 lichen-wots = { git = "https://github.com/lichenbtc-org/lichen-btc", rev = "d7d2de04f7f8d51b44f61a68c7e1789f36502071" }
-lichen-contract = { git = "https://github.com/lichenbtc-org/lichen", rev = "ba5aa5b459a10ef5b9a86da75d8c929fe57c2708" }
+lichen-contract = { git = "https://github.com/lichenbtc-org/lichen", rev = "b1176e2d69a85ee3e934bbbe54e9933562f304d1" }
 licash-statement = { path = "../licash-statement" }
 rand_chacha = "0.3"
 rand_core = { version = "0.6", features = ["getrandom"] }

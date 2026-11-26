@@ -600,6 +600,13 @@ impl Openings {
         *timing = timing.with_nulldata();
     }
 
+    /// Quote graphs whose `assert` carries π2 and π3 beside π1 from now on
+    /// ([`Timing::with_pair`]): those open already keep theirs.
+    pub fn carry_pair_on_chain(&self) {
+        let mut timing = self.timing.write().unwrap_or_else(|e| e.into_inner());
+        *timing = timing.with_pair();
+    }
+
     /// That the hub's locks, living `window` blocks at most, outlive its
     /// contracts' response window ([`Timing::covers_locks`]).
     pub fn check_lock_window(&self, window: u32) -> Result<()> {

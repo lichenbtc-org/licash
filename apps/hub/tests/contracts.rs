@@ -3146,6 +3146,28 @@ impl Drop for Nulldata {
     }
 }
 
+/// Whether [`stale_copy`]'s hub quotes graphs whose `assert` carries π2 and
+/// π3 beside π1 ([`Openings::carry_pair_on_chain`]): while a [`Pair`]
+/// lives.
+static PAIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// [`PAIR`] for as long as it lives: off again when the test ends, however
+/// it does.
+struct Pair;
+
+impl Pair {
+    fn on() -> Self {
+        PAIR.store(true, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for Pair {
+    fn drop(&mut self) {
+        PAIR.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// A dishonest holder's filings for as long as it lives
 /// ([`licash_contracts::holder::recovery::forge_filings`]): honest again
 /// when the test ends, however it does.
@@ -3263,6 +3285,9 @@ async fn stale_copy<T: licash_wallet::Transport>(
     let (url, source, hub, openings) = hub_answering_with(&rt, &at, Some(STALE_RANGE)).await?;
     if NULLDATA.load(std::sync::atomic::Ordering::SeqCst) {
         openings.carry_in_nulldata();
+    }
+    if PAIR.load(std::sync::atomic::Ordering::SeqCst) {
+        openings.carry_pair_on_chain();
     }
     let chain = Node(source.clone());
     let (mine, wallet) = holder_wallet(&rt, &chain, dir.path(), &url, seed, &[COIN, COIN]).await?;
@@ -5574,15 +5599,17 @@ fn in_mempool_asserting(rt: &Regtest) -> Result<Option<bitcoin::Transaction>> {
 }
 
 /// The hub asserts a true proof, and a miner mines it with π2 and π3 (which
-/// its leaf drops unchecked) replaced: the same transaction, by its id, but
-/// a proof that no longer verifies, to whoever reads it from the chain. The
-/// hub shows her none of its own (offline, say), so she challenges it; the
-/// hub answers from the proof it made and pinned, not from the one the
-/// chain shows, and pays her what is left.
+/// its leaf drops unchecked, in a graph whose `assert` carries them)
+/// replaced: the same transaction, by its id, but a proof that no longer
+/// verifies, to whoever reads it from the chain. The hub shows her none of
+/// its own (offline, say), so she challenges it; the hub answers from the
+/// proof it made and pinned, not from the one the chain shows, and pays
+/// her what is left.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs bitcoind and a release build"]
 async fn a_hub_answers_the_challenge_of_its_assertion_mined_with_another_pi2_and_pi3() -> Result<()>
 {
+    let _pair = Pair::on();
     let s = stale_claim([17; 32]).await?;
     s.openings.refuse_proofs();
     let altered = asserted_with_another_pair(&s).await?;
@@ -5609,12 +5636,50 @@ async fn a_hub_answers_the_challenge_of_its_assertion_mined_with_another_pi2_and
 #[ignore = "needs bitcoind and a release build"]
 async fn a_holder_checks_the_hubs_own_pi2_and_pi3_of_an_assertion_mined_with_others() -> Result<()>
 {
+    let _pair = Pair::on();
     let s = stale_claim([23; 32]).await?;
     let altered = asserted_with_another_pair(&s).await?;
     let done = played(&s, |_| true).await?;
     ensure!(done.assertion == Some(altered) && done.proved, "{done:?}");
     ensure!(done.challenge.is_none(), "challenged: {done:?}");
     ensure!(done.corrected == Some(98_304), "{done:?}");
+    ensure!(done.payout.is_some() && done.timeout.is_none(), "{done:?}");
+    let received = done.received.context("nothing received")?;
+    ensure!(
+        received < 131_071,
+        "{received} of a claim of 131071: {done:?}"
+    );
+    Ok(())
+}
+
+/// The hub asserts π1 alone (graph [`licash::recovery::PI1_ALONE_FROM`]),
+/// and shows her no π2 and π3 (offline, say): with no proof to check, she
+/// challenges it; the hub answers from the proof it made and pinned, and
+/// pays her what is left.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_hub_answers_the_challenge_of_its_assertion_of_pi1_alone_it_showed_no_proof_of(
+) -> Result<()> {
+    let s = stale_claim([29; 32]).await?;
+    s.openings.refuse_proofs();
+    s.openings.refuse_evidence();
+    let to = s.wallet.fallback_address()?.script_pubkey();
+    s.rt.fund(&to, Amount::from_sat(100_000))?;
+    s.rt.mine(1)?;
+    scan(&s.wallet, &s.chain).await?;
+    let done = played(&s, |_| true).await?;
+    let assertion = done.assertion.context("no assertion")?;
+    // Bottom first π1's 254 preimages of 20 bytes, then the signatures:
+    // no π3 and π2 below them.
+    let w = &s.rt.get_tx(&assertion)?.input[0].witness;
+    ensure!(
+        (0..254).all(|k| w.nth(k).is_some_and(|p| p.len() == 20))
+            && w.nth(254).is_some_and(|sig| sig.len() == 64),
+        "not π1 alone: {w:?}"
+    );
+    ensure!(!done.proved && done.challenge.is_some(), "{done:?}");
+    ensure!(done.corrected == Some(98_304), "{done:?}");
+    // Paid by the hub's answer to her challenge, not by her timeout.
     ensure!(done.payout.is_some() && done.timeout.is_none(), "{done:?}");
     let received = done.received.context("nothing received")?;
     ensure!(

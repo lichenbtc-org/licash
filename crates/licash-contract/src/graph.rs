@@ -295,6 +295,7 @@ pub fn build(base: &Base, holder: &HolderPub, hub: &HubPub, hmsg: Vec<Hash>) -> 
             adaptor: hub.adaptor.clone(),
             hmsg,
             windows: windows.tail,
+            pair: licash::recovery::pair_on_chain(g.id),
         },
     )
 }
@@ -674,9 +675,16 @@ impl HubProves {
         ensure!(args.len() == n, "a respond of {} arguments", args.len());
         script_signature(params, args)
     }
-    /// `assert`'s: π1's digits, Lamport-signed, then π2 and π3.
-    pub fn assert_wire(preimages: &[Preimage], pi2: &[u8], pi3: &[u8]) -> Vec<Vec<u8>> {
-        Graph::assert_wire(preimages, pi2, pi3)
+    /// `assert`'s: π1's digits, Lamport-signed, then `proof`'s π2 and π3
+    /// if its graph carries them ([`licash::recovery::pair_on_chain`]).
+    pub fn assert_wire(&self, preimages: &[Preimage], proof: &Proof<Bn254>) -> Vec<Vec<u8>> {
+        match self.graph.tail.pair {
+            true => {
+                let (pi2, pi3) = lichen_babe::statement::pi23_to_bytes(proof);
+                Graph::assert_wire_with_pair(preimages, &pi2, &pi3)
+            }
+            false => Graph::assert_wire(preimages),
+        }
     }
     /// `challenge_assert`'s: the reveal.
     pub fn challenge_wire(args: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
@@ -717,34 +725,10 @@ impl HubProves {
         );
         Ok((b, Self::b_wire(&sig)))
     }
-    /// `assert`'s π2 and π3 as it shows them: the two arguments its leaf
-    /// drops unchecked, which whoever relays or mines it may replace
-    /// without changing its id.
-    pub fn asserted_pair(assert: &Transaction) -> Result<(Vec<u8>, Vec<u8>)> {
-        let args = link_args(assert);
-        let (_, pi2, pi3) = Graph::read_assert(&args).context("assert's arguments")?;
-        Ok((pi2.to_vec(), pi3.to_vec()))
-    }
-    /// `assert` with π2 and π3 `pi2` and `pi3`, all else (π1's digits, its
-    /// signatures) as it is: the same transaction by its id.
-    pub fn with_pair(assert: &Transaction, pi2: &[u8], pi3: &[u8]) -> Result<Transaction> {
-        Self::asserted_pair(assert)?;
-        // The deepest of its stack: π3, then π2 (`assert_wire`).
-        let mut items = assert.input[0].witness.to_vec();
-        items[0] = pi3.to_vec();
-        items[1] = pi2.to_vec();
-        let mut tx = assert.clone();
-        tx.input[0].witness = lichen_btc::bitcoin::Witness::from_slice(&items);
-        ensure!(
-            Self::asserted_pair(&tx)? == (pi2.to_vec(), pi3.to_vec()),
-            "π2 and π3 not where assert's leaf takes them"
-        );
-        Ok(tx)
-    }
     /// What `assert` put on chain.
     pub fn assertion(&self, assert: &Transaction) -> Result<Assertion> {
         let args = link_args(assert);
-        let (signed, pi2, pi3) = Graph::read_assert(&args).context("assert's arguments")?;
+        let (signed, pair) = Graph::read_assert(&args).context("assert's arguments")?;
         let preimages: Vec<Preimage> = signed
             .iter()
             .map(|a| a[..].try_into().context("a preimage's length"))
@@ -760,7 +744,8 @@ impl HubProves {
             .flat_map(|v| [v & 1 == 1, v & 2 == 2])
             .collect();
         Ok(Assertion {
-            proof: lichen_babe::statement::proof_from_chain(&bits, pi2, pi3),
+            proof: pair.and_then(|(pi2, pi3)| lichen_babe::statement::proof_of(&bits, pi2, pi3)),
+            pair: pair.map(|(pi2, pi3)| [pi2, pi3].concat()),
             digits,
             bits,
             preimages,
@@ -820,15 +805,33 @@ fn nulldata_spend(
 }
 
 /// What `assert` put on chain: π1's digits (read under the hub's Lamport
-/// key), their preimages, and the proof, if its points are points.
+/// key), their preimages, and, in a graph whose `assert` carries π2 and π3
+/// ([`licash::recovery::pair_on_chain`]), those (`pair`, 96 bytes) and the
+/// proof, if its points are points. Unsigned, they are whatever whoever
+/// relayed or mined it put there.
 pub struct Assertion {
     pub digits: Vec<u8>,
     pub bits: Vec<bool>,
     pub preimages: Vec<Preimage>,
+    pub pair: Option<Vec<u8>>,
     pub proof: Option<Proof<Bn254>>,
 }
 
 impl Assertion {
+    /// The whole proof, π1 the chain's and π2 and π3 `pair` (96 bytes, as
+    /// the hub hands them over), if they are points.
+    pub fn proof_with(&self, pair: &[u8]) -> Option<Proof<Bn254>> {
+        (pair.len() == 96).then_some(())?;
+        let (pi2, pi3) = pair.split_at(64);
+        lichen_babe::statement::proof_of(&self.bits, pi2, pi3)
+    }
+    /// The proof the hub answers a challenge on: `own`, the one it made and
+    /// asserted, if it is of the π1 on chain; else the chain's, if it
+    /// carries one.
+    pub fn answered_on(&self, own: Option<Proof<Bn254>>) -> Option<Proof<Bn254>> {
+        own.filter(|p| lichen_babe::gadget::input(&p.a) == self.bits)
+            .or_else(|| self.proof.clone())
+    }
     /// `challenge_assert`'s witness: each digit's preimage and the hub's
     /// pre-signature on it completed by its `revealed` secret (hers,
     /// `lichen_babe::opening::Garbler::reveal`).

@@ -598,9 +598,10 @@ impl Openings {
                 .map_err(|_| Refused::bad("a signature is 64 bytes"))?,
         );
         let (_, o) = self.signed_opening(id).await?;
-        let assertion = Responses::open(&self.data)
-            .map_err(Refused::unavailable)?
-            .response(&tagged(id, b"assert"))
+        let pins = Responses::open(&self.data).map_err(Refused::unavailable)?;
+        let tag = tagged(id, b"assert");
+        let assertion = pins
+            .response(&tag)
             .map_err(Refused::unavailable)?
             .ok_or_else(|| Refused::bad("no assertion to show the proof of"))?;
         licash::crypto::schnorr_verify(
@@ -609,7 +610,12 @@ impl Openings {
             &signature,
         )
         .map_err(|_| Refused::bad("not signed with the contract's claim key"))?;
-        let (pi2, pi3) = HubProves::asserted_pair(&assertion).map_err(Refused::unavailable)?;
+        let own = self.own_proof(id, &o).map_err(Refused::unavailable)?;
+        let a = o.babe.assertion(&assertion).map_err(Refused::unavailable)?;
+        let proof = a
+            .answered_on(own)
+            .ok_or_else(|| Refused::unavailable("no proof of the assertion pinned"))?;
+        let (pi2, pi3) = lichen_babe::statement::pi23_to_bytes(&proof);
         Ok([pi2, pi3].concat())
     }
 
@@ -1903,6 +1909,27 @@ impl Openings {
         Ok(Played::Idle)
     }
 
+    /// The proof the hub asserted in opening `id`'s dispute: the one
+    /// pinned before it signed, or, for an assertion signed before proofs
+    /// were pinned (of a graph before 16, then), the one its signed
+    /// `assert` carries. None before it asserts.
+    fn own_proof(
+        &self,
+        id: &[u8; 32],
+        o: &HubOpening,
+    ) -> Result<Option<ark_groth16::Proof<ark_bn254::Bn254>>> {
+        let pins = Responses::open(&self.data)?;
+        let tag = tagged(id, b"assert");
+        let pinned = pins.evidence(&tag)?;
+        if let Some(proof) = pinned.and_then(|p| lichen_babe::statement::proof_from_bytes(&p)) {
+            return Ok(Some(proof));
+        }
+        Ok(pins
+            .response(&tag)?
+            .and_then(|signed| o.babe.assertion(&signed).ok())
+            .and_then(|a| a.proof))
+    }
+
     /// She challenged the assertion: answered with the first kept
     /// instance whose circuit opens on the proof, in a block by `by`'s
     /// deadline, its fee `by`'s stake at most ([`Self::with_fee_by`]).
@@ -1917,10 +1944,11 @@ impl Openings {
         by: (u32, Amount),
         tip: u32,
     ) -> Result<Played> {
-        // The assertion as the hub signed it, pinned before it was: its
-        // proof, whatever π2 and π3 the block shows.
-        let signed = match Responses::open(&self.data)?.response(&tagged(id, b"assert")) {
-            Ok(signed) => signed,
+        // The proof the hub asserted, pinned before it signed: whatever π2
+        // and π3 the block shows, if any. One signed before proofs were
+        // pinned carries its own.
+        let own = match self.own_proof(id, o) {
+            Ok(own) => own,
             Err(e) => {
                 tracing::error!(id = %crate::hex_id(id), "the assertion pinned: {e:#}");
                 None
@@ -1934,7 +1962,7 @@ impl Openings {
                     continue;
                 }
             };
-            match o.answer(asserted, signed.as_ref(), challenge, i, &bytes) {
+            match o.answer(asserted, own.clone(), challenge, i, &bytes) {
                 Ok(Some(tx)) => {
                     let name = format!(
                         "wrongly_challenged_{}",
