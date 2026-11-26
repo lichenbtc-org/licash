@@ -383,7 +383,13 @@ impl Phone {
     }
 
     pub async fn hide_keyboard(&self) -> anyhow::Result<()> {
-        // Escape: closes the keyboard, not the screen.
+        // Escape closes an on-screen keyboard, not the screen, but only if
+        // one is shown: typed through a hardware keyboard, none is, and a
+        // sheet, a dialog, takes Escape as back and is dismissed.
+        let ime = self.shell("dumpsys input_method").await?;
+        if !ime.split_whitespace().any(|w| w == "mInputShown=true") {
+            return Ok(());
+        }
         self.shell("input keyevent 111").await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
         Ok(())
