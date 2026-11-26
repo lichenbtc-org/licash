@@ -828,6 +828,54 @@ impl<T: Transport> Wallet<T> {
         amount: u64,
         memo: Option<&str>,
     ) -> Result<Invoice, Error> {
+        self.invoice_via(provider, url, Some(amount), memo, None)
+            .await
+    }
+
+    /// An invoice from the provider at `provider` asking exactly `msat`,
+    /// in whole satoshis, paying this wallet the most whole notes at the
+    /// hub at `url` the provider's fee leaves of it, the provider keeping
+    /// the under a satoshi's worth of fee beyond. Committing to
+    /// `description_hash`, if given, as LNURL-pay and Nostr zaps want, or
+    /// else saying `memo`, if given ([`Wallet::invoice_through`]). Refused
+    /// of a provider not naming [`swaps::FEATURE_RECEIVE_EXACT`], and
+    /// checked in the invoice it answers.
+    pub async fn invoice_exact_through(
+        &self,
+        provider: &str,
+        url: &str,
+        msat: u64,
+        memo: Option<&str>,
+        description_hash: Option<[u8; 32]>,
+    ) -> Result<Invoice, Error> {
+        if memo.is_some() && description_hash.is_some() {
+            return Err(Error::Invalid(
+                "a memo or a description hash, not both".into(),
+            ));
+        }
+        if !msat.is_multiple_of(1000) {
+            return Err(Error::Invalid(format!(
+                "a provider's invoices ask whole satoshis, not {msat} msat"
+            )));
+        }
+        let exact = Exact {
+            msat,
+            description_hash,
+        };
+        self.invoice_via(provider, url, None, memo, Some(exact))
+            .await
+    }
+
+    /// An invoice through `provider` of `amount`, or of what `exact` leaves
+    /// of its total.
+    async fn invoice_via(
+        &self,
+        provider: &str,
+        url: &str,
+        amount: Option<u64>,
+        memo: Option<&str>,
+        exact: Option<Exact>,
+    ) -> Result<Invoice, Error> {
         let memo = memo
             .map(licash_api::memo)
             .transpose()
@@ -837,13 +885,33 @@ impl<T: Transport> Wallet<T> {
         self.not_visited(&url)?;
         let (hub, info) = self.refresh(&url).await?;
         let offer = self.receive_offer(&provider, &url).await?;
+        let (amount, asks) = match (amount, exact) {
+            (Some(amount), _) => (amount, offer.terms.asks(amount)),
+            (None, Some(exact)) => {
+                let named = (offer.info.features.iter()).any(|f| f == swaps::FEATURE_RECEIVE_EXACT);
+                if !named {
+                    return Err(Error::Invalid(format!(
+                        "provider {provider} makes no invoices of an exact amount"
+                    )));
+                }
+                let asks = exact.msat / 1000;
+                let amount = (offer.terms.fee.most_within(asks))
+                    .filter(|notes| *notes > 0)
+                    .ok_or_else(|| {
+                        Error::Invalid(format!(
+                            "provider {provider} takes all of {asks} sat in fees"
+                        ))
+                    })?;
+                (amount, asks)
+            }
+            (None, None) => return Err(Error::Invalid("an invoice of no amount".into())),
+        };
         if amount < offer.terms.min || amount > offer.max {
             return Err(Error::Invalid(format!(
                 "provider {provider} takes {} to {} over Lightning at hub {url}",
                 offer.terms.min, offer.max
             )));
         }
-        let asks = offer.terms.asks(amount);
         let mut preimage = [0; 32];
         OsRng.fill_bytes(&mut preimage);
         let hash = lock_hash(&preimage);
@@ -853,6 +921,9 @@ impl<T: Transport> Wallet<T> {
             amount,
             hash: licash_api::Hex(hash.to_vec()),
             memo,
+            asks: exact.map(|_| asks),
+            description_hash: (exact.and_then(|e| e.description_hash))
+                .map(|h| licash_api::Hex(h.to_vec())),
         };
         let body = serde_json::to_string(&body).map_err(invalid)?;
         self.store.write(|tx| {
@@ -1250,6 +1321,17 @@ impl<T: Transport> Wallet<T> {
                     return self
                         .cancel_invoice(hash, "its provider left the memo out of the invoice");
                 }
+            }
+            // Never handed out: its payer, an LNURL service, would refuse it.
+            if body
+                .description_hash
+                .as_ref()
+                .is_some_and(|asked| committed(&invoice).map(Vec::from) != Some(asked.0.clone()))
+            {
+                return self.cancel_invoice(
+                    hash,
+                    "its provider's invoice commits to another description",
+                );
             }
             self.store.write(|tx| {
                 tx.execute(

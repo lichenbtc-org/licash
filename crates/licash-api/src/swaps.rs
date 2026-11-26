@@ -240,6 +240,12 @@ impl Receives {
     }
 }
 
+/// The [`Info::features`] of a provider whose receipts' invoices may ask
+/// an amount of the wallet's and commit to a description's hash
+/// ([`ReceiveRequest::asks`], [`ReceiveRequest::description_hash`]), as
+/// LNURL-pay wants.
+pub const FEATURE_RECEIVE_EXACT: &str = "receive-exact";
+
 /// Ask a provider for an invoice whose payment it pays on as a lock of
 /// `amount` to `address` at hub `hub`, under `hash`, the wallet's: the
 /// invoice says `memo`, if given, to its payer. The same request again
@@ -253,11 +259,45 @@ pub struct ReceiveRequest {
     /// As [`crate::memo`] makes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memo: Option<String>,
+    /// What the invoice asks, in satoshis, of a provider naming
+    /// [`FEATURE_RECEIVE_EXACT`]: at least `amount` and its fee, the rest
+    /// the provider's. Without, it asks exactly those ([`Receives::asks`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asks: Option<u64>,
+    /// The SHA-256 hash of a description given elsewhere, which the
+    /// invoice commits to instead of a memo, of a provider naming
+    /// [`FEATURE_RECEIVE_EXACT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_hash: Option<Hex>,
 }
 
 impl ReceiveRequest {
     pub fn hash(&self) -> Result<[u8; 32], Problem> {
         self.hash.array("hash")
+    }
+
+    /// Its description hash, if it commits to one: never with a memo.
+    pub fn checked_description_hash(&self) -> Result<Option<[u8; 32]>, Problem> {
+        match &self.description_hash {
+            None => Ok(None),
+            Some(_) if self.memo.is_some() => {
+                Err(Problem::invalid("a memo or a description hash, not both"))
+            }
+            Some(hash) => hash.array("description_hash").map(Some),
+        }
+    }
+
+    /// What its invoice asks under `terms`: refused if less than the amount
+    /// and the fee.
+    pub fn asks_under(&self, terms: &Receives) -> Result<u64, Problem> {
+        let least = terms.asks(self.amount);
+        match self.asks {
+            None => Ok(least),
+            Some(asks) if asks >= least => Ok(asks),
+            Some(asks) => Err(Problem::invalid(format!(
+                "an invoice asking {asks} sat, less than {least} with the fee"
+            ))),
+        }
     }
 
     /// Its memo, if it says one, checked as [`crate::memo`] makes it.

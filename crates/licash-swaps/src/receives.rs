@@ -341,10 +341,17 @@ impl<T: Transport> Provider<T> {
             .ok_or_else(|| declined("the provider takes no receipts over Lightning"))?;
         let hash = request.hash()?;
         let memo = request.checked_memo()?;
-        if let Some(receipt) = self.receipt(&hash).map_err(unavailable)? {
-            return self.receipt_again(&receipt, request);
-        }
+        let committed = request.checked_description_hash()?;
         let terms = &taker.terms;
+        let offered = Receives {
+            fee: terms.fee,
+            min: terms.min,
+            max: terms.max,
+        };
+        let sat = request.asks_under(&offered)?;
+        if let Some(receipt) = self.receipt(&hash).map_err(unavailable)? {
+            return self.receipt_again(&receipt, request, sat, committed);
+        }
         if !(terms.min..=terms.max).contains(&request.amount) {
             return Err(Problem::invalid(format!(
                 "receipts of {} to {} sat",
@@ -366,7 +373,6 @@ impl<T: Transport> Provider<T> {
         let Some(lead) = self.config.lead(&locks) else {
             return Err(declined("no receipts at this hub now"));
         };
-        let sat = request.amount.saturating_add(terms.fee.due(request.amount));
         let at = now();
         let max_open = i64::try_from(terms.max_open).unwrap_or(i64::MAX);
         {
@@ -434,7 +440,9 @@ impl<T: Transport> Provider<T> {
                 sat.saturating_mul(1000),
                 cltv,
                 RECEIVE_EXPIRY,
-                memo.map(Description::Text),
+                committed
+                    .map(Description::Hash)
+                    .or(memo.map(Description::Text)),
             )
             .await;
         let request_text = match made {
@@ -461,11 +469,14 @@ impl<T: Transport> Provider<T> {
         })
     }
 
-    /// The receipt `receipt` asked for again: its invoice, if the same.
+    /// The receipt `receipt` asked for again: its invoice, if the same,
+    /// asking `sat` and committing to `committed`.
     fn receipt_again(
         &self,
         receipt: &Receipt,
         request: &ReceiveRequest,
+        sat: u64,
+        committed: Option<[u8; 32]>,
     ) -> Result<Receiving, Problem> {
         let hubs = self.wallet.hubs().map_err(unavailable)?;
         let hub = hubs
@@ -475,7 +486,10 @@ impl<T: Transport> Provider<T> {
         let same = hub == Some(request.hub)
             && receipt.address == request.address.to_bytes()
             && receipt.amount == request.amount
-            && receipt.memo == request.memo;
+            // Its fee as it was then, unless the wallet named what it asks.
+            && request.asks.is_none_or(|_| receipt.sat == sat)
+            && receipt.memo == request.memo
+            && receipt.request.as_deref().is_none_or(|r| commits(r) == committed);
         if !same {
             return Err(declined("another receipt under this hash"));
         }
@@ -907,5 +921,15 @@ impl<T: Transport> Provider<T> {
             )?;
             Ok(())
         })
+    }
+}
+
+/// The description hash the invoice `request` commits to, if any.
+fn commits(request: &str) -> Option<[u8; 32]> {
+    use bitcoin::hashes::Hash as _;
+    let invoice: lightning_invoice::Bolt11Invoice = request.parse().ok()?;
+    match invoice.description() {
+        lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(h) => Some(h.0.to_byte_array()),
+        lightning_invoice::Bolt11InvoiceDescriptionRef::Direct(_) => None,
     }
 }

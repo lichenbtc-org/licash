@@ -754,7 +754,9 @@ impl<T: Transport> Provider<T> {
             donations: self.donations(),
             receive: self.receive_terms(),
             lightning: self.lightning_terms().cloned(),
-            features: Vec::new(),
+            features: (self.receive_terms().iter())
+                .map(|_| swaps::FEATURE_RECEIVE_EXACT.to_owned())
+                .collect(),
         })
     }
 

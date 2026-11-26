@@ -566,6 +566,8 @@ async fn receipts_over_lightning_are_asked_and_followed_through_the_api() {
         amount: 1_000,
         hash: licash_api::Hex(vec![1; 32]),
         memo: None,
+        asks: None,
+        description_hash: None,
     };
     let body = serde_json::to_string(&request).unwrap();
     let (status, answer) = call(&router, swaps::RECEIVES, Some(&body)).await;

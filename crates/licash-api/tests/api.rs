@@ -929,9 +929,38 @@ fn a_provider_says_the_receipts_over_lightning_it_takes() {
         amount: 1_000,
         hash: Hex(vec![7; 32]),
         memo: None,
+        asks: None,
+        description_hash: None,
     };
     assert_eq!(json(&request), request);
-    assert!(!serde_json::to_string(&request).unwrap().contains("memo"));
+    let text = serde_json::to_string(&request).unwrap();
+    assert!(!text.contains("memo") && !text.contains("asks") && !text.contains("description"));
+    // Asking what the amount and the fee come to, or more, of a provider
+    // naming the feature; committing to a description's hash, never with
+    // a memo.
+    assert_eq!(swaps::FEATURE_RECEIVE_EXACT, "receive-exact");
+    assert_eq!(request.asks_under(&receives).unwrap(), 1_007);
+    let asking = |asks| swaps::ReceiveRequest {
+        asks: Some(asks),
+        ..request.clone()
+    };
+    assert_eq!(asking(1_009).asks_under(&receives).unwrap(), 1_009);
+    assert!(asking(1_006).asks_under(&receives).is_err());
+    let committing = swaps::ReceiveRequest {
+        description_hash: Some(Hex(vec![9; 32])),
+        ..asking(1_009)
+    };
+    assert_eq!(json(&committing), committing);
+    assert_eq!(
+        committing.checked_description_hash().unwrap(),
+        Some([9; 32])
+    );
+    assert_eq!(request.checked_description_hash().unwrap(), None);
+    let both = swaps::ReceiveRequest {
+        memo: Some("Lunch".into()),
+        ..committing.clone()
+    };
+    assert!(both.checked_description_hash().is_err());
     assert_eq!(request.hash().unwrap(), [7; 32]);
     assert_eq!(request.checked_memo().unwrap(), None);
     let saying = |memo: &str| swaps::ReceiveRequest {

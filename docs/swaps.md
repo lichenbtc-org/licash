@@ -183,7 +183,12 @@ a hash of its own, to its address at a hub the provider swaps at; the
 invoice asks the amount and the provider's fee (`--receive-fee-base`, 2
 sat, and `--receive-fee-ppm`, 5000, the hub's fee on the lock included),
 from `--receive-min` (100 sat) to `--receive-max` (1,000,000 sat), and
-`GET /v1/swaps/receive/HASH` says where it stands. Once the invoice is paid,
+`GET /v1/swaps/receive/HASH` says where it stands. A provider whose info
+names the feature `receive-exact` also takes `asks`, what the invoice asks
+in whole satoshis, at least the amount and its fee, the rest its own, and
+`description_hash`, the hash of a description given elsewhere that the
+invoice commits to instead of a memo: as LNURL-pay wants, for a bridge's
+Lightning Addresses. Once the invoice is paid,
 the provider locks the amount to the wallet under that hash, for at most 15
 blocks; the wallet claims it with the preimage, which the hub shows the
 provider, who settles. Unclaimed, the lock is refunded once expired and the

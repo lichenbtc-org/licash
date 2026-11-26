@@ -138,6 +138,8 @@ impl Eco {
             amount,
             hash: Hex(lock_hash(&[seed; 32]).to_vec()),
             memo: None,
+            asks: None,
+            description_hash: None,
         }
     }
 
@@ -442,6 +444,8 @@ async fn a_hash_of_a_donation_is_no_receipts() {
         amount: 100,
         hash: Hex(hash.to_vec()),
         memo: None,
+        asks: None,
+        description_hash: None,
     };
     let refused = provider.receive(&request).await.unwrap_err();
     assert_eq!(refused.code, Code::Declined, "{refused:?}");
@@ -648,4 +652,98 @@ async fn an_invoice_asked_of_a_provider_is_resumed_and_checked_as_offered() {
     assert!(resumed.request.is_some(), "{resumed:?}");
     assert_eq!(resumed.state, InvoiceState::Open);
     assert_eq!(eco.provider().open_receives().unwrap(), before + 1);
+}
+
+#[tokio::test]
+async fn an_invoice_of_an_exact_amount_is_asked_of_a_provider_naming_it() {
+    let eco = Eco::new().await;
+    let (wallet, _) = eco.client(0x63).await;
+    let offer = wallet.receive_offer(PROVIDER, A).await.unwrap();
+    assert!(offer
+        .info
+        .features
+        .iter()
+        .any(|f| f == swaps::FEATURE_RECEIVE_EXACT));
+    // Whole satoshis only, and a memo or a description hash.
+    let sub_sat = wallet
+        .invoice_exact_through(PROVIDER, A, 105_500, None, None)
+        .await;
+    assert!(sub_sat.is_err(), "{sub_sat:?}");
+    let both = wallet
+        .invoice_exact_through(PROVIDER, A, 105_000, Some("Lunch"), Some([5; 32]))
+        .await;
+    assert!(both.is_err(), "{both:?}");
+    assert_eq!(eco.provider().open_receives().unwrap(), 0);
+    // Asking exactly 105 sat, committing to the hash: 103 sat paid, the
+    // provider's fee of 2 the rest.
+    let invoice = wallet
+        .invoice_exact_through(PROVIDER, A, 105_000, None, Some([5; 32]))
+        .await
+        .unwrap();
+    assert_eq!(
+        (invoice.state.clone(), invoice.amount),
+        (InvoiceState::Open, 103)
+    );
+    let request: Bolt11Invoice = invoice.request.clone().unwrap().parse().unwrap();
+    assert_eq!(request.amount_milli_satoshis(), Some(105_000));
+    match request.description() {
+        lightning_invoice::Bolt11InvoiceDescriptionRef::Hash(h) => {
+            assert_eq!(h.0.to_byte_array(), [5; 32])
+        }
+        other => panic!("{other:?}"),
+    }
+    let hash: [u8; 32] = request.payment_hash().to_byte_array();
+    eco.pay(hash, CLTV);
+    eco.follow().await;
+    let paid = wallet.follow_invoice(&invoice.hash).await.unwrap();
+    assert_eq!(paid.state, InvoiceState::Received, "{paid:?}");
+    assert_eq!(wallet.balance().unwrap()[0].available, 103);
+    eco.follow().await;
+    assert_eq!(eco.node.held(hash), Some((HeldState::Settled, 105_000)));
+}
+
+#[tokio::test]
+async fn a_provider_makes_an_invoice_asking_what_the_wallet_names_once() {
+    let eco = Eco::new().await;
+    let provider = eco.provider();
+    let refused = |r: Result<Receiving, Problem>| r.unwrap_err().code;
+    // Less than the amount and its fee, or a hash with a memo: refused.
+    let short = ReceiveRequest {
+        asks: Some(101),
+        ..eco.request(100, 7)
+    };
+    assert_eq!(refused(provider.receive(&short).await), Code::Invalid);
+    let both = ReceiveRequest {
+        memo: Some("Lunch".into()),
+        description_hash: Some(Hex(vec![5; 32])),
+        ..eco.request(100, 7)
+    };
+    assert_eq!(refused(provider.receive(&both).await), Code::Invalid);
+    let exact = ReceiveRequest {
+        asks: Some(104),
+        description_hash: Some(Hex(vec![5; 32])),
+        ..eco.request(100, 7)
+    };
+    let made = provider.receive(&exact).await.unwrap();
+    let invoice: Bolt11Invoice = made.request.parse().unwrap();
+    assert_eq!(invoice.amount_milli_satoshis(), Some(104_000));
+    // The same again, the same invoice; asking otherwise under its hash,
+    // declined.
+    assert_eq!(
+        provider.receive(&exact).await.unwrap().request,
+        made.request
+    );
+    let other = ReceiveRequest {
+        asks: Some(105),
+        ..exact.clone()
+    };
+    assert_eq!(refused(provider.receive(&other).await), Code::Declined);
+    let uncommitted = ReceiveRequest {
+        description_hash: None,
+        ..exact.clone()
+    };
+    assert_eq!(
+        refused(provider.receive(&uncommitted).await),
+        Code::Declined
+    );
 }
