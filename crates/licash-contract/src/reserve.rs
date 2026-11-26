@@ -277,7 +277,7 @@ mod tests {
         quote.graph.contest_window = 144;
         quote.graph.publication_window = 6;
         quote.graph.to_self_delay = 144;
-        quote.chain.funding_depth = 3;
+        quote.chain.funding_depth = 6;
         quote.chain.work_depth = 6;
         quote.graph.dust = 330;
         quote.graph.reserve_alice = 20_000;

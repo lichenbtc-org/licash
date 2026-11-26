@@ -168,12 +168,16 @@ impl Floors {
         let (challenge_window, publication_window, to_self_delay, funding_depth, work_depth) =
             match profile {
                 ChainProfile::Core30DefaultRegtest => (6, 6, 6, 1, 1),
+                // Mainnet's hub decides on her request and publication 6
+                // deep: a reorganization deeper may mine her other request
+                // (its txid the same, signing another b or E) under a
+                // response the hub signed for the first, whose proof then
+                // fails.
+                ChainProfile::Core30Mainnet => (144, 6, 144, 6, 6),
                 // Counted in blocks, the same on every network that is not
                 // regtest: Mutinynet's blocks are 20 times as quick, which
                 // is for its tests to meet reorganizations with.
-                ChainProfile::Core30Mainnet
-                | ChainProfile::Core30Signet
-                | ChainProfile::Mutinynet => (144, 6, 144, 3, 6),
+                ChainProfile::Core30Signet | ChainProfile::Mutinynet => (144, 6, 144, 3, 6),
             };
         // Mainnet: 3 sat/vB, so that a forced close of the filing at its
         // widest gets confirmed in a fee market short of a spike: of a
@@ -1722,6 +1726,21 @@ mod tests {
     use lichen_btc::bitcoin::{
         absolute, key::TapTweak, secp256k1::SECP256K1, transaction, Amount, TxIn, Witness,
     };
+    /// Mainnet's hub decides on her request 6 deep at least, so that a
+    /// reorganization mining her other request, its txid the same, under
+    /// the response it signed is one deeper than any it plays on; the
+    /// test networks' floors stay what their contracts were quoted on.
+    #[test]
+    fn mainnet_decides_six_deep_and_the_test_networks_as_before() {
+        assert_eq!(Floors::of(ChainProfile::Core30Mainnet).funding_depth, 6);
+        for profile in [ChainProfile::Core30Signet, ChainProfile::Mutinynet] {
+            assert_eq!(Floors::of(profile).funding_depth, 3);
+        }
+        assert_eq!(
+            Floors::of(ChainProfile::Core30DefaultRegtest).funding_depth,
+            1
+        );
+    }
     fn message(id: [u8; 32], kind: Kind, body: Vec<u8>) -> Input {
         Input::Message(Envelope { id, kind, body }.to_bytes())
     }
