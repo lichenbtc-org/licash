@@ -937,6 +937,60 @@ mod tests {
         );
     }
 
+    /// The least reserve of the hub's a graph is built with: its links'
+    /// floors and anchors, and the holder's purse, which that reserve pays
+    /// whichever way the exit goes. Of the instances a hub keeps on signet
+    /// (10) and a holder's reserve of 25,000 sat, 58,252 sat. Only what
+    /// the hub's reserve has above that repays a holder the fee of a
+    /// `challenge_assert` above its floor of 1 sat/vB: at the least,
+    /// `failure` pays the holder no more than the holder's own reserve.
+    #[test]
+    fn the_hub_reserve_is_at_least_its_links_floors_and_the_purse() {
+        const LEAST: u64 = 58_252;
+        let holder = HolderKeys::derive(&[1; 32], &[3; 32]).public();
+        let hub = HubKeys::from_secret(&[2; 32]).public();
+        let set = |reserve_hub: u64| {
+            let mut p = crate::opening::testing::base(&[3; 32]).parts().clone();
+            p.graph.id = licash::recovery::PI1_ALONE_FROM;
+            p.graph.reserve_alice = 25_000;
+            p.graph.reserve_hub = reserve_hub;
+            p.recipe.instances = 78;
+            p.recipe.kept = 10;
+            build(&Base::new(p)?, &holder, &hub, draft_hmsg(10))?.presign(OutPoint::null())
+        };
+        let named = |set: &[Presign], name: &str| set.iter().find(|p| p.name == name).cloned();
+        // What the links take of the contract before `failure`: each its
+        // floor and its outputs but the next link's (anchors, slots, the
+        // purse).
+        let taken = |set: &[Presign]| {
+            let funded = named(set, "request").unwrap().prevout.value;
+            (funded - named(set, "failure").unwrap().prevout.value).to_sat()
+        };
+        // What `failure` pays the holder of the reserves: the output
+        // before the rest's.
+        let paid = |set: &[Presign]| {
+            let failure = named(set, "failure").unwrap();
+            failure.tx.output[failure.tx.output.len() - 2]
+                .value
+                .to_sat()
+        };
+        let ample = set(100_000).unwrap();
+        assert_eq!(taken(&ample), LEAST);
+        assert_eq!(paid(&ample), 25_000 + 100_000 - LEAST);
+        let least = set(LEAST).unwrap();
+        assert_eq!(taken(&least), LEAST);
+        assert_eq!(paid(&least), 25_000);
+        // Below it, none is built: not by a smaller purse either, which
+        // half the hub's reserve bounds.
+        for reserve_hub in [LEAST - 1, 50_000, 40_000, 20_000] {
+            let error = set(reserve_hub).unwrap_err().to_string();
+            assert!(
+                error.contains("exceed the hub's reserve"),
+                "{reserve_hub}: {error}"
+            );
+        }
+    }
+
     /// A valid proof challenged pays as `success` does (Lichen's default
     /// would pay the hub everything): the graph every open contract
     /// signed. Only the hub's reserve is less, by what `challenge_assert`
