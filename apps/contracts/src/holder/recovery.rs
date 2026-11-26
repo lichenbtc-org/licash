@@ -1178,12 +1178,17 @@ impl<'a, T: Transport, C: Chain> Run<'a, T, C> {
     /// branches of those paying her whose activation its statement shows
     /// ([`activation::shown`]).
     ///
+    /// What is left of its cap, the notes she imported from a bridge of
+    /// hers fill, then the refunds of its locks owed on Bitcoin
+    /// ([`licash_wallet::Wallet::claim_imported_locks`]).
+    ///
     /// Nothing of it is published before its statement would owe it whole
     /// ([`owed_whole`]): a claim that would not be is made again without
     /// the payments under way (the locks its hub never certified, and the
     /// sends signed, unfinished, whose notes it claims after the others,
     /// their outputs to her as fallbacks), then without the locks paying
-    /// her, then without any lock, and one of her notes
+    /// her, then without any lock of hers; then without the locks
+    /// imported, then without the notes imported, and one of her notes
     /// alone that still would not be gives her recovery up, nothing spent.
     async fn claim(&self, state: &mut State, tip: u32) -> Result<Next> {
         // Before any note of hers is taken.
@@ -1232,11 +1237,16 @@ impl<'a, T: Transport, C: Chain> Run<'a, T, C> {
                 };
             }
             // What hers leave of her cap, the notes she imported from a
-            // bridge of hers fill ([`licash_wallet::Wallet::import_notes`]).
+            // bridge of hers fill ([`licash_wallet::Wallet::import_notes`]),
+            // then the refunds of its locks owed.
             if let Some(slot) = slots.iter().find(|s| s.id == self.id) {
                 let (cap, max) = left_of(slot, &notes, &locks);
                 let imported = self.wallet.claim_imported(&self.id, &keyset, cap, max)?;
                 notes.extend(imported);
+                let (cap, max) = left_of(slot, &notes, &locks);
+                let imported =
+                    (self.wallet).claim_imported_locks(&self.id, &keyset, tip, cap, max)?;
+                locks.extend(imported);
             }
             self.took
                 .store(!(notes.is_empty() && locks.is_empty()), Ordering::SeqCst);
@@ -1248,7 +1258,19 @@ impl<'a, T: Transport, C: Chain> Run<'a, T, C> {
         state.amount = self.amount(&notes, &funded, &locks);
         let mut sound = self.sound(&notes, &funded, &locks, tip).await?;
         if let Err(why) = &sound {
-            // The notes imported are dropped first, for good: hers alone may
+            // The locks imported are left out first, given back: the rest
+            // may be owed whole.
+            let released = self.wallet.release_imported_locks(&self.id, why)?;
+            if !released.is_empty() {
+                locks.retain(|l| !released.contains(&l.id));
+                if !(notes.is_empty() && locks.is_empty() && funded.is_empty()) {
+                    state.amount = self.amount(&notes, &funded, &locks);
+                    sound = self.sound(&notes, &funded, &locks, tip).await?;
+                }
+            }
+        }
+        if let Err(why) = &sound {
+            // The notes imported are dropped next, for good: hers alone may
             // be owed whole.
             let dropped = self.wallet.void_imported(&self.id, why)?;
             if !dropped.is_empty() {

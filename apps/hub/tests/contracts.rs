@@ -1317,7 +1317,9 @@ async fn a_holder_claims_the_notes_she_funded_that_a_silent_hub_never_issued() -
 /// Her wallet's coins on Bitcoin, all spent away, mined.
 /// The notes a bridge kept at the hub, frozen and exported to a holder of
 /// a contract there, are claimed with her own once she forces it closed on
-/// the silent hub, and swept to her with them.
+/// the silent hub, and swept to her with them: and the refunds of its two
+/// locks stuck there, one the hub certified and one it never saw, once
+/// expired at depth.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs bitcoind and a release build"]
 async fn a_holder_claims_the_notes_a_frozen_bridge_exported_her_on_a_silent_hub() -> Result<()> {
@@ -1328,7 +1330,7 @@ async fn a_holder_claims_the_notes_a_frozen_bridge_exported_her_on_a_silent_hub(
     let dir = tempfile::tempdir()?;
     let at = dir.path().join("hub");
     let (url, source, hub) = hub_serving(&rt, &at, None).await?;
-    let chain = Node(source);
+    let chain = Node(source.clone());
     let mine = dir.path().join("wallet");
     std::fs::create_dir(&mine)?;
     let file = mine.join("wallet.sqlite");
@@ -1351,15 +1353,44 @@ async fn a_holder_claims_the_notes_a_frozen_bridge_exported_her_on_a_silent_hub(
     // exported to her key there, imported apart from her balance.
     let bridged = dir.path().join("bridge");
     std::fs::create_dir(&bridged)?;
-    let kept = Wallet::create(
-        &bridged.join("wallet.sqlite"),
-        &[11; 32],
-        regtest,
-        Http::new(None)?,
-    )?;
+    let lose = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let losing = Losing {
+        http: Http::new(None)?,
+        lose: lose.clone(),
+    };
+    let kept = Wallet::create(&bridged.join("wallet.sqlite"), &[11; 32], regtest, losing)?;
     kept.add_hub(&url).await?;
     licash_bridge::Bridge::init(&kept)?;
     kept.receive(&pay(&hub, &at.join("seed"), &url, &kept.address(), 2_000)?)?;
+    // Two payments of the bridge's stuck on the hub: a lock it certified,
+    // never settled, and one whose request it never saw.
+    while !watch::step(&hub, &source).await? {}
+    let expiry = rt.height()? + 6;
+    let bob = licash::address::OwnerKeys::from_seed(&[0xbb; 32])?.address();
+    let stuck = kept
+        .lock(
+            &url,
+            &bob,
+            300,
+            licash::spend::lock_hash(&[7; 32]),
+            Some(expiry),
+        )
+        .await?;
+    ensure!(stuck.state == licash_wallet::LockState::Locked, "{stuck:?}");
+    lose.store(true, std::sync::atomic::Ordering::SeqCst);
+    let lost = kept
+        .lock(
+            &url,
+            &bob,
+            200,
+            licash::spend::lock_hash(&[8; 32]),
+            Some(expiry),
+        )
+        .await;
+    ensure!(
+        matches!(&lost, Err(licash_wallet::Error::Pending { .. })),
+        "{lost:?}"
+    );
     let config = licash_bridge::Config {
         hub: url.clone(),
         relays: vec!["ws://127.0.0.1:1".into()],
@@ -1383,33 +1414,45 @@ async fn a_holder_claims_the_notes_a_frozen_bridge_exported_her_on_a_silent_hub(
     let mut to = [0; 32];
     hex::decode_to_slice(wallet.bridge_key(&info)?, &mut to)?;
     let exported = bridge.export(&to).await?;
+    // All it held, but what the hub charges to lock and refund, if any.
+    let held = exported.amount + exported.locked;
     ensure!(
-        exported.amount == 2_000 && bridge.status()?.frozen,
+        exported.locks == 2 && held > 1_900 && held <= 2_000 && bridge.status()?.frozen,
         "{exported:?}"
     );
     let imported = wallet.import_notes(&exported.export.0)?;
-    ensure!(imported.amount == 2_000, "{imported:?}");
+    ensure!(
+        (imported.amount, imported.locks, imported.locked) == (exported.amount, 2, exported.locked),
+        "{imported:?}"
+    );
     let available =
         |w: &Wallet<Http>| -> Result<u64> { Ok(w.balance()?.iter().map(|b| b.available).sum()) };
     ensure!(available(&wallet)? == 3_000);
 
-    rt.mine(1)?;
+    // Past the locks' expiry at any depth the hub takes, well before her
+    // contract closes.
+    rt.mine_to_height(expiry + 12)?;
+    let closes = (holder::list(&file)?.iter().map(|c| c.assert_height).min()).context("none")?;
+    ensure!(expiry + 12 < closes, "{closes}");
     holder::resume(&wallet, &chain, &file).await?;
     empty(&rt, &wallet, &chain).await?;
-    // Her notes first, then the bridge's, within the cap left.
+    // Her notes first, then the bridge's, then its locks' refunds, within
+    // the cap left: published at once, her lock's end passed meanwhile.
     let forced = recovery::force_close(&wallet, &chain, &file, &opened.id, rate).await?;
     ensure!(
-        forced.stage == Stage::Claimed && forced.error.is_none(),
+        forced.stage == Stage::Published && forced.error.is_none(),
         "{forced:?}"
     );
     let notes = 7 + exported.notes as usize;
     ensure!(
-        (forced.claimed, forced.notes) == (3_000 + 2_000 + opened.funded, notes),
+        (forced.claimed, forced.notes) == (3_000 + held + opened.funded, notes),
         "{forced:?}"
     );
     let sources = wallet.imported_notes()?;
     ensure!(
-        sources.len() == 1 && sources[0].claimed as u64 == exported.notes && sources[0].void == 0,
+        sources.len() == 1
+            && sources[0].claimed as u64 == exported.notes + 2
+            && sources[0].void == 0,
         "{sources:?}"
     );
     // Claimed, not discarded: the bridge stays frozen.
@@ -1417,10 +1460,6 @@ async fn a_holder_claims_the_notes_a_frozen_bridge_exported_her_on_a_silent_hub(
     ensure!(refused.is_err(), "{refused:?}");
 
     // Through to the sweep, as with her own notes alone.
-    let lock_end = forced.next_at.context("no lock")?;
-    rt.mine_to_height(lock_end - 1)?;
-    let sent = recovery::advance(&wallet, &chain, &file, rate).await?;
-    ensure!(sent[0].stage == Stage::Published, "{sent:?}");
     rt.mine(1)?;
     let requested = &recovery::advance(&wallet, &chain, &file, rate).await?[0];
     ensure!(requested.stage == Stage::Requested, "{requested:?}");
@@ -3462,6 +3501,27 @@ impl licash_wallet::Transport for NoLock {
             return Err("lost".into());
         }
         self.0.request(url, body).await
+    }
+}
+
+/// A transport that loses every request to make a lock once `lose` is
+/// set: its hub never sees those, nor certifies them.
+struct Losing {
+    http: Http,
+    lose: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl licash_wallet::Transport for Losing {
+    async fn request(
+        &self,
+        url: &str,
+        body: Option<Vec<u8>>,
+    ) -> Result<licash_wallet::Response, String> {
+        let losing = self.lose.load(std::sync::atomic::Ordering::SeqCst);
+        if losing && body.is_some() && url.ends_with(licash_api::LOCK) {
+            return Err("lost".into());
+        }
+        self.http.request(url, body).await
     }
 }
 
