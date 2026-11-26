@@ -248,6 +248,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 "Frozen: {} notes worth {} sat exported. It pays nothing out until unfrozen.",
                 exported.notes, exported.amount
             );
+            if exported.locks > 0 {
+                eprintln!(
+                    "With the refunds of {} payments stuck on its hub, worth {} sat.",
+                    exported.locks, exported.locked
+                );
+            }
             Ok(())
         }
         Command::Unfreeze { yes } => {

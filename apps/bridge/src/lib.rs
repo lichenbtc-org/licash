@@ -317,13 +317,14 @@ impl<T: Transport> Bridge<T> {
     }
 
     /// Freeze it for good, then seal every note its wallet holds to `to`,
-    /// an x-only key, for the wallet of that key at this bridge to claim in
-    /// a recovery of its own should the hub stop cooperating. Frozen
-    /// first: it pays nothing out, takes no new invoice, nor unlinks, from
-    /// then on; the invoices it made are still taken. Refused while a
-    /// payment is under way, whose notes are its lock's: exported once
-    /// decided. The same again exports the same notes, and those received
-    /// meanwhile.
+    /// an x-only key, and the refund of each lock of its payments under
+    /// way, for the wallet of that key at this bridge to claim in a
+    /// recovery of its own should the hub stop cooperating. Frozen first:
+    /// it pays nothing out, takes no new invoice, nor unlinks, from then
+    /// on; the invoices it made are still taken. Refused while a payment
+    /// under way has no lock yet, its notes neither its own nor a lock's:
+    /// exported once its lock is made, or it is decided. The same again
+    /// exports the same notes, and those received meanwhile.
     pub async fn export(&self, to: &[u8; 32]) -> Result<licash_api::bridge::Exported, Error> {
         let at = now();
         self.store.write(|tx| {
@@ -334,15 +335,22 @@ impl<T: Transport> Bridge<T> {
             Ok(())
         })?;
         let _notes = self.notes.lock().await;
-        let pending = self.store.read(|c| Ok(store::pending_payments(c)?.len()))?;
-        let paying = !self
-            .paying
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .is_empty();
-        if pending > 0 || paying {
+        // Frozen, no payment starts: each under way is one of these, and
+        // one whose lock stands keeps it. One whose lock is settled is
+        // decided at the next round, its notes then free: a retry's may be
+        // about to be made.
+        let pending = self.store.read(store::pending_payments)?;
+        let mut unlocked = 0;
+        for payment in &pending {
+            let stands = (self.lock_for(payment)?)
+                .is_some_and(|l| matches!(l.state, LockState::Requested | LockState::Locked));
+            if !stands {
+                unlocked += 1;
+            }
+        }
+        if unlocked > 0 {
             return Err(Error::Unavailable(format!(
-                "frozen, but {pending} payments are under way: exported once they are decided"
+                "frozen, but {unlocked} payments are being made: exported once they are sent"
             )));
         }
         let source = self.keys.public_key().to_bytes();
@@ -352,12 +360,14 @@ impl<T: Transport> Bridge<T> {
             .map_err(wallet_error)?;
         tracing::warn!(
             to = %hex::encode(to), notes = sealed.notes, amount = sealed.amount,
-            "frozen, its notes exported"
+            locks = sealed.locks, locked = sealed.locked, "frozen, its notes exported"
         );
         Ok(licash_api::bridge::Exported {
             export: licash_api::Hex(sealed.sealed),
             notes: sealed.notes as u64,
             amount: sealed.amount,
+            locks: sealed.locks as u64,
+            locked: sealed.locked,
         })
     }
 

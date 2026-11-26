@@ -946,6 +946,55 @@ async fn an_owner_freezes_the_bridge_and_imports_its_notes_to_claim() {
     wallet.withdraw_bridge(BRIDGE, HUB, 5).await.unwrap();
 }
 
+/// A payment its hub holds, and may never decide should it stop
+/// answering: once its lock is made, the bridge exports its refund with its
+/// notes, for its owner to claim on Bitcoin.
+#[tokio::test]
+async fn a_bridge_stuck_on_a_payment_exports_its_lock_with_its_notes() {
+    let net = Net::new(false).await;
+    let wallet = net.user(9, 200).await;
+    wallet.add_bridge(BRIDGE, Some(&net.pairing)).await.unwrap();
+    wallet.top_up_bridge(BRIDGE, HUB, 30, None).await.unwrap();
+    net.settle(&wallet).await;
+    let mut key = [0u8; 32];
+    let info = net.bridge.info().unwrap();
+    hex::decode_to_slice(wallet.bridge_key(&info).unwrap(), &mut key).unwrap();
+
+    let request = net.node.invoice(10_000, [13; 32], 18, Outcome::Hang);
+    let bridge_ = net.bridge.clone();
+    let paying = tokio::spawn(async move {
+        let withdraw = bridge::Withdraw {
+            invoice: request,
+            max_fee: None,
+        };
+        bridge_.withdraw(&key, &withdraw).await
+    });
+    let mut locked = false;
+    for _ in 0..100 {
+        net.gateway.round().await;
+        let locks = net.bridge.wallet().locks().unwrap();
+        if locks
+            .iter()
+            .any(|l| l.state == licash_wallet::LockState::Locked)
+        {
+            locked = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(locked, "no lock made");
+
+    // Under way, its lock made: exported, the lock's refund with it.
+    let (imported, _) = wallet.export_bridge(BRIDGE).await.unwrap();
+    assert!(net.bridge.status().unwrap().frozen);
+    assert_eq!(imported.locks, 1);
+    assert!(imported.locked >= 10, "{imported:?}");
+    let listed = &wallet.imported_notes().unwrap()[0];
+    assert_eq!((listed.locks, listed.locked), (1, imported.locked));
+    assert!(!paying.is_finished());
+    paying.abort();
+}
+
 #[tokio::test]
 async fn an_open_bridge_exports_to_its_operator_only() {
     let net = Net::new(true).await;
