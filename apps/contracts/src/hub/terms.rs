@@ -159,8 +159,9 @@ impl Timing {
                 // cover the hub's answer to a challenge at some 25 sat/vB,
                 // about 520 000 sat, not RESERVE_HUB's 100 000. And her reserve
                 // must afford a forced close of the widest filing at its floor
-                // (`licash_contract::reserve::reserve_for`: some 172 000 sat at
-                // 10 sat/vB, the hub's at least twice that, her purse being at
+                // (`licash_contract::reserve::reserve_for`: some 170 000 sat at
+                // 10 sat/vB of the least cap, 182 000 of the largest, the hub's
+                // at least twice that, her purse being at
                 // most half of it), not RESERVE_ALICE's 20 000: quotes below
                 // the floor are refused (`Quote::check`).
                 _ => bail!("the hub offers no contracts on {profile} yet"),

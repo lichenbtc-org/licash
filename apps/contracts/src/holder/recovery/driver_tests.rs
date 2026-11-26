@@ -924,6 +924,43 @@ fn a_dispute_is_made_of_transactions_of_known_size() {
         eprintln!("{name:>18}: {vsize:>6} vB");
         assert!(vsize <= most, "{name} weighs {vsize} vB, more than {most}");
     }
+    // Each terminal weighs no more than her reserve counts for it, with the
+    // margin her fee coin is made at, of this graph and of the widest: its
+    // payout's outputs added, the rest's too, each like the others.
+    let mut g = o.base.parts().graph.clone();
+    let paid = (g.low_bits..g.bits).count();
+    let mut widest = 0;
+    for name in [
+        "respond_timeout",
+        "contest_timeout",
+        "request_timeout",
+        "success",
+        "failure",
+    ] {
+        let mut tx = fee(name);
+        widest = widest.max(tx.vsize() as u64);
+        let counted = licash_contract::reserve::terminal_vsize(&g);
+        assert!(
+            TIMEOUT_FEE_MARGIN * tx.vsize() as u64 <= counted,
+            "{name} of {paid} outputs"
+        );
+        let output = tx.output[0].clone();
+        for _ in paid..(31 - g.low_bits as usize + 1) {
+            tx.output.insert(0, output.clone());
+        }
+        let mut wide = g.clone();
+        wide.bits = 31;
+        let counted = licash_contract::reserve::terminal_vsize(&wide);
+        assert!(
+            TIMEOUT_FEE_MARGIN * tx.vsize() as u64 <= counted,
+            "{name} of 31 bits and a rest"
+        );
+    }
+    // The widest exactly as counted of as many outputs, a bit fewer and a
+    // rest's, at her margin.
+    g.bits -= 1;
+    let counted = licash_contract::reserve::terminal_vsize(&g);
+    assert_eq!(TIMEOUT_FEE_MARGIN * widest, counted);
 }
 
 /// A claim its statement would find wrong, and owe nothing, is told so
