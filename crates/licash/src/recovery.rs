@@ -18,7 +18,7 @@ use crate::{
     base::Base,
     chain::{Activation, ActivationRef, Chain, Checkpoint, Inclusion},
     claim::{self, ActivationRecord, Branch, Item, Source, UnsignedClaim, MAX_ITEMS},
-    crypto::{self, generator_mul, Point, ScalarBytes, Signature},
+    crypto::{self, Point, ScalarBytes, Signature},
     disclosure::{Disclosures, SLOTS},
     hold::{self, Envelope, Record},
     note::{Keyset, Message, Note, PUBLIC_FIELDS_BYTES},
@@ -631,9 +631,7 @@ fn opens(
     message: &Message,
     blinding: &ScalarBytes,
 ) -> Result<bool, Error> {
-    let blinded = message.identifier()?.to_projective()? + generator_mul(&blinding.to_scalar()?);
-    Ok(output.denomination() == message.denomination()
-        && output.blinded() == Point::from_projective(&blinded))
+    output.opened_by(message, blinding)
 }
 
 /// The Hub's evidence against a claim. Each evidence must void at least one

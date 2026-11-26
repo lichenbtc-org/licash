@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    crypto::{tagged_hash, Point},
+    crypto::{generator_mul, tagged_hash, Point, ScalarBytes},
     note::{non_identity, Derivation, Keyset, Message, Note, MESSAGE_BYTES},
     Error,
 };
@@ -303,6 +303,18 @@ impl Output {
     }
     pub fn unlink_commitment(&self) -> &[u8; 32] {
         &self.unlink_commitment
+    }
+
+    /// Whether `message` blinded by `blinding` is this output: what a claim
+    /// of it as an item opens it with. Says nothing of its unlink
+    /// commitment, nor of who may sign for `message`.
+    pub fn opened_by(&self, message: &Message, blinding: &ScalarBytes) -> Result<bool, Error> {
+        let blinded =
+            message.identifier()?.to_projective()? + generator_mul(&blinding.to_scalar()?);
+        Ok(
+            self.denom == message.denomination()
+                && self.blinded == Point::from_projective(&blinded),
+        )
     }
 
     fn encode(&self, bytes: &mut Vec<u8>) {
