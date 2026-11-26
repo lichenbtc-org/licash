@@ -13,6 +13,9 @@
 //!   licash-r0 hp-reads <base.bin> [program]
 //!                                          whether a program reads a statement's input of a Base
 //!   licash-r0 bench <out.json> [program]   how fast it proves, as JSON
+//!   licash-r0 range-prove <job-dir> <from> <to>
+//!                                          prove the segments of a job another machine
+//!                                          hands this one (`LICASH_R0_WORKERS` there)
 //!
 //! A program is a packed guest's path, or an image id kept in the programs
 //! directory ([`probe::share`]); by default the checkout's `r0/guests/hp.bin`
@@ -27,6 +30,7 @@
 
 mod bench;
 mod chain;
+mod fanout;
 mod groth16;
 mod hp;
 mod probe;
@@ -218,9 +222,12 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&probe::probe(program.first().copied()))?);
             Ok(())
         }
+        // A job of another machine's proof (`fanout`), on the GPU if one is
+        // usable: the join of its segments, left as <job-dir>/range.
+        ["range-prove", dir, from, to] => fanout::range_command(dir.as_ref(), from, to),
         // The CUDA build's own check of its GPU, for the CPU build's probe.
         ["probe-gpu"] => probe::gpu(),
-        _ => bail!("usage: licash-r0 pack <elf> <out.bin> | id <program.bin> | hp-exec <input.bin> [program] [--assume <receipt>].. | hp-prove <input.bin> <work-dir> [program] [--assume <receipt>].. | chain-prove <batch.bin> <work-dir> [--assume <receipt>] | hp-reads <base.bin> [program] | probe [program] | bench <out.json> [program]"),
+        _ => bail!("usage: licash-r0 pack <elf> <out.bin> | id <program.bin> | hp-exec <input.bin> [program] [--assume <receipt>].. | hp-prove <input.bin> <work-dir> [program] [--assume <receipt>].. | chain-prove <batch.bin> <work-dir> [--assume <receipt>] | range-prove <job-dir> <from> <to> | hp-reads <base.bin> [program] | probe [program] | bench <out.json> [program]"),
     }
 }
 

@@ -160,7 +160,8 @@ pub fn prove(path: &str, work: &Path, program: Option<&str>, assume: &[String]) 
     Ok(())
 }
 
-/// `cpu` at the CPU's segment size, or, if a CUDA build is beside this one
+/// `cpu` at the CPU's segment size (a GPU's largest if other machines prove
+/// segments too, [`crate::fanout`]: theirs are GPUs), or, if a CUDA build is beside this one
 /// and a GPU usable, that build's `command` (`hp-stark`, `chain-stark`) on
 /// `path` and `work`, at the largest segment size that fits (a smaller one if
 /// it fails, each attempt a process of its own).
@@ -173,7 +174,11 @@ pub fn on_device(
     cpu: impl FnOnce(u32) -> Result<()>,
 ) -> Result<()> {
     let Some(cuda) = probe::cuda_build().filter(|_| probe::gpu_usable()) else {
-        return cpu(super::segment_override()?.unwrap_or(CPU_PO2));
+        let po2 = match crate::fanout::workers()?.is_empty() {
+            true => CPU_PO2,
+            false => GPU_PO2[0],
+        };
+        return cpu(super::segment_override()?.unwrap_or(po2));
     };
     let sizes = super::segment_override()?.map_or(GPU_PO2.to_vec(), |p| vec![p]);
     let mut failed = None;
