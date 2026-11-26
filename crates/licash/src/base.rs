@@ -85,6 +85,9 @@ pub struct GraphTerms {
 }
 
 impl GraphTerms {
+    /// What the payout's binary outputs pay at most, `2^bits - 1` units:
+    /// the whole pool of a contract whose cap is at most that, else all
+    /// but its rest ([`Parts::rest`]).
     pub fn maximum_amount(&self) -> Result<u32, Error> {
         if !(1..=32).contains(&self.bits) || self.low_bits >= self.bits {
             return Err(bad("native graph amount dimensions"));
@@ -105,14 +108,6 @@ impl GraphTerms {
         .into_iter()
         .map(u32::from)
         .sum()
-    }
-
-    pub fn graph_value(&self) -> Result<u64, Error> {
-        u64::from(self.maximum_amount()?)
-            .checked_add(self.reserve_alice)
-            .and_then(|sum| sum.checked_add(self.reserve_hub))
-            .filter(|sum| *sum <= MAX_MONEY)
-            .ok_or_else(|| bad("native graph monetary range"))
     }
 }
 
@@ -197,6 +192,46 @@ pub struct Parts {
     pub close: Close,
 }
 
+impl Parts {
+    /// `R`, in units: the payout's output beyond its binary ones (Lichen's
+    /// `Terms::rest`), so that the pool is the cap exactly. 0 for a cap of
+    /// at most `2^bits - 1` units, whose pool is `2^bits - 1`; else the
+    /// cap's units past those, refused unless at least `2^low_bits` (an
+    /// output above dust, as the binary ones) and below `2^bits` (the
+    /// binary outputs and the rest's meet), with `bits` at most 31 (the
+    /// rest's bit `bits` in the signed 32-bit word).
+    pub fn rest(&self) -> Result<u32, Error> {
+        let binary = self.graph.maximum_amount()?;
+        let Some(rest) = self.cap.checked_sub(binary).filter(|rest| *rest > 0) else {
+            return Ok(0);
+        };
+        let g = &self.graph;
+        if g.bits > 31 || u64::from(rest) >= 1u64 << g.bits || u64::from(rest) < 1u64 << g.low_bits
+        {
+            return Err(bad("native payout rest"));
+        }
+        Ok(rest)
+    }
+
+    /// The payout's pool, in units: what its outputs pay in all, the
+    /// binary ones' `2^bits - 1` and the rest's.
+    pub fn pool(&self) -> Result<u32, Error> {
+        self.graph
+            .maximum_amount()?
+            .checked_add(self.rest()?)
+            .ok_or_else(|| bad("native payout rest"))
+    }
+
+    /// What the contract output locks: the pool and both reserves.
+    pub fn graph_value(&self) -> Result<u64, Error> {
+        u64::from(self.pool()?)
+            .checked_add(self.graph.reserve_alice)
+            .and_then(|sum| sum.checked_add(self.graph.reserve_hub))
+            .filter(|sum| *sum <= MAX_MONEY)
+            .ok_or_else(|| bad("native graph monetary range"))
+    }
+}
+
 /// An unsigned canonical preimage, NOT an accepted/prepared opening, a trusted
 /// checkpoint, input reservation, or permission to release funding signatures.
 #[derive(Clone)]
@@ -252,7 +287,6 @@ impl Base {
             || p.deposit[..32] == [0; 32]
             || p.parties[0].payment == p.parties[1].payment
             || p.cap == 0
-            || p.cap > p.graph.maximum_amount()?
         {
             return Err(bad("native Base identity or capacity"));
         }
@@ -272,14 +306,14 @@ impl Base {
         {
             return Err(bad("native default close"));
         }
-        g.graph_value()?;
+        // A cap past the binary outputs' is paid by a rest of a valid size.
+        p.graph_value()?;
         let c = &p.chain;
         if g.unit_sats != 1
             || g.dust != 330
             || (1u64 << g.low_bits) < g.dust
             || g.reserve_alice < g.dust
             || g.reserve_hub < g.dust
-            || g.deposit_units > g.maximum_amount()?
             || g.to_self_delay == 0
             || g.delta == 0
             || g.delta_prime == 0

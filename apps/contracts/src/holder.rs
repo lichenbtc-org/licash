@@ -629,13 +629,13 @@ fn inspection(
         .value
         .to_sat();
     ensure!(
-        locked == parts.graph.graph_value()?,
+        locked == parts.graph_value()?,
         "contract lock disagrees with its signed terms"
     );
     Ok(Inspection {
         address: bitcoin::Address::from_script(&script, network)?.to_string(),
         locked,
-        payout_pool: u64::from(parts.graph.maximum_amount()?),
+        payout_pool: u64::from(parts.pool()?),
         holder_reserve: parts.graph.reserve_alice,
         hub_reserve: parts.graph.reserve_hub,
         forced_close_rate: licash_contract::reserve::affordable_rate_at_most(&parts.graph) as f64

@@ -40,7 +40,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use ark_bn254::Bn254;
 use ark_groth16::Proof;
-use licash::base::{Base, GraphTerms, Party};
+use licash::base::{Base, GraphTerms, Parts, Party};
 use licash_statement::{script_digit, JOURNAL_LEN, SLOT_VOUT};
 use lichen_babe::graph::{link_leaf, verify_drop, Front, FrontLink, Graph, Payout, Tail};
 use lichen_babe::reveal::{complete, reveal_args, LamportPub, Preimage};
@@ -183,9 +183,11 @@ pub fn party_pub(p: &Party) -> Result<PartyPubKeys> {
     })
 }
 
-/// Base's graph terms as Lichen's payout reads them.
-pub fn terms(g: &GraphTerms) -> Terms {
-    Terms {
+/// Base's graph terms as Lichen's payout reads them: its rest that of the
+/// cap past the binary outputs ([`Parts::rest`]).
+pub fn terms(p: &Parts) -> Result<Terms> {
+    let g = &p.graph;
+    Ok(Terms {
         id: g.id,
         unit: Amount::from_sat(g.unit_sats),
         bits: g.bits.into(),
@@ -194,8 +196,8 @@ pub fn terms(g: &GraphTerms) -> Terms {
         t_close: g.close_height,
         reserve_alice: Amount::from_sat(g.reserve_alice),
         reserve_hub: Amount::from_sat(g.reserve_hub),
-        rest: 0,
-    }
+        rest: p.rest()?,
+    })
 }
 
 /// The dispute's windows, relative, in blocks: `w_H` for the hub's
@@ -244,7 +246,7 @@ pub fn build(base: &Base, holder: &HolderPub, hub: &HubPub, hmsg: Vec<Hash>) -> 
     let pubs = [party_pub(&p.parties[0])?, party_pub(&p.parties[1])?];
     HubProves::new(
         Spec {
-            terms: terms(g),
+            terms: terms(p)?,
             // The default returns her reserve to the script her Base names,
             // not her payout script.
             close_spk: ScriptBuf::from_bytes(p.close.script.clone()),
@@ -853,10 +855,7 @@ mod tests {
         };
         let draft = out(&hub, draft_hmsg(2));
         assert_eq!(draft, out(&other, vec![[7; 32], [8; 32]]));
-        assert_eq!(
-            draft.value.to_sat(),
-            base.parts().graph.graph_value().unwrap()
-        );
+        assert_eq!(draft.value.to_sat(), base.parts().graph_value().unwrap());
         let mut theirs = holder.clone();
         theirs.b_key = HolderKeys::derive(&[1; 32], &[4; 32]).public().b_key;
         assert_ne!(

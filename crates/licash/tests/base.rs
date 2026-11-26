@@ -443,3 +443,51 @@ fn header_budget_must_reach_the_work_on_the_latest_response() {
     p.chain.max_headers = span - 1;
     assert!(Base::new(p).is_err());
 }
+
+/// A cap past the binary outputs' `2^bits - 1` units is paid by a rest
+/// output of the units past them, at least `2^low_bits` and below
+/// `2^bits`, so the pool is the cap exactly; a cap of at most `2^bits - 1`
+/// has none, and its pool is those, as before there was a rest.
+#[test]
+fn a_cap_past_the_graphs_bits_is_paid_by_a_rest() {
+    let mut p = parts();
+    assert_eq!((p.rest().unwrap(), p.pool().unwrap()), (0, (1 << 21) - 1));
+    assert_eq!(p.graph_value().unwrap(), (1 << 21) - 1 + 120_000);
+    p.graph.bits = 17;
+    for (cap, rest) in [
+        (131_071, 0),
+        (131_071 + 512, 512),
+        (200_000, 200_000 - 131_071),
+        (262_142, 131_071),
+    ] {
+        p.cap = cap;
+        let base = Base::new(p.clone()).unwrap();
+        let restored = Base::from_bytes(&base.to_bytes()).unwrap();
+        assert_eq!(restored.parts().rest().unwrap(), rest, "{cap}");
+        assert_eq!(restored.parts().pool().unwrap(), cap);
+        assert_eq!(
+            restored.parts().graph_value().unwrap(),
+            u64::from(cap) + 120_000
+        );
+    }
+    // Her deposit may be past the binary outputs too, not past the cap.
+    p.graph.deposit_units = 200_000;
+    assert!(Base::new(p.clone()).is_ok());
+    p.graph.deposit_units = 100;
+    // A rest below 2^low_bits, or not below 2^bits.
+    for cap in [131_072, 131_071 + 511, 262_143, u32::MAX] {
+        p.cap = cap;
+        assert!(Base::new(p.clone()).is_err(), "{cap}");
+    }
+    // The rest's bit is the word's 32nd at most.
+    p.graph.bits = 31;
+    p.cap = u32::MAX - 1;
+    assert_eq!(
+        Base::new(p.clone()).unwrap().parts().rest().unwrap(),
+        (1 << 31) - 1
+    );
+    p.cap = u32::MAX;
+    assert!(Base::new(p.clone()).is_err());
+    p.graph.bits = 32;
+    assert_eq!(Base::new(p).unwrap().parts().rest().unwrap(), 0);
+}

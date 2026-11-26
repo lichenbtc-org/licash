@@ -334,7 +334,7 @@ fn peek(state: &[u8]) -> Option<Terms> {
         close: p.graph.close_height,
         fee: p.fees.opening_fee_quote,
         reserve: p.graph.reserve_alice,
-        graph: p.graph.graph_value().ok()?,
+        graph: p.graph_value().ok()?,
         funding: peek.funding.map(|tx| tx.compute_txid()),
     })
 }
