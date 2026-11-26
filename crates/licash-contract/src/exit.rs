@@ -6,7 +6,7 @@
 //! follows the chain.
 
 use anyhow::{ensure, Context, Result};
-use licash_statement::{Request, Respond, SlotSpend};
+use licash_statement::{Carrier, Request, Respond, SlotSpend};
 use lichen_btc::bitcoin::consensus::serialize;
 use lichen_btc::bitcoin::hashes::{sha256d, Hash as _};
 use lichen_btc::bitcoin::{Block, Transaction, Txid, Witness};
@@ -108,10 +108,23 @@ pub fn request(funding: &Transaction, block: &Block, txid: &Txid) -> Result<Requ
     })
 }
 
-/// Transaction `txid` in `block`, by the txid tree (its non-witness
-/// serialization): a slot's spender, her publication or the hub's
-/// disclosure.
-pub fn slot_spend(block: &Block, txid: &Txid) -> Result<SlotSpend> {
+/// Transaction `txid` in `block`, a slot's spender, her publication or
+/// the hub's disclosure, as the contract's `carrier` reads it: by the txid
+/// tree (its non-witness serialization) for nulldata, by the witness tree
+/// (as [`respond`]) for a leaf's envelope.
+pub fn slot_spend(block: &Block, txid: &Txid, carrier: Carrier) -> Result<SlotSpend> {
+    if carrier == Carrier::Leaf {
+        let r = respond(block, txid)?;
+        return Ok(SlotSpend {
+            tx: r.tx,
+            header: r.header,
+            index: r.index,
+            path: r.path,
+            coinbase: r.coinbase,
+            coinbase_path: r.coinbase_path,
+            reserved: Some(r.reserved),
+        });
+    }
     let index = position(block, txid)?;
     let ids = txids(block);
     Ok(SlotSpend {
@@ -121,6 +134,7 @@ pub fn slot_spend(block: &Block, txid: &Txid) -> Result<SlotSpend> {
         path: merkle_path(&ids, index),
         coinbase: bare(&block.txdata[0]),
         coinbase_path: merkle_path(&ids, 0),
+        reserved: None,
     })
 }
 
@@ -234,12 +248,31 @@ mod tests {
             })
             .unwrap();
         assert_eq!(witness[0], b"b and E");
-        let s = slot_spend(&b, &published.compute_txid()).unwrap();
+        let s = slot_spend(&b, &published.compute_txid(), Carrier::Nulldata).unwrap();
+        let slot_op = slot;
         let slot = licash_statement::btc::OutPoint {
             txid: slot.txid.to_byte_array(),
             vout: 2,
         };
         assert_eq!(s.carrying(&slot).unwrap(), b"the claim");
+        // in an envelope, by the witness tree: read under a leaf carrier
+        // alone, its nulldata none
+        let script = licash_statement::envelope_script(&[0x4b; 32], &[0xab; 2000]).unwrap();
+        let mut revealed = tx(&[slot_op], &[&[3u8; 65]], vec![out(500, vec![0x51])]);
+        revealed.input.push(TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([0xc7; 32]),
+                vout: 0,
+            },
+            witness: Witness::from_slice(&[&[6u8; 64][..], &script, &[0xc0u8; 33]]),
+            ..Default::default()
+        });
+        let b3 = block(vec![revealed.clone()]);
+        let leaf = slot_spend(&b3, &revealed.compute_txid(), Carrier::Leaf).unwrap();
+        assert_eq!(leaf.carrying(&slot).unwrap(), vec![0xab; 2000]);
+        assert_eq!(leaf.txid(), Some(revealed.compute_txid().to_byte_array()));
+        let bare = slot_spend(&b3, &revealed.compute_txid(), Carrier::Nulldata).unwrap();
+        assert_eq!(bare.carrying(&slot).unwrap(), Vec::<u8>::new());
         // the response, spending the request's output 0
         let respond_tx = tx(
             &[OutPoint {

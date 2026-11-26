@@ -94,6 +94,12 @@ pub fn claim_script(bytes: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let mut s = vec![0x6a];
+    push_all(&mut s, bytes);
+    (s.len() <= CARRIER_BUDGET).then_some(s)
+}
+
+/// `bytes` as pushes of at most 520, in order, appended to `s`.
+fn push_all(s: &mut Vec<u8>, bytes: &[u8]) {
     for chunk in bytes.chunks(CARRIER_PUSH) {
         if let [n @ 1..=16] = chunk {
             s.push(0x50 + n);
@@ -120,15 +126,90 @@ pub fn claim_script(bytes: &[u8]) -> Option<Vec<u8>> {
             }
         }
     }
+}
+
+/// Where a link's slot spend carries its bytes, which the contract's
+/// graph fixes: in a nulldata output ([`claim_script`]), or in the leaf
+/// script of an input it spends by its script path ([`envelope_script`]),
+/// out of the txid and in the witness, which costs a quarter as much and
+/// which Bitcoin Core relays since long before it relayed large nulldata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Carrier {
+    Nulldata,
+    Leaf,
+}
+
+/// The envelope's start after its key: `OP_CHECKSIG OP_FALSE OP_IF`.
+const ENVELOPE_OPEN: [u8; 3] = [0xac, 0x00, 0x63];
+/// Its end: `OP_ENDIF`.
+const ENVELOPE_CLOSE: u8 = 0x68;
+
+/// The leaf script of an output only `key` (x-only) spends that carries
+/// `bytes` when spent by it: `<key> OP_CHECKSIG OP_FALSE OP_IF`, pushes of
+/// at most 520, `OP_ENDIF`. The branch never runs, so the bytes are any;
+/// the output commits to the script, so its spend carries them, and no
+/// other, whoever relays it. None if they don't fit the budget.
+pub fn envelope_script(key: &[u8; 32], bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.len() >= CARRIER_BUDGET {
+        return None;
+    }
+    let mut s = vec![0x20];
+    s.extend_from_slice(key);
+    s.extend_from_slice(&ENVELOPE_OPEN);
+    push_all(&mut s, bytes);
+    s.push(ENVELOPE_CLOSE);
     (s.len() <= CARRIER_BUDGET).then_some(s)
+}
+
+/// The bytes an [`envelope_script`] carries, if `script` is one (of any
+/// key), else None.
+pub fn enveloped(script: &[u8]) -> Option<Vec<u8>> {
+    let inner = script
+        .strip_prefix(&[0x20][..])
+        .and_then(|s| s.get(32..))
+        .and_then(|s| s.strip_prefix(&ENVELOPE_OPEN[..]))
+        .and_then(|s| s.strip_suffix(&[ENVELOPE_CLOSE][..]))?;
+    Some(pushes_only(inner)?.concat())
+}
+
+/// The leaf script of a witness spending by a taproot script path
+/// (BIP341: its annex, if any, left out; the script second to last, above
+/// the control block), if it is one.
+fn leaf_script<'a>(witness: &[&'a [u8]]) -> Option<&'a [u8]> {
+    let items = match witness {
+        [rest @ .., last] if rest.len() >= 2 && last.first() == Some(&0x50) => rest,
+        all => all,
+    };
+    let [.., script, control] = items else {
+        return None;
+    };
+    let tapscript = control.first().is_some_and(|b| b & 0xfe == 0xc0);
+    let shaped = control.len() >= 33 && (control.len() - 33) % 32 == 0;
+    (tapscript && shaped).then_some(*script)
+}
+
+/// The bytes a transaction (witness serialization) carries in envelopes:
+/// those of each input spending an [`envelope_script`] by its script path,
+/// in input order. A leaf script that isn't one carries nothing.
+pub fn carried_in_leaves(tx: &btc::WitnessTx) -> Vec<u8> {
+    let mut out = vec![];
+    for witness in &tx.witness {
+        if let Some(bytes) = leaf_script(witness).and_then(enveloped) {
+            out.extend_from_slice(&bytes);
+        }
+    }
+    out
 }
 
 /// The bytes the pushes of a nulldata script (`OP_RETURN` then pushes
 /// only) push, in order. None if it isn't one.
 pub fn pushes(script: &[u8]) -> Option<Vec<&[u8]>> {
-    if script.first() != Some(&0x6a) {
-        return None;
-    }
+    pushes_only(script.strip_prefix(&[0x6a][..])?)
+}
+
+/// The bytes `script`'s pushes push, in order: None unless it is pushes
+/// only, each of at most 520.
+fn pushes_only(script: &[u8]) -> Option<Vec<&[u8]>> {
     // The byte `OP_0`, `OP_1NEGATE` and `OP_1`..`OP_16` push
     const PUSHED: [&[u8]; 18] = [
         b"",
@@ -151,7 +232,7 @@ pub fn pushes(script: &[u8]) -> Option<Vec<&[u8]>> {
         &[16],
     ];
     let mut out = vec![];
-    let mut at = 1;
+    let mut at = 0;
     while at < script.len() {
         let op = script[at];
         at += 1;
@@ -374,7 +455,11 @@ impl Request {
 }
 
 /// The confirmed spender of a link's slot (`request`'s: her publication;
-/// `respond`'s: the hub's disclosure), in its block's txid tree.
+/// `respond`'s: the hub's disclosure) in its block: of a nulldata
+/// [`Carrier`], by the txid tree (`tx` its non-witness serialization,
+/// `reserved` none); of a leaf one, by the witness tree, as [`Respond`]
+/// is (`tx` its witness serialization, `reserved` the coinbase's witness
+/// reserved value), its envelopes in its witness.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlotSpend {
     pub tx: Vec<u8>,
@@ -383,24 +468,53 @@ pub struct SlotSpend {
     pub path: Vec<Hash>,
     pub coinbase: Vec<u8>,
     pub coinbase_path: Vec<Hash>,
+    pub reserved: Option<Hash>,
 }
 
 impl SlotSpend {
-    /// The bytes it carries (none if its nulldata isn't pushes only), if
-    /// it is in its block and spends `slot`.
+    /// The bytes it carries (of nulldata, none if its nulldata isn't
+    /// pushes only), if it is in its block and spends `slot`.
     pub fn carrying(&self, slot: &OutPoint) -> Option<Vec<u8>> {
-        if !btc::in_block(
-            &self.tx,
-            &Header(self.header),
-            self.index,
-            &self.path,
-            &self.coinbase,
-            &self.coinbase_path,
-        ) {
-            return None;
+        let header = Header(self.header);
+        match &self.reserved {
+            None => {
+                if !btc::in_block(
+                    &self.tx,
+                    &header,
+                    self.index,
+                    &self.path,
+                    &self.coinbase,
+                    &self.coinbase_path,
+                ) {
+                    return None;
+                }
+                let tx = btc::parse_tx(&self.tx).filter(|tx| tx.inputs.contains(slot))?;
+                Some(carried(&tx).unwrap_or_default())
+            }
+            Some(reserved) => {
+                if !btc::witness_in_block(
+                    &self.tx,
+                    &header,
+                    self.index,
+                    &self.path,
+                    &self.coinbase,
+                    &self.coinbase_path,
+                    reserved,
+                ) {
+                    return None;
+                }
+                let tx = btc::parse_witness_tx(&self.tx).filter(|t| t.tx.inputs.contains(slot))?;
+                Some(carried_in_leaves(&tx))
+            }
         }
-        let tx = btc::parse_tx(&self.tx).filter(|tx| tx.inputs.contains(slot))?;
-        Some(carried(&tx).unwrap_or_default())
+    }
+
+    /// Its txid.
+    pub fn txid(&self) -> Option<Hash> {
+        match self.reserved {
+            None => Some(sha256d(&self.tx)),
+            Some(_) => Some(sha256d(&btc::bare_tx(&self.tx)?)),
+        }
     }
 
     pub fn write(&self, w: &mut W) {
@@ -410,9 +524,14 @@ impl SlotSpend {
         w.list(&self.path);
         w.bytes(&self.coinbase);
         w.list(&self.coinbase_path);
+        if let Some(reserved) = &self.reserved {
+            w.put(reserved);
+        }
     }
 
-    pub fn read(r: &mut R) -> Result<SlotSpend, Reject> {
+    /// One written by [`Self::write`] of a contract whose slots `carrier`
+    /// carries: the shape is the contract's, not the input's to choose.
+    pub fn read(r: &mut R, carrier: Carrier) -> Result<SlotSpend, Reject> {
         Ok(SlotSpend {
             tx: r.bytes()?,
             header: r.take()?,
@@ -420,6 +539,10 @@ impl SlotSpend {
             path: r.list()?,
             coinbase: r.bytes()?,
             coinbase_path: r.list()?,
+            reserved: match carrier {
+                Carrier::Nulldata => None,
+                Carrier::Leaf => Some(r.take()?),
+            },
         })
     }
 }
@@ -638,15 +761,17 @@ impl Exit {
         }
     }
 
-    pub fn read(r: &mut R) -> Result<Exit, Reject> {
+    /// One written by [`Self::write`] of a contract whose slots `carrier`
+    /// carries ([`SlotSpend::read`]).
+    pub fn read(r: &mut R, carrier: Carrier) -> Result<Exit, Reject> {
         Ok(Exit {
             headers: r.list()?,
             request: Request::read(r)?,
-            publish: SlotSpend::read(r)?,
+            publish: SlotSpend::read(r, carrier)?,
             respond: Respond::read(r)?,
             disclosure: match r.take()? {
                 [0] => None,
-                [1] => Some(SlotSpend::read(r)?),
+                [1] => Some(SlotSpend::read(r, carrier)?),
                 _ => return Err(Reject::Encoding),
             },
         })
@@ -952,13 +1077,113 @@ mod tests {
         x.exit.write(&mut w);
         let mut r = R(&w.0);
         assert_eq!(
-            (Contract::read(&mut r).unwrap(), Exit::read(&mut r).unwrap()),
+            (
+                Contract::read(&mut r).unwrap(),
+                Exit::read(&mut r, Carrier::Nulldata).unwrap()
+            ),
             (x.contract, x.exit.clone())
         );
         r.end().unwrap();
         let mut r = R(&w.0[..w.0.len() - 1]);
         Contract::read(&mut r).unwrap();
-        assert_eq!(Exit::read(&mut r), Err(Reject::Encoding));
+        assert_eq!(Exit::read(&mut r, Carrier::Nulldata), Err(Reject::Encoding));
+    }
+
+    /// Of a leaf carrier: her claim and the hub's disclosure read from the
+    /// envelopes in their witnesses, by the witness tree, as nulldata is.
+    #[test]
+    fn a_leaf_carrier_reads_the_envelopes_of_its_spends() {
+        let mut x = leaf_exit(5, [7; 32], &[0xab; 1300], 3);
+        x.disclose_leaf(b"an unlock");
+        let got = read(&x.contract, &x.exit).unwrap();
+        assert_eq!(got.claim, vec![0xab; 1300]);
+        assert_eq!(got.disclosed.as_deref(), Some(&b"an unlock"[..]));
+        assert_eq!(
+            (got.heights.publish, got.heights.disclosure),
+            (102, Some(124))
+        );
+        // the input round-trips only as the contract's carrier
+        let mut w = W::default();
+        x.exit.write(&mut w);
+        let mut r = R(&w.0);
+        assert_eq!(Exit::read(&mut r, Carrier::Leaf).unwrap(), x.exit);
+        r.end().unwrap();
+        let mut r = R(&w.0);
+        let shaped = Exit::read(&mut r, Carrier::Nulldata).and_then(|e| r.end().map(|_| e));
+        assert!(shaped.is_err());
+        // a nulldata reading of it: its txid isn't in the txid tree
+        let mut e = x.exit.clone();
+        e.publish.reserved = None;
+        assert_eq!(read(&x.contract, &e), Err(Reject::Posted));
+        // a changed witness: not the transaction the block committed
+        let mut e = x.exit.clone();
+        let n = e.publish.tx.len();
+        e.publish.tx[n - 10] ^= 1;
+        assert_eq!(read(&x.contract, &e), Err(Reject::Posted));
+        // another reserved value: not the commitment
+        let mut e = x.exit.clone();
+        e.publish.reserved = Some([0x5b; 32]);
+        assert_eq!(read(&x.contract, &e), Err(Reject::Posted));
+    }
+
+    #[test]
+    fn an_envelope_is_read_from_a_script_path_spend_alone() {
+        let key = [0x4b; 32];
+        let bytes: Vec<u8> = (0..=255u8).cycle().take(1100).collect();
+        let script = envelope_script(&key, &bytes).unwrap();
+        assert_eq!(enveloped(&script), Some(bytes.clone()));
+        // the bytes of 1, 16 and 0x81, as Bitcoin pushes them
+        for one in [[1u8], [16], [0x81], [0]] {
+            let script = envelope_script(&key, &one).unwrap();
+            assert_eq!(enveloped(&script), Some(one.to_vec()));
+        }
+        assert_eq!(
+            enveloped(&envelope_script(&key, &[]).unwrap()),
+            Some(vec![])
+        );
+        // more than pushes, or not closed: none
+        let mut bad = script.clone();
+        bad.insert(bad.len() - 1, 0x76);
+        assert_eq!(enveloped(&bad), None);
+        assert_eq!(enveloped(&script[..script.len() - 1]), None);
+        // a script path: the script below the control block, an annex left
+        // out; a key path, or a control block not a tapscript's, none
+        let control = vec![0xc1; 65];
+        let sig = vec![1; 64];
+        assert_eq!(leaf_script(&[&sig, &script, &control]), Some(&script[..]));
+        assert_eq!(
+            leaf_script(&[&sig, &script, &control, &[0x50, 1]]),
+            Some(&script[..])
+        );
+        assert_eq!(leaf_script(&[&sig]), None);
+        assert_eq!(leaf_script(&[&sig, &script, &vec![0xc2; 33]]), None);
+        assert_eq!(leaf_script(&[&sig, &script, &vec![0xc0; 34]]), None);
+        // each input's envelope, in input order
+        let (tx, _) = tx_spending_all(&[
+            (
+                OutPoint {
+                    txid: [1; 32],
+                    vout: 0,
+                },
+                envelope_witness(b"one "),
+            ),
+            (
+                OutPoint {
+                    txid: [2; 32],
+                    vout: 0,
+                },
+                vec![vec![9; 64]],
+            ),
+            (
+                OutPoint {
+                    txid: [3; 32],
+                    vout: 0,
+                },
+                envelope_witness(b"two"),
+            ),
+        ]);
+        let tx = btc::parse_witness_tx(&tx).unwrap();
+        assert_eq!(carried_in_leaves(&tx), b"one two".to_vec());
     }
 
     #[test]

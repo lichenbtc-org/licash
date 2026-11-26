@@ -78,6 +78,12 @@ pub const BOUND_BASE_FROM: u32 = 13;
 /// as that one does: this code reads no grant of the format before.
 pub const SIGNED_FROM: u32 = 14;
 
+/// The first graph id whose links carry their bytes, her claim's and the
+/// hub's disclosure's, in an envelope of a leaf script their spends
+/// reveal, in the witness, not in nulldata ([`leaf_carried`]); otherwise
+/// judged as [`SIGNED_FROM`]'s.
+pub const LEAF_FROM: u32 = 15;
+
 /// Whether, in a contract of graph `id`, another claim of the same
 /// contract voids the notes it holds ([`OWN_CLAIMS_FROM`]).
 pub fn own_claims_void(id: u32) -> bool {
@@ -88,6 +94,13 @@ pub fn own_claims_void(id: u32) -> bool {
 /// beforehand: a function of its Base alone, as its [`Format`] is.
 pub fn chained(id: u32) -> bool {
     id >= CHAINED_FROM
+}
+
+/// Whether a contract of graph `id` carries its claim and disclosure in a
+/// leaf script's envelope ([`LEAF_FROM`]): a function of its Base alone,
+/// as its [`Format`] is.
+pub fn leaf_carried(id: u32) -> bool {
+    id >= LEAF_FROM
 }
 
 /// How a contract's filing is written, a function of its Base alone: the

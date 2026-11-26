@@ -57,6 +57,7 @@ pub fn input_of(base: Base) -> HubInput {
                 path: Vec::new(),
                 coinbase: Vec::new(),
                 coinbase_path: Vec::new(),
+                reserved: None,
             },
             respond: Respond {
                 tx: Vec::new(),

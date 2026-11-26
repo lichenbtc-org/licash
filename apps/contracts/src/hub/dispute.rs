@@ -36,11 +36,12 @@ use licash::claim::UnsignedClaim;
 use licash::disclosure::Disclosures;
 use licash::recovery::{self, Evidence, Named};
 use licash::request::Request;
-use licash_contract::dispute::{self, presign, Payout};
+use licash_contract::dispute::{self, presign, CoinTree, Payout};
 use licash_contract::graph;
 use licash_contract::graph::{link_args, HubProves};
 use licash_contract::opening::{Hub, HubOpening};
 use licash_onchain::deadline;
+use licash_statement::Carrier;
 use licash_wallet::first_spend;
 use lichen_contract::Role;
 use sha2::{Digest, Sha256};
@@ -257,7 +258,7 @@ impl Openings {
                 && r.output == default.tx.output
         {
             // Each party's share went to its wallet: nothing left to play.
-            self.end_if_deep(id, hub, r_at, tip).await?;
+            self.end_if_deep(id, hub, o, r_at, tip).await?;
             return Ok(Played::Idle);
         }
         let request = presign(&o.set, "request")?;
@@ -690,7 +691,15 @@ impl Openings {
         }
         let prevout = presign(&o.set, "default")?.prevout.clone();
         let tx = self
-            .with_fee(id, hub, "default", o.default_close()?, prevout, None)
+            .with_fee(
+                id,
+                hub,
+                "default",
+                o.default_close()?,
+                prevout,
+                None,
+                &CoinTree::Fee,
+            )
             .await?;
         if self.post(&tx).await && self.once(id, "default") {
             return Ok(Played::Posted("default"));
@@ -767,7 +776,8 @@ impl Openings {
         }
         let request = presign(&o.set, "request")?;
         let block = self.block_at(p_at).await?;
-        let named = dispute::published(&request.tx, &block, &p.compute_txid())
+        let carrier = licash_hp::carrier(&o.base);
+        let named = dispute::published(carrier, &request.tx, &block, &p.compute_txid())
             .ok()
             .and_then(|filed| recovery::named(&o.base, &filed).ok());
         Ok(Some(named))
@@ -799,7 +809,15 @@ impl Openings {
                 let prevout = r.output[slot.vout as usize].clone();
                 let tx = o.reclaim(hub.keys())?;
                 let tx = self
-                    .with_fee(id, hub, "reclaim", tx, prevout.clone(), None)
+                    .with_fee(
+                        id,
+                        hub,
+                        "reclaim",
+                        tx,
+                        prevout.clone(),
+                        None,
+                        &CoinTree::Fee,
+                    )
                     .await?;
                 let tx = self.sealed(id, hub, o, "reclaim", tx, prevout)?;
                 if self.post(&tx).await {
@@ -844,7 +862,8 @@ impl Openings {
         // ledger that gives no evidence is, while there is time to mend it.
         let read = async {
             let block = self.block_at(p_at).await?;
-            let filed = dispute::published(&request.tx, &block, &p.compute_txid())?;
+            let carrier = licash_hp::carrier(&o.base);
+            let filed = dispute::published(carrier, &request.tx, &block, &p.compute_txid())?;
             let (b, e) = o.requested_b(r)?;
             let headers = self.headers(o, p_at).await?;
             let chain = licash_hp::chain(&o.base, &headers).map_err(|e| anyhow!("{e}"))?;
@@ -1200,10 +1219,25 @@ impl Openings {
         let prevout = respond.tx.output[SLOT as usize].clone();
         let bytes = disclosures.encode(licash::recovery::Format::of(&o.base).lean());
         let tx = o.disclosure(hub.keys(), &bytes, vec![])?;
+        // Under a leaf carrier its fee coin carries the bytes: its coins
+        // kept under a name of theirs, so that other bytes (none are, the
+        // evidence pinned) take a coin of their own, not one of others.
+        let (name, tree) = match licash_hp::carrier(&o.base) {
+            Carrier::Nulldata => ("disclose".to_string(), CoinTree::Fee),
+            Carrier::Leaf => {
+                let key = &hub.keys().party.payment;
+                let digest = bitcoin::hashes::sha256::Hash::hash(&bytes);
+                let name = format!("disclose {}", &digest.to_string()[..16]);
+                (
+                    name,
+                    CoinTree::Envelope(dispute::envelope_tree(key, &bytes)?),
+                )
+            }
+        };
         let tx = self
-            .with_fee_by(id, hub, "disclose", tx, prevout.clone(), by, tip)
+            .with_fee_by(id, hub, &name, tx, prevout.clone(), by, tip, &tree)
             .await?;
-        let tx = self.sealed(id, hub, o, "disclose", tx, prevout)?;
+        let tx = self.sealed(id, hub, o, &name, tx, prevout)?;
         Ok(self.post(&tx).await)
     }
 
@@ -1730,6 +1764,7 @@ impl Openings {
         }
         let headers = self.headers(o, tip).await?;
         let exit = dispute::exit(
+            licash_hp::carrier(&o.base),
             headers,
             &o.funding,
             (&r_block, &r.compute_txid()),
@@ -1793,7 +1828,15 @@ impl Openings {
         };
         let contract = licash_hp::contract(&o.base);
         let tail = chain.tail(&receipt, last, contract.work);
-        let exit = dispute::exit(tail, &o.funding, request, publish, respond, disclosure)?;
+        let exit = dispute::exit(
+            licash_hp::carrier(&o.base),
+            tail,
+            &o.funding,
+            request,
+            publish,
+            respond,
+            disclosure,
+        )?;
         let program = licash_hp::Program {
             id: chain.program(),
             verify: &|_, _| {},
@@ -1853,7 +1896,7 @@ impl Openings {
         }
         let prevout = terminal.prevout.clone();
         let tx = o.finish(name, vec![])?;
-        let tx = self.with_fee(id, hub, name, tx, prevout, None).await?;
+        let tx = (self.with_fee(id, hub, name, tx, prevout, None, &CoinTree::Fee)).await?;
         if self.post(&tx).await && self.once(id, name) {
             return Ok(Played::Posted(name));
         }
@@ -1899,7 +1942,7 @@ impl Openings {
                     );
                     let prevout = presign(&o.set, &name)?.prevout.clone();
                     let tx = self
-                        .with_fee_by(id, hub, &name, tx, prevout, by, tip)
+                        .with_fee_by(id, hub, &name, tx, prevout, by, tip, &CoinTree::Fee)
                         .await?;
                     self.post(&tx).await;
                     return Ok(Played::Posted("wrongly_challenged"));
@@ -1921,6 +1964,7 @@ impl Openings {
     /// that one is gone ([`Self::gone`]), `by` its deadline and the tip if
     /// it has one. Then one gone before it, its funding in a block or the
     /// mempool after all, is taken in its place before another is funded.
+    #[allow(clippy::too_many_arguments)]
     async fn with_fee(
         &self,
         id: &[u8; 32],
@@ -1929,9 +1973,10 @@ impl Openings {
         tx: Transaction,
         prevout: TxOut,
         by: Option<(u32, u32)>,
+        tree: &CoinTree,
     ) -> Result<Transaction> {
         let key = &hub.keys().party.payment;
-        let script = dispute::fee_script(key)?;
+        let script = tree.script(key)?;
         let cached = self.store().fee_coin(id, name)?;
         let coin = match cached {
             Some(c) if !self.gone(id, name, c.0, by).await => c,
@@ -1949,9 +1994,9 @@ impl Openings {
                     value: Amount::from_sat(330),
                     script_pubkey: script.clone(),
                 };
-                let size =
-                    dispute::add_fee(tx.clone(), prevout.clone(), (OutPoint::null(), dummy), key)?
-                        .vsize() as u64;
+                let dummy = (OutPoint::null(), dummy);
+                let size = dispute::add_fee_of(tx.clone(), prevout.clone(), dummy, key, tree)?
+                    .vsize() as u64;
                 let rate = self.fee_rate().await;
                 let value = rate
                     .fee_vb(size * 2)
@@ -1974,7 +2019,7 @@ impl Openings {
                 }
             }
         };
-        dispute::add_fee(tx, prevout, coin, key)
+        dispute::add_fee_of(tx, prevout, coin, key, tree)
     }
 
     /// A fee coin of `name` kept beside `gone`, its first, that stands: in
@@ -2039,10 +2084,11 @@ impl Openings {
         prevout: TxOut,
         (deadline, stake): (u32, Amount),
         tip: u32,
+        tree: &CoinTree,
     ) -> Result<Transaction> {
         let by = Some((deadline, tip));
         let first = self
-            .with_fee(id, hub, name, tx.clone(), prevout.clone(), by)
+            .with_fee(id, hub, name, tx.clone(), prevout.clone(), by, tree)
             .await?;
         let first_coin = self.store().fee_coin(id, name)?.context("no fee coin")?;
         let mut extra = Vec::new();
@@ -2085,9 +2131,7 @@ impl Openings {
             // Not funded, or funded and not kept: posted with the coin it
             // has, which is better than not posted.
             let funded = async {
-                let more = self
-                    .fund_coin(id, name, &dispute::fee_script(key)?, value)
-                    .await?;
+                let more = self.fund_coin(id, name, &tree.script(key)?, value).await?;
                 self.store().keep_extra_coin(id, name, &more)
             };
             match funded.await {
@@ -2102,7 +2146,7 @@ impl Openings {
                 ),
             }
         }
-        dispute::add_fee(tx, prevout, coin, &hub.keys().party.payment)
+        dispute::add_fee_of(tx, prevout, coin, &hub.keys().party.payment, tree)
     }
 
     /// A coin of `value` paying `script`, from the hub's wallet, for a
@@ -2502,7 +2546,7 @@ impl Openings {
             .owned(payout, value_key, signer, word, Role::Hub)?;
         if owned.is_empty() {
             self.note_once(id, "nothing", "nothing of the payout is the hub's");
-            self.end_if_deep(id, hub, paid_at, tip).await?;
+            self.end_if_deep(id, hub, o, paid_at, tip).await?;
             return Ok(Played::Idle);
         }
         // Swept, in a block: ended once the payout is deep. The sweep pays
@@ -2513,7 +2557,7 @@ impl Openings {
             swept &= !self.unspent(out.op, false).await?;
         }
         if swept {
-            self.end_if_deep(id, hub, paid_at, tip).await?;
+            self.end_if_deep(id, hub, o, paid_at, tip).await?;
             return Ok(Played::Idle);
         }
         let to = self.payout_script().await?;
@@ -2942,8 +2986,15 @@ impl Openings {
     /// Opening `id` of `hub` ended at block `at`: not looked at again once
     /// that block is [`ENDED_DEPTH`] deep at `tip`, and its fee coins left
     /// in a block swept to the hub's wallet ([`Self::swept_fee_coins`]).
-    async fn end_if_deep(&self, id: &[u8; 32], hub: &Hub, at: u32, tip: u32) -> Result<()> {
-        if tip.saturating_sub(at) + 1 >= ENDED_DEPTH && self.swept_fee_coins(id, hub).await? {
+    async fn end_if_deep(
+        &self,
+        id: &[u8; 32],
+        hub: &Hub,
+        o: &HubOpening,
+        at: u32,
+        tip: u32,
+    ) -> Result<()> {
+        if tip.saturating_sub(at) + 1 >= ENDED_DEPTH && self.swept_fee_coins(id, hub, o).await? {
             self.store().end(id, at)?;
             tracing::info!(id = %crate::hex_id(id), at, "contract ended");
         }
@@ -2955,7 +3006,11 @@ impl Openings {
     /// Those left are swept to the hub's wallet, and the contract ends once
     /// the sweep is in a block. One funded and in no block is not waited
     /// for. Left worth less than their sweep, they are left.
-    async fn swept_fee_coins(&self, id: &[u8; 32], hub: &Hub) -> Result<bool> {
+    ///
+    /// Under a leaf carrier, its disclosure's coins carry its bytes
+    /// ([`dispute::envelope_tree`]): swept by their key path, the bytes
+    /// those of the evidence it responded on, as it disclosed them.
+    async fn swept_fee_coins(&self, id: &[u8; 32], hub: &Hub, o: &HubOpening) -> Result<bool> {
         let mut left: Vec<(OutPoint, TxOut)> = Vec::new();
         let kept = self.store().all_fee_coins(id)?;
         for coin in kept {
@@ -2966,9 +3021,29 @@ impl Openings {
         if left.is_empty() {
             return Ok(true);
         }
+        let key = &hub.keys().party.payment;
+        let mut trees = vec![CoinTree::Fee];
+        if licash_hp::carrier(&o.base) == Carrier::Leaf {
+            if let Some(pinned) = self.responded_on(id).await? {
+                let evidence = pinned_evidence(o, &pinned)?;
+                let disclosures = recovery::disclosures(&evidence).map_err(|e| anyhow!("{e}"))?;
+                let bytes = disclosures.encode(licash::recovery::Format::of(&o.base).lean());
+                trees.push(CoinTree::Envelope(dispute::envelope_tree(key, &bytes)?));
+            }
+        }
+        let scripts = (trees.iter().map(|t| t.script(key))).collect::<Result<Vec<_>>>()?;
+        // One of none it knows the tree of is left, not sweeping the rest.
+        let (left, unknown): (Vec<_>, Vec<_>) =
+            (left.into_iter()).partition(|(_, out)| scripts.contains(&out.script_pubkey));
+        for (coin, _) in &unknown {
+            tracing::warn!(id = %crate::hex_id(id), %coin, "a fee coin of no script it signs for: left");
+        }
+        if left.is_empty() {
+            return Ok(true);
+        }
         let to = self.payout_script().await?;
         let rate = self.fee_rate().await;
-        let Some(sweep) = fee_sweep(&hub.keys().party.payment, &left, to, rate)? else {
+        let Some(sweep) = fee_sweep(key, &trees, &left, to, rate)? else {
             self.note_once(
                 id,
                 "fee coins left",
@@ -3174,11 +3249,13 @@ fn terminal_coin(
     (coin, fund)
 }
 
-/// A sweep of fee coins `coins`, each paying `key`'s fee script, to `to`
-/// at `rate`: none if they are worth less than its fee and a change of
-/// dust.
+/// A sweep of fee coins `coins`, each paying a script of `key`'s of one of
+/// `trees` (its fee script, spent by its leaf, or an envelope's, by its key
+/// path), to `to` at `rate`: none if they are worth less than its fee and a
+/// change of dust.
 fn fee_sweep(
     key: &bitcoin::secp256k1::Keypair,
+    trees: &[CoinTree],
     coins: &[(OutPoint, TxOut)],
     to: ScriptBuf,
     rate: FeeRate,
@@ -3206,7 +3283,13 @@ fn fee_sweep(
             }],
         };
         for i in 0..coins.len() {
-            dispute::sign_fee_input(key, &mut tx, i, &prevouts)?;
+            let tree = (trees.iter())
+                .find(|t| t.script(key).is_ok_and(|s| s == prevouts[i].script_pubkey))
+                .context("a fee coin of no tree it knows")?;
+            match tree {
+                CoinTree::Fee => dispute::sign_fee_input(key, &mut tx, i, &prevouts)?,
+                CoinTree::Envelope(t) => dispute::sign_key_input(key, &mut tx, i, &prevouts, t)?,
+            }
         }
         Ok(Some(tx))
     };
@@ -3624,16 +3707,52 @@ mod tests {
         );
         let rate = FeeRate::from_sat_per_vb_u32(2);
         let coins = [coin(1, 5_000), coin(2, 20_000)];
-        let tx = fee_sweep(&key, &coins, to.clone(), rate).unwrap().unwrap();
+        let fee_only = [CoinTree::Fee];
+        let tx = fee_sweep(&key, &fee_only, &coins, to.clone(), rate)
+            .unwrap()
+            .unwrap();
         assert_eq!(tx.input.len(), 2);
         assert_eq!(tx.output.len(), 1);
         assert_eq!(tx.output[0].script_pubkey, to);
         let fee = Amount::from_sat(25_000) - tx.output[0].value;
         assert_eq!(fee, rate.fee_vb(tx.vsize() as u64).unwrap());
         assert!(tx.input.iter().all(|i| !i.witness.is_empty()));
-        assert!(fee_sweep(&key, &[coin(1, 400)], to, rate)
-            .unwrap()
-            .is_none());
+        assert!(
+            fee_sweep(&key, &fee_only, &[coin(1, 400)], to.clone(), rate)
+                .unwrap()
+                .is_none()
+        );
+        // An envelope's coin beside: by its key path, a signature alone,
+        // not the bytes it carries; of a tree not given, refused.
+        let tree = dispute::envelope_tree(&key, &[0xab; 3_000]).unwrap();
+        let carrying = (
+            OutPoint::new(bitcoin::Txid::from_byte_array([3; 32]), 0),
+            TxOut {
+                value: Amount::from_sat(9_000),
+                script_pubkey: tree.script_pubkey(),
+            },
+        );
+        let coins = [coin(1, 5_000), carrying.clone()];
+        assert!(fee_sweep(&key, &fee_only, &coins, to.clone(), rate).is_err());
+        let both = [CoinTree::Fee, CoinTree::Envelope(tree)];
+        let tx = fee_sweep(&key, &both, &coins, to, rate).unwrap().unwrap();
+        assert_eq!(tx.input[1].witness.len(), 1);
+        assert!(tx.vsize() < 200, "{} vB", tx.vsize());
+        let prevouts = [coins[0].1.clone(), carrying.1];
+        let hash = bitcoin::sighash::SighashCache::new(&tx)
+            .taproot_key_spend_signature_hash(
+                1,
+                &bitcoin::sighash::Prevouts::All(&prevouts),
+                bitcoin::TapSighashType::Default,
+            )
+            .unwrap();
+        let sig =
+            bitcoin::secp256k1::schnorr::Signature::from_slice(tx.input[1].witness.nth(0).unwrap())
+                .unwrap();
+        let output_key = prevouts[1].script_pubkey.as_bytes()[2..].to_vec();
+        let output_key = bitcoin::XOnlyPublicKey::from_slice(&output_key).unwrap();
+        let message = bitcoin::secp256k1::Message::from_digest(hash.to_byte_array());
+        secp.verify_schnorr(&sig, &message, &output_key).unwrap();
     }
 
     /// A funding broadcast again is gone only on a conflict or inputs

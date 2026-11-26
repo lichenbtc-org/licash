@@ -372,6 +372,7 @@ pub fn trust(profile: ChainProfile) -> Result<Trust> {
             lean: SIGNET_LEAN,
             chained: SIGNET_CHAINED.then_some(CHAIN),
             own_claims: SIGNET_OWN_CLAIMS,
+            leaf: SIGNET_LEAF,
         }),
         _ => bail!("contracts are not opened on {profile} yet"),
     }
@@ -418,6 +419,12 @@ pub const SIGNET_CHAINED: bool = true;
 /// chain program [`CHAIN`], kept as it was: that program's sources did not
 /// change, only the bytes it builds to, and a hub keeps one chain.
 pub const SIGNET_OWN_CLAIMS: bool = true;
+
+/// Whether [`SIGNET`] reads her claim and the hub's disclosure from leaf
+/// envelopes, as [`SIGNET_OWN_CLAIMS`] says of its rule: set in the same
+/// change as the program that does. Hubs quote a graph of id
+/// [`licash::recovery::LEAF_FROM`] only when it is.
+pub const SIGNET_LEAF: bool = false;
 
 /// The chain program (`r0/chain-guest`) whose receipts [`SIGNET`]'s statement
 /// verifies: the image id kept in `r0/hp-guest/chain.id`, which a build of it
@@ -589,9 +596,11 @@ mod tests {
             assert_eq!(trusted.chained, SIGNET_CHAINED.then_some(CHAIN));
         }
         assert!(trust(ChainProfile::Core30Mainnet).is_err());
+        // Regtest's decides what the signets' does, its chain a mock too.
+        let regtest = trust(ChainProfile::Core30DefaultRegtest).unwrap();
         assert_eq!(
-            trust(ChainProfile::Core30DefaultRegtest).unwrap().chained,
-            None
+            (regtest.chained, regtest.own_claims, regtest.leaf),
+            (Some(licash_contract::opening::MOCK_CHAIN), true, true)
         );
     }
 

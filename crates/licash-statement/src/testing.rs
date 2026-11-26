@@ -8,8 +8,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::btc::{self, sha256d, work, Header, OutPoint};
 use crate::{
-    checksum_digits, claim_script, Checkpoint, Contract, Exit, Hash, Payout, Request, Respond,
-    SlotSpend, SLOT_VOUT,
+    checksum_digits, claim_script, envelope_script, Checkpoint, Contract, Exit, Hash, Payout,
+    Request, Respond, SlotSpend, SLOT_VOUT,
 };
 
 fn varint(n: usize) -> Vec<u8> {
@@ -223,7 +223,75 @@ pub fn slot_spend_on(prev: &Hash, tx: Vec<u8>) -> SlotSpend {
         path: vec![sha256d(&p.coinbase)],
         coinbase: p.coinbase,
         coinbase_path: p.coinbase_path,
+        reserved: None,
     }
+}
+
+/// A transaction (witness serialization) spending each of `inputs` with
+/// its witness, its one output paying 900: and its txid.
+pub fn tx_spending_all(inputs: &[(OutPoint, Vec<Vec<u8>>)]) -> (Vec<u8>, Hash) {
+    let mut body = varint(inputs.len());
+    for (op, _) in inputs {
+        body.extend_from_slice(&op.to_bytes());
+        body.extend_from_slice(&[0, 0xff, 0xff, 0xff, 0xff]);
+    }
+    body.push(1);
+    body.extend_from_slice(&900u64.to_le_bytes());
+    body.extend_from_slice(&[1, 0x51]);
+    let mut items = vec![];
+    for (_, witness) in inputs {
+        items.extend(varint(witness.len()));
+        for i in witness {
+            items.extend(varint(i.len()));
+            items.extend_from_slice(i);
+        }
+    }
+    let (version, lock) = ([2u8, 0, 0, 0], [0u8; 4]);
+    (
+        [&version[..], &[0, 1], &body, &items, &lock].concat(),
+        sha256d(&[&version[..], &body, &lock].concat()),
+    )
+}
+
+/// The witness of a script-path spend of an [`envelope_script`] carrying
+/// `bytes` (its signature faked).
+pub fn envelope_witness(bytes: &[u8]) -> Vec<Vec<u8>> {
+    vec![
+        vec![3; 64],
+        envelope_script(&[0x4b; 32], bytes).unwrap(),
+        vec![0xc0; 33],
+    ]
+}
+
+/// `tx` (witness serialization, of txid `txid`) in a block on `prev`, by
+/// the witness tree, as a [`SlotSpend`] of a leaf carrier.
+pub fn leaf_spend_on(prev: &Hash, tx: (Vec<u8>, Hash)) -> SlotSpend {
+    let (header, p) = block_with(prev, tx);
+    SlotSpend {
+        tx: p.tx,
+        header,
+        index: p.index,
+        path: p.path,
+        coinbase: p.coinbase,
+        coinbase_path: p.coinbase_path,
+        reserved: Some(p.reserved),
+    }
+}
+
+/// The spend of `slot` (its witness the slot's leaf's, faked) and of a
+/// commitment carrying `bytes` in its envelope, in a block on `prev`.
+pub fn leaf_published(prev: &Hash, slot: &OutPoint, bytes: &[u8]) -> SlotSpend {
+    let commitment = OutPoint {
+        txid: [0xc7; 32],
+        vout: 0,
+    };
+    leaf_spend_on(
+        prev,
+        tx_spending_all(&[
+            (*slot, vec![vec![1; 64], vec![0x51], vec![0xc0; 33]]),
+            (commitment, envelope_witness(bytes)),
+        ]),
+    )
 }
 
 /// The spend of `slot` carrying `bytes`, in a block on `prev`.
@@ -315,6 +383,16 @@ pub fn exit_publishing(
     }
 }
 
+/// [`exit_publishing`] her publication carrying `claim` in an envelope
+/// ([`leaf_published`]), the hub's disclosures too ([`X::disclose_leaf`]).
+pub fn leaf_exit(b: u32, e: Hash, claim: &[u8], b2: u32) -> X {
+    exit_publishing(
+        &request_witness(&e, b),
+        |prev, slot| leaf_published(prev, slot, claim),
+        b2,
+    )
+}
+
 /// [`exit_publishing`] her publication carrying `claim`.
 pub fn exit_with(witness: &[Vec<u8>], claim: &[u8], b2: u32) -> X {
     exit_publishing(witness, |prev, slot| published(prev, slot, claim), b2)
@@ -348,5 +426,16 @@ impl X {
     /// The hub discloses `bytes`, spending `respond`'s slot.
     pub fn disclose(&mut self, bytes: &[u8]) {
         self.disclose_from(&self.disclose_slot(), bytes);
+    }
+
+    /// [`Self::disclose`], in an envelope ([`leaf_published`]).
+    pub fn disclose_leaf(&mut self, bytes: &[u8]) {
+        let prev = sha256d(self.exit.headers.last().unwrap());
+        let d = leaf_published(&prev, &self.disclose_slot(), bytes);
+        self.exit.headers.push(d.header);
+        self.exit
+            .headers
+            .extend(headers_on(&sha256d(&d.header), 10));
+        self.exit.disclosure = Some(d);
     }
 }

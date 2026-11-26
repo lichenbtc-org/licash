@@ -65,16 +65,29 @@ pub struct Trust {
     /// before would be owed less by the notes both hold. A program that
     /// does reads the exit on the header chain too.
     pub own_claims: bool,
+    /// Whether its statement reads her claim and the hub's disclosure from
+    /// envelopes in their spends' witnesses ([`licash::recovery::leaf_carried`]),
+    /// which a contract of graph id [`licash::recovery::LEAF_FROM`] on
+    /// carries them in: under one that doesn't, it would read no claim of
+    /// hers. A program that does decides what [`Self::own_claims`] says too.
+    pub leaf: bool,
 }
+/// The chain program a mock statement reads the exit through: none runs,
+/// the hub makes each receipt's journal itself and a mock proof binds it.
+pub const MOCK_CHAIN: [u8; 32] = [12; 32];
+
 impl Trust {
+    /// Regtest's: decides every graph signet's program does, proven by
+    /// mock proofs alone.
     pub fn mock() -> Self {
         Self {
             program: [11; 32],
             mock: true,
             compact: true,
             lean: true,
-            chained: None,
-            own_claims: false,
+            chained: Some(MOCK_CHAIN),
+            own_claims: true,
+            leaf: true,
         }
     }
 }
@@ -729,6 +742,24 @@ impl Holder {
             "a graph of id {} owes a claim all its notes, though another claim of the contract \
              holds them, which the program trusted doesn't",
             s.quote.graph.id
+        );
+        ensure!(
+            !licash::recovery::leaf_carried(s.quote.graph.id) || ctx.trust.leaf,
+            "a graph of id {} carries her claim in a leaf script's envelope, which the program \
+             trusted doesn't read",
+            s.quote.graph.id
+        );
+        let g = &s.quote.graph;
+        let purse = graph::purse(
+            lichen_btc::bitcoin::Amount::from_sat(g.reserve_alice),
+            lichen_btc::bitcoin::Amount::from_sat(g.reserve_hub),
+            lichen_btc::bitcoin::Amount::from_sat(g.dust),
+        );
+        ensure!(
+            !licash::recovery::leaf_carried(g.id) || purse.is_some(),
+            "a graph of id {} commits to her claim from her purse, which its reserves leave \
+             her none of",
+            g.id
         );
         let keys = HolderKeys::derive(&s.seed, &id);
         let open = wire::Open {
@@ -1790,6 +1821,7 @@ mod tests {
                 lean,
                 chained: None,
                 own_claims: false,
+                leaf: false,
             },
         };
         // A program that decides the lean filing decides the compact too.
@@ -2497,9 +2529,10 @@ mod tests {
         p.input.push(TxIn::default());
         let prevouts = [slot.clone(), fee.clone()];
         assert!(ao
-            .sign_publication(&a.keys, &mut p, &prevouts[..1])
+            .sign_publication(&a.keys, &mut p, &prevouts[..1], &[1, 2, 3])
             .is_err());
-        ao.sign_publication(&a.keys, &mut p, &prevouts).unwrap();
+        ao.sign_publication(&a.keys, &mut p, &prevouts, &[1, 2, 3])
+            .unwrap();
         let sig = p.input[0].witness.nth(0).unwrap();
         assert_eq!(sig.len(), 64, "SIGHASH_DEFAULT, no sighash byte");
         let sig = lichen_btc::bitcoin::secp256k1::schnorr::Signature::from_slice(sig).unwrap();
@@ -2687,6 +2720,7 @@ mod tests {
                 lean: true,
                 chained: None,
                 own_claims: false,
+                leaf: false,
             },
         };
         assert!(Holder::load(&a.to_bytes(), &[1; 32], &rotated).is_ok());
@@ -2708,6 +2742,7 @@ mod tests {
                     lean: false,
                     chained: None,
                     own_claims: false,
+                    leaf: false,
                 }
             }
         )

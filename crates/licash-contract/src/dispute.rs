@@ -4,6 +4,7 @@
 use anyhow::{ensure, Context, Result};
 use ark_bn254::Bn254;
 use ark_groth16::Proof;
+use licash_statement::Carrier;
 use lichen_babe::{
     gadget,
     opening::{self, Garbler},
@@ -18,7 +19,7 @@ use lichen_btc::{
         Transaction, TxIn, TxOut, Txid,
     },
     sighash::{sign_tapscript, sign_tapscript_acp},
-    taptree::TapTree,
+    taptree::{Leaf, TapTree},
     tx::{build_spend, build_tx, Timelock},
     witness::tapscript_witness,
 };
@@ -143,6 +144,12 @@ impl Opening {
             vout: licash_statement::SLOT_VOUT,
         };
         let prevout = &request.tx.output[slot.vout as usize];
+        if self.carrier() == Carrier::Leaf {
+            // No signature yet, the claim's not in it: its commitment's
+            // input follows, and the slot is signed over every input
+            // ([`Self::sign_publication`]), never so that one may change.
+            return unsigned_spend(&self.babe.slot()?, "publish", slot, outputs);
+        }
         let tx = self.babe.publication(&keys.claim, slot, prevout, bytes)?;
         carrier_outputs(
             tx,
@@ -153,17 +160,73 @@ impl Opening {
             outputs,
         )
     }
+    /// Where the contract's links carry their bytes ([`licash_hp::carrier`]).
+    pub fn carrier(&self) -> Carrier {
+        licash_hp::carrier(&self.base)
+    }
+    /// Under a leaf carrier, her commitment to the filing `bytes` before
+    /// she publishes it: the spend of `r`'s purse ([`graph::PURSE_VOUT`])
+    /// paying [`COMMITTED`] the coin that carries them ([`envelope_tree`]),
+    /// the dust limit, and [`COMMITTED`] + 1 the rest less `fee`, to her
+    /// fee script, signed. Her publication spends both: the one reveals
+    /// the bytes, the other pays its fee as her purse did.
+    pub fn commitment(
+        &self,
+        keys: &HolderKeys,
+        r: &Transaction,
+        bytes: &[u8],
+        fee: Amount,
+    ) -> Result<Transaction> {
+        let key = &keys.party.payment;
+        let purse = r
+            .output
+            .get(graph::PURSE_VOUT as usize)
+            .context("no purse to commit from")?;
+        ensure!(
+            purse.script_pubkey == fee_script(key)?,
+            "request purse is not hers"
+        );
+        let dust = Amount::from_sat(330);
+        let rest = purse
+            .value
+            .checked_sub(dust + fee)
+            .filter(|rest| *rest >= dust)
+            .context("her purse pays no commitment")?;
+        let spent = OutPoint {
+            txid: r.compute_txid(),
+            vout: graph::PURSE_VOUT,
+        };
+        let mut tx = build_tx(
+            &[(spent, Sequence::ENABLE_RBF_NO_LOCKTIME)],
+            vec![
+                TxOut {
+                    value: dust,
+                    script_pubkey: envelope_tree(key, bytes)?.script_pubkey(),
+                },
+                TxOut {
+                    value: rest,
+                    script_pubkey: fee_script(key)?,
+                },
+            ],
+            LockTime::ZERO,
+        );
+        sign_fee_input(key, &mut tx, 0, std::slice::from_ref(purse))?;
+        Ok(tx)
+    }
     /// Sign `tx`, a [`Opening::publication`] with every input it spends
     /// (`prevouts`, in order) and its outputs final, over all of them: no
     /// one else can add an input to it, as one could to its
     /// `ALL|ANYONECANPAY` carrier, and so pin it with a conflict of a
     /// larger fee at a lower rate until its window passes. Its fee inputs
     /// are signed after, and may not change.
+    /// Under a leaf carrier, the inputs spending her commitment's coin
+    /// carrying `bytes` (the filing) are signed too, by its envelope.
     pub fn sign_publication(
         &self,
         keys: &HolderKeys,
         tx: &mut Transaction,
         prevouts: &[TxOut],
+        bytes: &[u8],
     ) -> Result<()> {
         ensure!(
             keys.claim_key().serialize() == self.base.parts().claim_key,
@@ -181,6 +244,20 @@ impl Opening {
             &leaf.script,
             &tree.control_block("publish")?,
         );
+        if self.carrier() == Carrier::Leaf {
+            let envelope = envelope_tree(&keys.party.payment, bytes)?;
+            let spk = envelope.script_pubkey();
+            let carrying: Vec<usize> = (1..tx.input.len())
+                .filter(|i| prevouts[*i].script_pubkey == spk)
+                .collect();
+            ensure!(
+                carrying.len() == 1,
+                "a publication spends no commitment to her claim"
+            );
+            for i in carrying {
+                sign_leaf_input(&keys.party.payment, tx, i, prevouts, &envelope, ENVELOPE)?;
+            }
+        }
         Ok(())
     }
     /// Her contest of the hub's response: the link that makes it prove
@@ -292,6 +369,17 @@ impl HubOpening {
             vout: licash_statement::SLOT_VOUT,
         };
         let prevout = &respond.tx.output[slot.vout as usize];
+        if licash_hp::carrier(&self.base) == Carrier::Leaf {
+            // Its fee coin, which carries the bytes ([`envelope_tree`]),
+            // follows; its slot signed over both ([`Self::seal`]). One
+            // output, none of value: the coin is all fee.
+            let mut sink = vec![TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::from_bytes(vec![0x6a]),
+            }];
+            sink.extend(outputs);
+            return unsigned_spend(&self.babe.disclose()?, "disclose", slot, sink);
+        }
         let tx = self
             .babe
             .disclosure(&keys.party.payment, slot, prevout, bytes)?;
@@ -442,10 +530,40 @@ impl HubOpening {
 
 /// An exact fee coin is appended to a terminal (ALL|ANYONECANPAY).
 pub fn add_fee(
+    tx: Transaction,
+    prevout: TxOut,
+    fee: (OutPoint, TxOut),
+    key: &Keypair,
+) -> Result<Transaction> {
+    add_fee_of(tx, prevout, fee, key, &CoinTree::Fee)
+}
+
+/// What a fee coin of a key is: of its fee script ([`fee_script`]), or of
+/// an envelope carrying bytes ([`envelope_tree`]), as the hub's disclosure
+/// under a leaf carrier pays with.
+pub enum CoinTree {
+    Fee,
+    Envelope(TapTree),
+}
+
+impl CoinTree {
+    /// The coin's script, of `key`.
+    pub fn script(&self, key: &Keypair) -> Result<ScriptBuf> {
+        match self {
+            CoinTree::Fee => fee_script(key),
+            CoinTree::Envelope(tree) => Ok(tree.script_pubkey()),
+        }
+    }
+}
+
+/// [`add_fee`] of a coin of `tree`, spent by its leaf: its envelope's, for
+/// one carrying bytes.
+pub fn add_fee_of(
     mut tx: Transaction,
     prevout: TxOut,
     fee: (OutPoint, TxOut),
     key: &Keypair,
+    tree: &CoinTree,
 ) -> Result<Transaction> {
     ensure!(
         tx.input.len() == 1,
@@ -456,7 +574,94 @@ pub fn add_fee(
         sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
         ..Default::default()
     });
-    sign_fee_input(key, &mut tx, 1, &[prevout, fee.1])?;
+    match tree {
+        CoinTree::Fee => sign_fee_input(key, &mut tx, 1, &[prevout, fee.1])?,
+        CoinTree::Envelope(t) => sign_leaf_input(key, &mut tx, 1, &[prevout, fee.1], t, ENVELOPE)?,
+    }
+    Ok(tx)
+}
+
+/// The leaf of an [`envelope_tree`].
+pub const ENVELOPE: &str = "envelope";
+
+/// The vout of [`Opening::commitment`]'s coin carrying her filing; its
+/// change to her fee script follows.
+pub const COMMITTED: u32 = 0;
+
+/// The tree of a coin that carries `bytes` in the witness of its spend:
+/// one leaf ([`ENVELOPE`], [`licash_statement::envelope_script`]) that
+/// `key` alone signs. The output commits to the leaf, so a spend by it
+/// reveals those bytes, and no other, whoever relays it. Its key path is
+/// `key`'s too ([`sign_key_input`]), so that a coin not spent to carry
+/// them (the hub's fee coin a larger one replaced) is swept for a
+/// signature's weight, not theirs.
+pub fn envelope_tree(key: &Keypair, bytes: &[u8]) -> Result<TapTree> {
+    let x = key.x_only_public_key().0;
+    let script =
+        licash_statement::envelope_script(&x.serialize(), bytes).context("too large to carry")?;
+    TapTree::with_internal_key(
+        x,
+        vec![Leaf::new(
+            ENVELOPE,
+            ScriptBuf::from_bytes(script),
+            Timelock::NONE,
+        )],
+    )
+}
+
+/// Sign input `i` of `tx`, spending a coin of `tree` by its key path, whose
+/// internal key is `key`'s ([`envelope_tree`]), over every input and
+/// output (SIGHASH_DEFAULT): `prevouts` in order.
+pub fn sign_key_input(
+    key: &Keypair,
+    tx: &mut Transaction,
+    i: usize,
+    prevouts: &[TxOut],
+    tree: &TapTree,
+) -> Result<()> {
+    use lichen_btc::bitcoin::{
+        hashes::Hash as _,
+        key::TapTweak as _,
+        secp256k1::{Message, SECP256K1},
+        sighash::{Prevouts, SighashCache, TapSighashType},
+        Witness,
+    };
+    ensure!(
+        prevouts.len() == tx.input.len() && i < prevouts.len(),
+        "fee prevout count"
+    );
+    ensure!(
+        prevouts[i].script_pubkey == tree.script_pubkey()
+            && tree.internal_key() == key.x_only_public_key().0,
+        "another key's coin"
+    );
+    let hash = SighashCache::new(&*tx).taproot_key_spend_signature_hash(
+        i,
+        &Prevouts::All(prevouts),
+        TapSighashType::Default,
+    )?;
+    let tweaked = key.tap_tweak(SECP256K1, tree.merkle_root());
+    let sig = SECP256K1.sign_schnorr_no_aux_rand(
+        &Message::from_digest(hash.to_byte_array()),
+        tweaked.as_keypair(),
+    );
+    tx.input[i].witness = Witness::from_slice(&[sig.as_ref()]);
+    Ok(())
+}
+
+/// A spend of `slot` by `tree`'s leaf `name`, paying `outputs`, its
+/// signature not made yet: a placeholder of a signature's size, so it
+/// weighs what it will, valid for nothing.
+fn unsigned_spend(
+    tree: &TapTree,
+    name: &str,
+    slot: OutPoint,
+    outputs: Vec<TxOut>,
+) -> Result<Transaction> {
+    let leaf = tree.leaf(name)?;
+    let mut tx = build_spend(slot, &leaf.timelock, outputs);
+    tx.input[0].witness =
+        tapscript_witness(&[vec![0; 64]], &leaf.script, &tree.control_block(name)?);
     Ok(tx)
 }
 /// A presigned link's anchor output: only its poster's payment key spends
@@ -536,21 +741,35 @@ pub fn sign_fee_input(
     i: usize,
     prevouts: &[TxOut],
 ) -> Result<()> {
+    let tree = anchor_tree_for(&key.x_only_public_key().0)?;
+    sign_leaf_input(key, tx, i, prevouts, &tree, "fee")
+}
+
+/// Sign input `i` of `tx`, spending a coin of `tree` by its leaf `name`
+/// (one signature of `key`, `<key> OP_CHECKSIG` first) over every input
+/// and output (SIGHASH_DEFAULT): `prevouts` in order.
+pub fn sign_leaf_input(
+    key: &Keypair,
+    tx: &mut Transaction,
+    i: usize,
+    prevouts: &[TxOut],
+    tree: &TapTree,
+    name: &str,
+) -> Result<()> {
     ensure!(
         prevouts.len() == tx.input.len() && i < prevouts.len(),
         "fee prevout count"
     );
-    let tree = anchor_tree_for(&key.x_only_public_key().0)?;
     ensure!(
         prevouts[i].script_pubkey == tree.script_pubkey(),
         "another fee key"
     );
-    let leaf = tree.leaf("fee")?;
+    let leaf = tree.leaf(name)?;
     let sig = sign_tapscript(key, tx, i, prevouts, &leaf.script)?;
     tx.input[i].witness = tapscript_witness(
         &[sig.as_ref().to_vec()],
         &leaf.script,
-        &tree.control_block("fee")?,
+        &tree.control_block(name)?,
     );
     Ok(())
 }
@@ -648,7 +867,9 @@ fn sweep_owned(
     Ok(tx)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn exit(
+    carrier: Carrier,
     headers: Vec<[u8; 80]>,
     funding: &Transaction,
     request: (&Block, &Txid),
@@ -659,30 +880,41 @@ pub fn exit(
     Ok(licash_statement::Exit {
         headers,
         request: crate::exit::request(funding, request.0, request.1)?,
-        publish: crate::exit::slot_spend(publish.0, publish.1)?,
+        publish: crate::exit::slot_spend(publish.0, publish.1, carrier)?,
         respond: crate::exit::respond(respond.0, respond.1)?,
         disclosure: disclosure
-            .map(|(b, t)| crate::exit::slot_spend(b, t))
+            .map(|(b, t)| crate::exit::slot_spend(b, t, carrier))
             .transpose()?,
     })
 }
 
-/// The claim bytes `publication` carries in the request's slot.
-pub fn published(request: &Transaction, publication: &Block, txid: &Txid) -> Result<Vec<u8>> {
-    carried(request, publication, txid)
+/// The claim bytes `publication` carries in the request's slot, read as
+/// the contract's `carrier` carries them.
+pub fn published(
+    carrier: Carrier,
+    request: &Transaction,
+    publication: &Block,
+    txid: &Txid,
+) -> Result<Vec<u8>> {
+    carried(carrier, request, publication, txid)
         .context("the publication carries no claim in the request's slot")
 }
 
 /// The bytes `disclosure` carries in the response's disclose slot: what
 /// the hub made public of its evidence.
-pub fn disclosed(response: &Transaction, disclosure: &Block, txid: &Txid) -> Result<Vec<u8>> {
-    carried(response, disclosure, txid)
+pub fn disclosed(
+    carrier: Carrier,
+    response: &Transaction,
+    disclosure: &Block,
+    txid: &Txid,
+) -> Result<Vec<u8>> {
+    carried(carrier, response, disclosure, txid)
         .context("the disclosure carries nothing in the response's slot")
 }
 
 /// What the spend `txid` in `block` of `link`'s slot carries.
-fn carried(link: &Transaction, block: &Block, txid: &Txid) -> Option<Vec<u8>> {
-    let spend = crate::exit::slot_spend(block, txid).ok()?;
+fn carried(carrier: Carrier, link: &Transaction, block: &Block, txid: &Txid) -> Option<Vec<u8>> {
+    let spend = crate::exit::slot_spend(block, txid, carrier).ok()?;
     let slot = licash_statement::btc::OutPoint {
         txid: lichen_btc::bitcoin::hashes::Hash::to_byte_array(link.compute_txid()),
         vout: licash_statement::SLOT_VOUT,

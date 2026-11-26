@@ -592,6 +592,14 @@ impl Openings {
         Ok(())
     }
 
+    /// Quote graphs that carry claims in nulldata outputs from now on
+    /// ([`Timing::with_nulldata`]), not in leaf envelopes: those open
+    /// already keep theirs.
+    pub fn carry_in_nulldata(&self) {
+        let mut timing = self.timing.write().unwrap_or_else(|e| e.into_inner());
+        *timing = timing.with_nulldata();
+    }
+
     /// That the hub's locks, living `window` blocks at most, outlive its
     /// contracts' response window ([`Timing::covers_locks`]).
     pub fn check_lock_window(&self, window: u32) -> Result<()> {

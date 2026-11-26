@@ -4,7 +4,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{anyhow, bail, ensure, Context as _, Result};
-use bitcoin::{Amount, FeeRate, OutPoint, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
+use bitcoin::{
+    Amount, FeeRate, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
+};
 use licash::claim::{self, Branch, Item, Source, UnsignedClaim};
 use licash::recovery::{Filing, Format, Publication, Witness as FilingWitness};
 use licash::request::Request;
@@ -351,6 +353,13 @@ struct State {
     r: Option<Transaction>,
     #[serde(with = "consensus")]
     p: Option<Transaction>,
+    /// Under a leaf carrier, her commitment to the filing
+    /// ([`licash_contract::opening::Opening::commitment`]), spending her
+    /// purse: made once, kept with P before either is posted, and spent by
+    /// P's every version. None of a nulldata carrier's, or of a state an
+    /// older release kept: its P carries the filing in nulldata.
+    #[serde(with = "consensus", skip_serializing_if = "Option::is_none")]
+    c: Option<Transaction>,
     #[serde(with = "consensus_all")]
     prevouts: Vec<TxOut>,
     f_height: Option<u32>,
@@ -1574,9 +1583,10 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
             self.request_matches(state, &r)?,
             "pinned R reads another claim"
         );
-        let (p, prevouts) = self.build_p(&r, &self.filing_of(state)?, None, state, true)?;
+        let (p, prevouts, c) = self.build_p(&r, &self.filing_of(state)?, None, state, true)?;
         state.r = Some(r);
         state.p = Some(p);
+        state.c = c;
         state.prevouts = prevouts;
         Ok(Next::To(Stage::Signing))
     }
@@ -1609,6 +1619,21 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
             .context("terminal fee overflow")?
             .max(DUST))
     }
+    /// Her commitment to the filing `bytes` (a leaf carrier's), spending
+    /// `r`'s purse: its fee its own at the round's rate, 1 sat/vB at least,
+    /// a quarter of the purse at most.
+    fn commitment(&self, r: &Transaction, bytes: &[u8]) -> Result<Transaction> {
+        let purse = self.o.babe.purse().context("no purse to commit from")?;
+        let weighed = self.o.commitment(&self.keys, r, bytes, Amount::ZERO)?;
+        let vsize = weighed.vsize() as u64;
+        let least = FeeRate::from_sat_per_vb_u32(1)
+            .fee_vb(vsize)
+            .context("commitment fee")?;
+        let fee = (self.rate.fee_vb(vsize).context("commitment fee")?)
+            .min(purse / 4)
+            .max(least);
+        self.o.commitment(&self.keys, r, bytes, fee)
+    }
     /// Her publication of `filing`, spending `r`'s slot, its anchor and her
     /// purse, its fee within her allowance in all (`state`'s), else what
     /// those hold besides the fee coin it pays her terminals (her reserve's,
@@ -1619,6 +1644,11 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
     /// first, then one alone, the smallest that pays; joined only if
     /// `joined`, as an exception, funds mattering more than her coins not
     /// being tied together on Bitcoin.
+    ///
+    /// Under a leaf carrier, her purse is spent first by her commitment to
+    /// the filing (`state`'s, else made, and returned to keep with P): P
+    /// spends its coin carrying the filing and its change in the purse's
+    /// place, and pays for it too, as its child.
     fn build_p(
         &self,
         r: &Transaction,
@@ -1626,8 +1656,11 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
         bump: Option<(&Transaction, Amount)>,
         state: &State,
         joined: bool,
-    ) -> Result<(Transaction, Vec<TxOut>)> {
+    ) -> Result<(Transaction, Vec<TxOut>, Option<Transaction>)> {
         let allowance = state.p_allowance;
+        let leaf = self.o.carrier() == licash_statement::Carrier::Leaf;
+        let fee_vout = if leaf { 0 } else { 1 };
+        let bytes = self.filed(filing);
         let request = presign(&self.o.set, "request")?;
         let slot = request.tx.output.get(2).context("no claim slot")?.clone();
         let anchor = r.output.get(1).context("no request anchor")?.clone();
@@ -1636,10 +1669,23 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
             anchor.script_pubkey == fee_script,
             "request anchor is not hers"
         );
-        let held = slot.value + anchor.value + self.o.babe.purse().unwrap_or(Amount::ZERO);
+        let c = match (leaf, &state.c) {
+            (false, _) => None,
+            (true, Some(c)) => Some(c.clone()),
+            (true, None) => Some(self.commitment(r, &bytes)?),
+        };
+        let c_fee = match &c {
+            Some(c) => (self.o.babe.purse().context("no purse to commit from")?)
+                .checked_sub(c.output.iter().map(|o| o.value).sum())
+                .context("her commitment creates money")?,
+            None => Amount::ZERO,
+        };
+        let held = (slot.value + anchor.value + self.o.babe.purse().unwrap_or(Amount::ZERO))
+            .checked_sub(c_fee)
+            .context("her commitment pays more than her purse")?;
         let fee_coin = match bump {
             Some((old, _)) => {
-                let kept = old.output.get(1).context("no fee coin to keep")?;
+                let kept = old.output.get(fee_vout).context("no fee coin to keep")?;
                 ensure!(kept.script_pubkey == fee_script, "a fee coin not hers");
                 kept.clone()
             }
@@ -1660,14 +1706,24 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
             .value
             .checked_sub(r_total)
             .context("R creates money")?;
-        let bytes = self.filed(filing);
         let at = |vout| OutPoint {
             txid: r.compute_txid(),
             vout,
         };
         let mut base = vec![(at(2), slot), (at(1), anchor)];
+        // Her commitment's coins: the filing's, and her purse's rest, which
+        // pays it unless the fees run past it.
+        if let Some(c) = &c {
+            for vout in [dispute::COMMITTED, dispute::COMMITTED + 1] {
+                let op = OutPoint {
+                    txid: c.compute_txid(),
+                    vout,
+                };
+                base.push((op, c.output[vout as usize].clone()));
+            }
+        }
         // Her purse, R's, pays it unless the fees run past it.
-        if let Some(value) = self.o.babe.purse() {
+        if let (None, Some(value)) = (&c, self.o.babe.purse()) {
             let purse = r.output.get(PURSE_VOUT as usize).context("no purse")?;
             ensure!(
                 purse.value == value && purse.script_pubkey == fee_coin.script_pubkey,
@@ -1720,24 +1776,30 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
             for i in 1..weighed.input.len() {
                 if prevouts[i].script_pubkey == fee_coin.script_pubkey {
                     dispute::sign_fee_input(&self.keys.party.payment, &mut weighed, i, &prevouts)?;
-                } else {
+                } else if c.is_none() || i != 2 {
                     weighed.input[i].witness = Witness::from_slice(&[[0u8; 64]]);
                 }
+            }
+            // The filing's coin, revealed: what it weighs, its envelope.
+            if c.is_some() {
+                self.o
+                    .sign_publication(&self.keys, &mut weighed, &prevouts, &bytes)?;
             }
             let own = self
                 .rate
                 .fee_vb(weighed.vsize() as u64)
                 .context("publication fee")?;
+            let c_vsize = c.as_ref().map_or(0, |c| c.vsize() as u64);
             let package = self
                 .rate
-                .fee_vb(weighed.vsize() as u64 + r.vsize() as u64)
+                .fee_vb(weighed.vsize() as u64 + r.vsize() as u64 + c_vsize)
                 .context("request package fee")?;
             let least = FeeRate::from_sat_per_vb_u32(1)
                 .fee_vb(weighed.vsize() as u64)
                 .context("publication fee")?;
             let fee = match bump {
                 Some((_, fee)) => fee,
-                None => (own.max(package.checked_sub(r_fee).unwrap_or(Amount::ZERO)))
+                None => (own.max(package.checked_sub(r_fee + c_fee).unwrap_or(Amount::ZERO)))
                     .min(limit / 4)
                     .max(least),
             };
@@ -1762,13 +1824,14 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
                 continue;
             }
             if left >= DUST {
-                p.output[2].value = left;
+                p.output[fee_vout + 1].value = left;
             } else {
                 p.output.pop();
             }
             // Over its every input and final output: none can be added.
-            self.o.sign_publication(&self.keys, &mut p, &prevouts)?;
-            return Ok((p, prevouts));
+            self.o
+                .sign_publication(&self.keys, &mut p, &prevouts, &bytes)?;
+            return Ok((p, prevouts, c));
         }
         let needed = needed.map_or(0, |n| n.to_sat());
         Err(Short { needed, most }.into())
@@ -1846,9 +1909,14 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
     fn sign(&self, state: &mut State) -> Result<Next> {
         let mut p = state.p.clone().context("no publication transaction")?;
         let fee_script = dispute::fee_script(&self.keys.party.payment)?;
+        let committed = committed_script(state);
         for i in 1..p.input.len() {
             if state.prevouts[i].script_pubkey == fee_script {
                 dispute::sign_fee_input(&self.keys.party.payment, &mut p, i, &state.prevouts)?;
+                continue;
+            }
+            // Her filing's coin, signed with P's slot ([`Self::build_p`]).
+            if Some(&state.prevouts[i].script_pubkey) == committed.as_ref() {
                 continue;
             }
             match self.wallet.sign_input(&p, &state.prevouts, i) {
@@ -1875,15 +1943,14 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
         Ok(Next::To(Stage::Published))
     }
     /// Her coin paying P, if any, kept from her other spends.
-    fn keep_p(&self, p: &Transaction, prevouts: &[TxOut]) {
+    fn keep_p(&self, p: &Transaction, prevouts: &[TxOut], committed: Option<&ScriptBuf>) {
         let Ok(fee_script) = dispute::fee_script(&self.keys.party.payment) else {
             return;
         };
         for i in 1..p.input.len() {
-            if prevouts
-                .get(i)
-                .is_none_or(|o| o.script_pubkey == fee_script)
-            {
+            if prevouts.get(i).is_none_or(|o| {
+                o.script_pubkey == fee_script || Some(&o.script_pubkey) == committed
+            }) {
                 continue;
             }
             if let Err(e) = self.wallet.sign_input(p, prevouts, i) {
@@ -1937,8 +2004,11 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
                 if let Some(next) = self.bump(state, &r, &p, tip)? {
                     return Ok(next);
                 }
-                self.keep_p(&p, &state.prevouts);
+                self.keep_p(&p, &state.prevouts, committed_script(state).as_ref());
                 self.broadcast(&r).await;
+                if let Some(c) = &state.c {
+                    self.broadcast(c).await;
+                }
                 self.broadcast(&p).await;
             }
             return Ok(Next::Save);
@@ -1953,7 +2023,10 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
         // publishes, whichever spends the slot, carries her claim and pays
         // her fee coin alike.
         let hers = match &spent {
-            Some((_, tx)) => !self.reclaimed(tx)? && tx.output.get(..2) == p.output.get(..2),
+            Some((_, tx)) => {
+                let kept = p_fee_vout(state) as usize + 1;
+                !self.reclaimed(tx)? && tx.output.get(..kept) == p.output.get(..kept)
+            }
             None => false,
         };
         match spent {
@@ -1992,7 +2065,10 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
                 if let Some(next) = self.bump(state, &r, &p, tip)? {
                     return Ok(next);
                 }
-                self.keep_p(&p, &state.prevouts);
+                self.keep_p(&p, &state.prevouts, committed_script(state).as_ref());
+                if let Some(c) = &state.c {
+                    self.broadcast(c).await;
+                }
                 self.broadcast(&p).await;
                 Ok(Next::Save)
             }
@@ -2023,13 +2099,20 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
         let paid = (state.prevouts.iter().map(|o| o.value).sum::<Amount>())
             .checked_sub(p.output.iter().map(|o| o.value).sum())
             .context("her publication creates money")?;
+        let c = state.c.as_ref().map(Transaction::compute_txid);
         let held: Amount = (p.input.iter().zip(&state.prevouts))
-            .filter(|(i, _)| i.previous_output.txid == r.compute_txid())
+            .filter(|(i, _)| {
+                let from = i.previous_output.txid;
+                from == r.compute_txid() || Some(from) == c
+            })
             .map(|(_, o)| o.value)
             .sum();
+        let fee_vout = p_fee_vout(state) as usize;
         let limit = match state.p_allowance {
             Some(sats) => Amount::from_sat(sats),
-            None => held.checked_sub(p.output[1].value).unwrap_or(Amount::ZERO),
+            None => held
+                .checked_sub(p.output[fee_vout].value)
+                .unwrap_or(Amount::ZERO),
         };
         let rung = rung(start, end, tip);
         if rung == 3 {
@@ -2057,7 +2140,7 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
             return Ok(None);
         }
         let filing = self.filing_of(state)?;
-        let (bumped, prevouts) = match self.build_p(r, &filing, Some((p, target)), state, true) {
+        let (bumped, prevouts, _) = match self.build_p(r, &filing, Some((p, target)), state, true) {
             Ok(made) => made,
             Err(e) => {
                 self.trouble(format!("{e:#}"));
@@ -2514,7 +2597,13 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
                 Some((at, spend)) => {
                     let hash = self.chain.hash(at).await.map_err(|e| anyhow!(e))?;
                     let block = self.chain.block(&hash).await.map_err(|e| anyhow!(e))?;
-                    Some(dispute::disclosed(response, &block, &spend.compute_txid())?)
+                    let carrier = licash_hp::carrier(&self.o.base);
+                    Some(dispute::disclosed(
+                        carrier,
+                        response,
+                        &block,
+                        &spend.compute_txid(),
+                    )?)
                 }
             };
 
@@ -3073,6 +3162,11 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
         }
         state.from = Some(rescan(from, tip));
         if state.next_at.is_none_or(|due| tip.saturating_add(1) >= due) {
+            // Her fee coin her commitment's, her claim's slot reclaimed: it
+            // may be in no block, P never was.
+            if let (true, Some(c)) = (state.reclaimed, &state.c) {
+                self.broadcast(c).await;
+            }
             self.broadcast(state.payout.as_ref().context("no pinned payout")?)
                 .await;
         }
@@ -3419,15 +3513,12 @@ fn left_over(state: &State, rate: FeeRate) -> Result<Vec<(OutPoint, TxOut)>> {
     let coins: Vec<(OutPoint, TxOut)> = match state.reclaimed {
         true => {
             let r = state.r.as_ref().context("no R")?;
-            ([1, PURSE_VOUT].into_iter())
-                .filter_map(|vout| {
-                    let op = OutPoint {
-                        txid: r.compute_txid(),
-                        vout,
-                    };
-                    Some((op, r.output.get(vout as usize)?.clone()))
-                })
-                .collect()
+            let anchor = OutPoint {
+                txid: r.compute_txid(),
+                vout: 1,
+            };
+            let anchor = r.output.get(1).map(|out| (anchor, out.clone()));
+            anchor.into_iter().chain(Some(purse_coin(state)?)).collect()
         }
         false if state.p_height.is_some() => vec![fee_coin(state)?],
         false => Vec::new(),
@@ -3443,14 +3534,47 @@ fn left_over(state: &State, rate: FeeRate) -> Result<Vec<(OutPoint, TxOut)>> {
         .collect())
 }
 
-/// Her terminal's fee coin: P's, or, P never published (her claim's slot
-/// reclaimed), her purse, R's, whole.
-fn fee_coin(state: &State) -> Result<(OutPoint, TxOut)> {
-    let (tx, vout) = if state.reclaimed {
-        (state.r.as_ref().context("no R")?, PURSE_VOUT)
-    } else {
-        (state.p.as_ref().context("no P")?, 1)
+/// Where P pays her terminals' fee coin: after its nulldata under a
+/// nulldata carrier, first under a leaf one (no nulldata, her commitment
+/// kept), its change next.
+fn p_fee_vout(state: &State) -> u32 {
+    match state.c {
+        Some(_) => 0,
+        None => 1,
+    }
+}
+/// The script of her commitment's coin carrying her filing, if she made one.
+fn committed_script(state: &State) -> Option<ScriptBuf> {
+    let c = state.c.as_ref()?;
+    Some(
+        c.output
+            .get(dispute::COMMITTED as usize)?
+            .script_pubkey
+            .clone(),
+    )
+}
+/// Her purse as it is: R's, or, her commitment made (it may be in blocks,
+/// or posted), the commitment's change, which she posts before what spends
+/// it. Its coin carrying the filing, dust, is left.
+fn purse_coin(state: &State) -> Result<(OutPoint, TxOut)> {
+    let (tx, vout) = match &state.c {
+        Some(c) => (c, dispute::COMMITTED + 1),
+        None => (state.r.as_ref().context("no R")?, PURSE_VOUT),
     };
+    let out = tx.output.get(vout as usize).context("no purse")?.clone();
+    let op = OutPoint {
+        txid: tx.compute_txid(),
+        vout,
+    };
+    Ok((op, out))
+}
+/// Her terminal's fee coin: P's, or, P never published (her claim's slot
+/// reclaimed), her purse ([`purse_coin`]).
+fn fee_coin(state: &State) -> Result<(OutPoint, TxOut)> {
+    if state.reclaimed {
+        return purse_coin(state);
+    }
+    let (tx, vout) = (state.p.as_ref().context("no P")?, p_fee_vout(state));
     Ok((
         OutPoint {
             txid: tx.compute_txid(),

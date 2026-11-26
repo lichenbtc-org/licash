@@ -45,7 +45,7 @@ use licash_statement::{
     btc::{self, Header, OutPoint},
     checksum_digits,
     codec::{R, W},
-    script_digit, Checkpoint, Contract, Exit, Payout, Read, Reject, JOURNAL_LEN,
+    script_digit, Carrier, Checkpoint, Contract, Exit, Payout, Read, Reject, JOURNAL_LEN,
 };
 use sha2::{Digest, Sha256};
 
@@ -127,6 +127,25 @@ pub fn contract(base: &Base) -> Contract {
         work: u128::from(p.chain.work_depth).saturating_mul(btc::work(header.bits())),
         payout: payout(base),
     }
+}
+
+/// Where `base`'s links carry their bytes ([`recovery::leaf_carried`]): a
+/// function of its Base alone, never of the input's choosing, as an exit
+/// read under another carrier could read her claim as none.
+pub fn carrier(base: &Base) -> Carrier {
+    match recovery::leaf_carried(base.parts().graph.id) {
+        true => Carrier::Leaf,
+        false => Carrier::Nulldata,
+    }
+}
+
+/// Whether `exit`'s slot spends are each of the shape `base`'s carrier
+/// reads ([`carrier`]).
+fn carried_as(base: &Base, exit: &Exit) -> bool {
+    let leaf = carrier(base) == Carrier::Leaf;
+    std::iter::once(&exit.publish)
+        .chain(&exit.disclosure)
+        .all(|s| s.reserved.is_some() == leaf)
 }
 
 /// The Licash chain the statement decides on: Base's checkpoint, then
@@ -267,7 +286,7 @@ impl HubInput {
         let mut r = R(bytes);
         let base = Base::from_bytes(&r.bytes().map_err(|_| Refusal::Input)?)
             .map_err(|_| Refusal::Input)?;
-        let exit = Exit::read(&mut r).map_err(|_| Refusal::Input)?;
+        let exit = Exit::read(&mut r, carrier(&base)).map_err(|_| Refusal::Input)?;
         let p = base.parts();
         let evidence = recovery::evidence_from_bytes(
             &p.keyset,
@@ -431,6 +450,9 @@ pub fn decide_with(
         return Err(Refusal::Chain(
             "a chained contract is decided on its chain, and no other is".into(),
         ));
+    }
+    if !carried_as(base, exit) {
+        return Err(Refusal::Input);
     }
     let (read, view) = match chained {
         None => (

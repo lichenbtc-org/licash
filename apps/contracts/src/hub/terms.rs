@@ -4,7 +4,7 @@ use anyhow::{bail, ensure, Result};
 use licash::base::{ChainTerms, Fees, GraphTerms, Limits, Recipe};
 use licash::chain::Checkpoint;
 use licash::note::Keyset;
-use licash::recovery::{CHAINED_FROM, COMPACT_FROM, LEAN_FROM, SIGNED_FROM};
+use licash::recovery::{CHAINED_FROM, COMPACT_FROM, LEAF_FROM, LEAN_FROM, SIGNED_FROM};
 use licash::spend::ChainProfile;
 use licash_contract::graph::RETURNING;
 use licash_contract::opening::{Bounds, Floors, Quote};
@@ -127,6 +127,10 @@ pub struct Timing {
     work_depth: u32,
     /// The hub's own fee for an opening, before its surcharge.
     opening_fee: u64,
+    /// Whether it quotes graphs that carry her claim and its disclosure
+    /// in nulldata outputs where the program reads leaf envelopes too
+    /// ([`Timing::with_nulldata`]).
+    nulldata: bool,
 }
 
 /// The most blocks of work a hub may ask for beyond its network's floor:
@@ -194,7 +198,19 @@ impl Timing {
             step: 0,
             work_depth: Floors::of(profile).work_depth,
             opening_fee: OPENING_FEE,
+            nulldata: false,
         })
+    }
+
+    /// These terms, quoting graphs that carry her claim and the hub's
+    /// disclosure in nulldata outputs ([`SIGNED_FROM`]) where the program
+    /// trusted reads leaf envelopes ([`LEAF_FROM`]) too: as hubs before
+    /// those did, so that both are played.
+    pub fn with_nulldata(self) -> Self {
+        Self {
+            nulldata: true,
+            ..self
+        }
     }
 
     /// These terms, the hub's own fee for an opening `fee` sat, of the
@@ -393,6 +409,7 @@ impl Timing {
     /// program contracts open under decides it, else the last before.
     fn graph_id(&self) -> u32 {
         match crate::trust(self.profile) {
+            Ok(t) if t.chained.is_some() && t.own_claims && t.leaf && !self.nulldata => LEAF_FROM,
             Ok(t) if t.chained.is_some() && t.own_claims => SIGNED_FROM,
             Ok(t) if t.chained.is_some() => CHAINED_FROM,
             Ok(t) if t.lean => LEAN_FROM,
@@ -555,7 +572,7 @@ mod tests {
             (
                 None,
                 [
-                    "30809d646d382766f77114311ffef4031e556b2f03505934a47e6a94a11f7fa8",
+                    "8fae26f6c05403f2c15e693b79a73b8818b5e1462cff187b2d399910b3b34d6c",
                     "ce437f59f881e2c6ba564cf5847da678d8f8fd9ac0e8633f8468ec72cc15e1f9",
                 ],
                 3_000,
@@ -563,7 +580,7 @@ mod tests {
             (
                 Some(RANGE),
                 [
-                    "54d70ef6780e5bec58a88e3e972e86d46b85406804b77ad6698928c471df68e9",
+                    "18a3661c82de2e094636b000c485c17380dc8ce9914af6729cfc2c8087703a37",
                     "440d6f591159a77d7531a4080e983498dae5a10888ac0a29bc403f135882320e",
                 ],
                 3_024,
@@ -587,6 +604,17 @@ mod tests {
                 .unwrap()
                 .with_opening_fee(3_000);
             let graph = at.quote(keyset.clone(), checkpoint.clone()).graph.id;
+            assert_eq!(graph, licash::recovery::SIGNED_FROM);
+            // Regtest quotes the graph its mock reads, leaf envelopes, and
+            // the signets' told to.
+            let regtest = Timing::of(ChainProfile::Core30DefaultRegtest, range).unwrap();
+            let graph = regtest.quote(keyset.clone(), checkpoint.clone()).graph.id;
+            assert_eq!(graph, licash::recovery::LEAF_FROM);
+            let graph = (regtest
+                .with_nulldata()
+                .quote(keyset.clone(), checkpoint.clone()))
+            .graph
+            .id;
             assert_eq!(graph, licash::recovery::SIGNED_FROM);
             assert_eq!((bounds.lock, bounds.response_window), (1_000, 12));
         }
