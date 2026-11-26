@@ -29,8 +29,7 @@ pub(crate) mod testing {
 
 use std::sync::Arc;
 
-use admission::Admission;
-pub use admission::{AdmissionSource, Ingress, PER_SOURCE};
+pub use admission::PER_SOURCE;
 use axum::{
     extract::{
         rejection::{JsonRejection, QueryRejection},
@@ -48,6 +47,8 @@ use licash_api::{
     Released, Settle, TweaksQuery, Unlink, Unlinked,
 };
 use licash_hub::{Error, Hub, Settled};
+use licash_serve::Admission;
+pub use licash_serve::{AdmissionSource, Ingress};
 use lightning::Gateway;
 use tower_http::trace::TraceLayer;
 use tweaks::Tweaks;
@@ -58,8 +59,8 @@ use tweaks::Tweaks;
 /// dispute can cite (`licash_hub::MAX_EVIDENCE_BYTES`).
 pub const BODY_LIMIT: usize = 1 << 20;
 
-/// `ok`, or 503 once the hub halted.
-pub const HEALTH: &str = "/health";
+/// `ok`, or 503 once the hub halted: never shed.
+pub const HEALTH: &str = licash_serve::HEALTH;
 
 /// The most requests it serves at once: those past it are answered
 /// unavailable at once, rather than queued for the threads verifying
@@ -312,7 +313,8 @@ pub fn router(hub: Arc<Hub>, services: Services) -> Router {
         // Its own body limit, of a provider's requests.
         api = api.merge(swaps);
     }
-    let mut api = shed(api.layer(DefaultBodyLimit::max(BODY_LIMIT)), MAX_SERVING);
+    let api = api.layer(DefaultBodyLimit::max(BODY_LIMIT));
+    let mut api = licash_serve::shed(api, MAX_SERVING, "the hub is too busy now");
     if let Some(openings) = contracts {
         // Its own body limit, budgets and times: an opening's messages are
         // large, and arrive slowly over Tor.
@@ -324,19 +326,7 @@ pub fn router(hub: Arc<Hub>, services: Services) -> Router {
         api = api.merge(contracts);
     }
     // Each request's source, resolved once, before any handler admits by it.
-    api.layer(axum::middleware::from_fn_with_state(
-        ingress,
-        admission::resolve,
-    ))
-    .layer(TraceLayer::new_for_http())
-}
-
-/// `router`, serving at most `most` requests at once but its [`HEALTH`]:
-/// any past them answered unavailable (503) at once, and any whose body is
-/// still arriving [`licash_swaps_service::BODY_TIME`] after its head
-/// refused.
-pub fn shed(router: Router, most: usize) -> Router {
-    licash_swaps_service::shed_saying(router, most, "the hub is too busy now")
+    licash_serve::resolving(api, ingress).layer(TraceLayer::new_for_http())
 }
 
 /// A [`Problem`] answered with its status.

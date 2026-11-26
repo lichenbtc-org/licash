@@ -1213,7 +1213,7 @@ async fn serve(
             }
         }
     };
-    licash_tor::listen(listener, router, stop).await;
+    licash_serve::listen(listener, router, stop).await;
     if let Some(announcing) = announcing {
         announcing.abort();
     }

@@ -1,7 +1,7 @@
 //! Tor for the applications, through a Tor client of their own (Arti):
 //! HTTP(S) requests and streams over it, to onion services and to the
 //! clear web alike, and an axum router served as an onion service of their
-//! own, or on the clear web ([`listen`]).
+//! own, each request carrying its [`licash_serve::Circuit`].
 //!
 //! Arti may end the process if the Tor network's consensus declares its
 //! version obsolete.
@@ -32,7 +32,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::{rustls, TlsConnector};
 use tor_rtcompat::PreferredRuntime;
 
-pub use serve::{listen, Circuit, Onion};
+pub use serve::Onion;
 pub use socks::Socks;
 
 /// How long a request may take, its circuit included.

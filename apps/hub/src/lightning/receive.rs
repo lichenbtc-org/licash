@@ -72,15 +72,10 @@ fn full(
     let Some(source) = source else {
         return Ok(());
     };
-    // Those an older release stored under its address and a port too.
-    let [v4, v6] = source.legacy_prefixes();
     let unpaid: u32 = conn
         .query_row(
-            "SELECT count(*) FROM lightning_receipts WHERE state = 'open'
-             AND (source = ?1
-                  OR substr(source, 1, length(?2)) = ?2
-                  OR substr(source, 1, length(?3)) = ?3)",
-            rusqlite::params![source.as_bytes(), v4, v6],
+            "SELECT count(*) FROM lightning_receipts WHERE state = 'open' AND source = ?1",
+            [source.as_bytes()],
             |r| r.get(0),
         )
         .map_err(store_down)?;
@@ -986,9 +981,8 @@ mod tests {
         assert_eq!(Store::open(&path).unwrap().live().unwrap().len(), 2);
     }
 
-    /// From one address, whatever its ports, only so many receipts are
-    /// asked and not paid, those an older release stored under it and a
-    /// port counted: from another address, or once one is paid, more.
+    /// From one address only so many receipts are asked and not paid: from
+    /// another address, or once one is paid, more.
     #[test]
     fn receipts_asked_and_not_paid_from_one_source_are_bounded() {
         let dir = tempfile::tempdir().unwrap();
@@ -998,20 +992,7 @@ mod tests {
         let insert = |n: u8, source: Option<&crate::AdmissionSource>| {
             store.insert(&[n; 32], "{}", 5, 5000, 1024, source)
         };
-        // Two stored by an older release, by port: one over IPv6.
-        let legacy = |n: u8, stored: &str| {
-            insert(n, None).unwrap();
-            let c = store.0.lock().unwrap();
-            c.execute(
-                "UPDATE lightning_receipts SET source = ?2 WHERE hash = ?1",
-                rusqlite::params![[n; 32], stored.as_bytes()],
-            )
-            .unwrap();
-        };
-        legacy(0, "tcp 127.0.0.1:41000");
-        legacy(1, "tcp [::ffff:127.0.0.1]:41001");
-        legacy(200, "tcp 127.0.0.10:41002");
-        for n in 2..crate::PER_SOURCE as u8 {
+        for n in 0..crate::PER_SOURCE as u8 {
             insert(n, Some(&one)).unwrap();
         }
         let refused = insert(100, Some(&one)).unwrap_err().0;

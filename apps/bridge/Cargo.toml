@@ -15,6 +15,7 @@ licash-api.workspace = true
 licash-nostr.workspace = true
 licash-store.workspace = true
 licash-wallet.workspace = true
+licash-serve.workspace = true
 licash-tor.workspace = true
 licash-transport = { workspace = true, features = ["tor"] }
 anyhow.workspace = true

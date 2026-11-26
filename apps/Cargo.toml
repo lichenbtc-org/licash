@@ -2,7 +2,7 @@
 # their runtime dependencies stay out of the SDK's.
 [workspace]
 resolver = "2"
-members = ["bridge", "chain-client", "contracts", "dashboard", "e2e", "hub", "mobile/core", "nostr", "notify", "observatory", "swaps", "tor", "transport", "wallet-cli", "witness"]
+members = ["bridge", "chain-client", "contracts", "dashboard", "e2e", "hub", "mobile/core", "nostr", "notify", "observatory", "serve", "swaps", "tor", "transport", "wallet-cli", "witness"]
 
 [profile.dev]
 debug = 0
@@ -30,6 +30,7 @@ licash-lightning = { path = "../crates/licash-lightning", features = ["lnd"] }
 licash-nostr = { path = "nostr" }
 licash-observatory = { path = "observatory" }
 licash-notify = { path = "notify" }
+licash-serve = { path = "serve" }
 licash-tor = { path = "tor" }
 licash-transport = { path = "transport" }
 anyhow = "1"

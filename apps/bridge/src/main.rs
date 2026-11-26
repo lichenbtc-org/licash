@@ -363,7 +363,7 @@ async fn serve(
             _ = terminate => {}
         }
     };
-    licash_tor::listen(listener, router, shutdown).await;
+    licash_serve::listen(listener, router, shutdown).await;
     nwc.abort();
     rounds.abort();
     if let Some(announced) = announced {

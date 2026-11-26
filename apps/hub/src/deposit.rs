@@ -329,20 +329,16 @@ enum Kept {
 }
 
 /// The deposits asked and not paid, as many as `--deposit-max-open`
-/// bounds: from `source` alone, if any, those an older release stored
-/// under its address and a port too. Those bound to a contract are paid
+/// bounds: from `source` alone, if any. Those bound to a contract are paid
 /// for by it.
 fn unpaid(conn: &Connection, source: Option<&crate::AdmissionSource>) -> rusqlite::Result<u32> {
-    let [v4, v6] = source.map_or([None, None], crate::AdmissionSource::legacy_prefixes);
     conn.query_row(
         "SELECT count(*) FROM deposits d
          WHERE d.state = 'open' AND d.done_at IS NULL
-           AND (?1 IS NULL OR d.source = ?1
-                OR substr(d.source, 1, length(?2)) = ?2
-                OR substr(d.source, 1, length(?3)) = ?3)
+           AND (?1 IS NULL OR d.source = ?1)
            AND NOT EXISTS (SELECT 1 FROM deposit_closes c
                            WHERE c.hash = d.hash AND c.contract IS NOT NULL)",
-        params![source.map(crate::AdmissionSource::as_bytes), v4, v6],
+        params![source.map(crate::AdmissionSource::as_bytes)],
         |r| r.get(0),
     )
 }

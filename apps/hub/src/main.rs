@@ -1008,7 +1008,7 @@ struct IngressArgs {
     /// reach `--listen`.
     #[arg(long = "trusted-proxy", env = "LICASH_HUB_TRUSTED_PROXY",
           value_name = "CIDR", value_delimiter = ',',
-          value_parser = licash_hub_service::admission::trusted_proxy)]
+          value_parser = licash_serve::trusted_proxy)]
     trusted_proxies: Vec<ipnet::IpNet>,
 }
 
@@ -2124,7 +2124,7 @@ async fn serve(
     // Each request knows its peer: deposits and receipts are capped by its
     // address, or its client's behind a trusted proxy
     // (licash_hub_service::AdmissionSource).
-    licash_tor::listen(listener, router, stop).await;
+    licash_serve::listen(listener, router, stop).await;
     for task in announcing.into_iter().chain(swaps) {
         task.abort();
     }

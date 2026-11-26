@@ -1569,7 +1569,7 @@ async fn call(net: &Net, method: Method, path: &str, body: Option<String>) -> (u
 #[tokio::test]
 async fn a_trusted_proxys_client_asks_the_deposit_and_a_malformed_chain_is_refused() {
     let net = Net::new().await;
-    let trusted = licash_hub_service::admission::trusted_proxy("10.0.0.2").unwrap();
+    let trusted = licash_serve::trusted_proxy("10.0.0.2").unwrap();
     let services = Services {
         deposits: Some(net.deposits.clone()),
         ingress: Arc::new(licash_hub_service::Ingress::new(vec![trusted])),
@@ -1657,9 +1657,8 @@ async fn deposits_asked_and_not_paid_are_bounded_retries_aside() {
     assert_eq!(gateway.deposit(&bodies[0], None).await.unwrap(), first);
 }
 
-/// From one address, whatever its ports, only so many deposits are asked
-/// and not paid, one an older release stored under it and a port counted:
-/// from another, more.
+/// From one address only so many deposits are asked and not paid: from
+/// another, more.
 #[tokio::test]
 async fn deposits_asked_and_not_paid_from_one_source_are_bounded() {
     let net = Net::new().await;
@@ -1684,16 +1683,7 @@ async fn deposits_asked_and_not_paid_from_one_source_are_bounded() {
     let ip = |s: &str| AdmissionSource::of_ip(s.parse().unwrap());
     let (one, other) = (ip("127.0.0.1"), ip("127.0.0.2"));
     let (last, asked) = bodies.split_last().unwrap();
-    // The first as an older release stored it: by its peer and port.
-    gateway.deposit(&asked[0], None).await.unwrap();
-    let db = rusqlite::Connection::open(&path).unwrap();
-    let (_, _, first) = asked[0].receive.terms().unwrap();
-    db.execute(
-        "UPDATE deposits SET source = ?2 WHERE hash = ?1",
-        rusqlite::params![first, b"tcp 127.0.0.1:41000".as_slice()],
-    )
-    .unwrap();
-    for body in &asked[1..] {
+    for body in asked {
         gateway.deposit(body, Some(&one)).await.unwrap();
     }
     let refused = gateway.deposit(last, Some(&one)).await.unwrap_err().0;
