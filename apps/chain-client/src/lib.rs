@@ -174,6 +174,20 @@ fn client() -> anyhow::Result<reqwest::Client> {
         .build()?)
 }
 
+/// A request's failure with its causes, which reqwest's own words leave
+/// out (a refused connection reads "error sending request" alone), and
+/// without its URL, which may hold credentials.
+fn failed(e: reqwest::Error) -> String {
+    let e = e.without_url();
+    let mut text = e.to_string();
+    let mut cause = std::error::Error::source(&e);
+    while let Some(c) = cause {
+        text = format!("{text}: {c}");
+        cause = c.source();
+    }
+    text
+}
+
 #[derive(Deserialize)]
 struct Reply<T> {
     result: Option<T>,
@@ -474,7 +488,7 @@ impl Source {
                     .body(hex)
                     .send()
                     .await
-                    .map_err(|e| anyhow::anyhow!("{self}: {}", e.without_url()))?;
+                    .map_err(|e| anyhow::anyhow!("{self}: {}", failed(e)))?;
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
                 (!status.is_success()).then(|| format!("{self}: {url}: HTTP {status}: {text}"))
@@ -510,7 +524,7 @@ impl Source {
                     .get(&url)
                     .send()
                     .await
-                    .map_err(|e| anyhow::anyhow!("{self}: {}", e.without_url()))?;
+                    .map_err(|e| anyhow::anyhow!("{self}: {}", failed(e)))?;
                 match response.status() {
                     reqwest::StatusCode::NOT_FOUND => Ok(false),
                     status if status.is_success() => Ok(true),
@@ -551,7 +565,7 @@ impl Source {
                     .json(&hexes)
                     .send()
                     .await
-                    .map_err(|e| anyhow::anyhow!("{self}: {}", e.without_url()))?;
+                    .map_err(|e| anyhow::anyhow!("{self}: {}", failed(e)))?;
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
                 ensure!(status.is_success(), "{self}: {url}: HTTP {status}: {text}");
@@ -608,7 +622,7 @@ impl Source {
                     .get(&url)
                     .send()
                     .await
-                    .map_err(|e| anyhow::anyhow!("{self}: {}", e.without_url()))?;
+                    .map_err(|e| anyhow::anyhow!("{self}: {}", failed(e)))?;
                 if response.status() == reqwest::StatusCode::NOT_FOUND {
                     return self.recommended(base, blocks).await.map(|r| rate(r * 1e3));
                 }
@@ -829,7 +843,7 @@ impl Source {
         let response = request
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("{self}: {method}: {}", e.without_url()))?;
+            .map_err(|e| anyhow::anyhow!("{self}: {method}: {}", failed(e)))?;
         let status = response.status();
         ensure!(
             status != reqwest::StatusCode::UNAUTHORIZED,
@@ -838,7 +852,7 @@ impl Source {
         let reply: Reply<T> = response
             .json()
             .await
-            .map_err(|e| anyhow::anyhow!("{self}: {method}: HTTP {status}: {}", e.without_url()))?;
+            .map_err(|e| anyhow::anyhow!("{self}: {method}: HTTP {status}: {}", failed(e)))?;
         if let Some(e) = reply.error {
             bail!("{self}: {method}: {} ({})", e.message, e.code);
         }
@@ -866,7 +880,7 @@ impl Source {
                 .get(url)
                 .send()
                 .await
-                .map_err(|e| anyhow::anyhow!("{self}: {}", e.without_url()))?;
+                .map_err(|e| anyhow::anyhow!("{self}: {}", failed(e)))?;
             let status = response.status();
             if let Some(wait) = throttled(&response, backoff) {
                 if waited + wait <= MOST_THROTTLED {

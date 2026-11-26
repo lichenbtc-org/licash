@@ -1177,3 +1177,16 @@ async fn a_node_tells_what_its_mempool_holds_and_esplora_what_it_ever_saw() {
     let txid = node.broadcast(&spend).await.unwrap();
     assert!(node.holds(&txid).await.unwrap());
 }
+
+#[tokio::test]
+async fn a_node_unreached_is_said_why_and_never_with_its_credentials() {
+    // A port nothing listens on any longer.
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = free.local_addr().unwrap();
+    drop(free);
+    let node: Source = format!("http://user:secret@{address}").parse().unwrap();
+    let error = format!("{:#}", node.tip().await.unwrap_err());
+    // Not "error sending request" alone: its cause too.
+    assert!(error.to_lowercase().contains("refused"), "{error}");
+    assert!(!error.contains("secret"), "{error}");
+}
