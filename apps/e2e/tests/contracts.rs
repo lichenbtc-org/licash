@@ -44,8 +44,17 @@ async fn a_wallet_with_no_coin_pays_for_a_contract_with_notes() -> anyhow::Resul
     let eco = Eco::up().await?;
     let hub1 = eco.hub(1);
     funded(&eco, 60_000).await?;
-    let info = eco.info(hub1).await?;
-    let offered = info.contracts.context("hub1 opens no contracts")?;
+    // Its wallet's coins, made as the stack came up, learned once a minute:
+    // until then it funds none of a contract.
+    let offered = until("hub1's wallet funding a contract", 150, || async {
+        let info = eco.info(hub1).await?;
+        let offered = info.contracts.context("hub1 opens no contracts")?;
+        Ok(offered
+            .funds
+            .is_none_or(|most| most >= offered.cap)
+            .then_some(offered))
+    })
+    .await?;
 
     let alice = eco.wallet("contractor")?;
     eco.pay_in(&alice, hub1, 60_000).await?;
