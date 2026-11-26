@@ -199,6 +199,20 @@ static WITNESSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsiz
 /// test runs.
 static WITNESS_DIRS: std::sync::Mutex<Vec<tempfile::TempDir>> = std::sync::Mutex::new(Vec::new());
 
+/// The set [`witnessed`] made last, and its witnesses: for another copy of
+/// that hub ([`witnessed_alike`]).
+type LastSet = Option<([u8; 32], Vec<licash_witness::client::Client>)>;
+static LAST_SET: std::sync::Mutex<LastSet> = std::sync::Mutex::new(None);
+
+/// `openings` of `hub` witnessed by the set [`witnessed`] made last: as a
+/// copy of that hub, restored elsewhere or started again, is.
+async fn witnessed_alike(openings: &Openings, hub: &Hub) -> Result<()> {
+    let (set, members) = LAST_SET.lock().unwrap().clone().context("no set made")?;
+    openings
+        .witnessed_by(Witnesses::of(set, members, hub.witness_secret())?)
+        .await
+}
+
 /// `openings` of `hub` witnessed as [`WITNESSES`] says: by that many
 /// witnesses of a set of their own, each served on a local port.
 async fn witnessed(openings: &Openings, hub: &Hub) -> Result<()> {
@@ -228,6 +242,7 @@ async fn witnessed(openings: &Openings, hub: &Hub) -> Result<()> {
         );
         WITNESS_DIRS.lock().unwrap().push(dir);
     }
+    *LAST_SET.lock().unwrap() = Some((set, members.clone()));
     openings
         .witnessed_by(Witnesses::of(set, members, hub.witness_secret())?)
         .await
@@ -5429,8 +5444,11 @@ async fn restored(rt: &Regtest, dir: &Path) -> Result<(Arc<Hub>, Arc<Openings>)>
     Ok((hub, openings))
 }
 
+/// The alerts a hub's openings told, as [`told`] keeps them.
+type Told = Arc<std::sync::Mutex<Vec<String>>>;
+
 /// What `openings` tell their operator from now on.
-fn told(openings: &Openings) -> Arc<std::sync::Mutex<Vec<String>>> {
+fn told(openings: &Openings) -> Told {
     let told = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let alerts = told.clone();
     openings.alert_with(Arc::new(move |message: &str| {
@@ -5551,6 +5569,177 @@ async fn a_hub_restored_from_its_backup_mid_dispute_answers_her_challenge() -> R
         "{received} of a claim of 131071: {done:?}"
     );
     eprintln!("restored mid-dispute: a challenged claim of 131071 paid {received}");
+    Ok(())
+}
+
+/// Openings of `hub`, its data in `dir`, witnessed by the set the harness
+/// made last ([`witnessed_alike`]), answering as the hub service does
+/// while it responds only: another copy of the hub.
+async fn copy_answering(rt: &Regtest, dir: &Path, hub: Arc<Hub>) -> Result<Arc<Openings>> {
+    let url = format!(
+        "{}/wallet/harness?cookie={}",
+        rt.rpc_url(),
+        rt.cookie().display()
+    );
+    let source: Source = url.parse()?;
+    let keyset = hub.info().keysets[0].clone();
+    let openings =
+        Openings::with_wallet(dir, source.clone(), source, keyset, Some(STALE_RANGE)).await?;
+    openings.charge_opening(OPENING_FEE);
+    witnessed_alike(&openings, &hub).await?;
+    licash_hub_service::answer_from(&openings, hub);
+    Ok(openings)
+}
+
+/// What `dir`'s hub pinned and signed for its contracts' disputes (its
+/// responses, its assertions), as transactions.
+fn signed_pins(dir: &Path) -> Result<Vec<bitcoin::Transaction>> {
+    let db = rusqlite::Connection::open(dir.join("hub.sqlite"))?;
+    let mut rows = db.prepare("SELECT response FROM response_pins WHERE response IS NOT NULL")?;
+    let rows = rows.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+    rows.map(|bytes| Ok(bitcoin::consensus::deserialize(&bytes?)?))
+        .collect()
+}
+
+/// Of [`signed_pins`] of `dir`, those spending `request` (by txid): its
+/// responses to it.
+fn responses_to(dir: &Path, request: &bitcoin::Txid) -> Result<Vec<bitcoin::Transaction>> {
+    Ok(signed_pins(dir)?
+        .into_iter()
+        .filter(|tx| tx.input.iter().any(|i| i.previous_output.txid == *request))
+        .collect())
+}
+
+/// The hub's machine is lost mid-dispute, its last writes unshipped: it
+/// had responded to her stale claim (showing no evidence) after its
+/// newest backup. A replica restored from that backup takes the contracts
+/// over and responds only: it finds that response on Bitcoin, signs no
+/// other, then proves, asserts, and answers her challenge. The master, started
+/// again while the replica plays, finds itself superseded and plays beside
+/// it: each one-time key signs one answer, whichever copy decided it, no
+/// round of either fails, and she is paid what is left.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_replica_taking_over_mid_dispute_answers_and_the_master_back_signs_nothing_else(
+) -> Result<()> {
+    use licash_contracts::holder::recovery::{self, Stage};
+    use licash_contracts::hub::Leadership;
+
+    let _witnessed = Witnessed::by(2);
+    let Stale {
+        rt,
+        _dir: dir,
+        hub,
+        openings: master,
+        chain,
+        wallet,
+        mine,
+        rate,
+    } = stale_claim([43; 32]).await?;
+    let (at, copy) = (dir.path().join("hub"), dir.path().join("replica"));
+    backed_up(&at, &copy, true)?;
+    master.refuse_evidence();
+    let mut responded = false;
+    for _ in 0..50 {
+        let round = master.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        if round.answered == 1 {
+            responded = true;
+            break;
+        }
+        rt.mine(1)?;
+    }
+    ensure!(responded, "the master never responded");
+    let first = match signed_pins(&at)?.as_slice() {
+        [response] => response.clone(),
+        pins => anyhow::bail!("{} pins signed, not one response", pins.len()),
+    };
+    let request = first.input[0].previous_output.txid;
+    ensure!(signed_pins(&copy)?.is_empty(), "backed up after");
+    // Its machine lost: it plays no more.
+    drop(master);
+
+    let replica_hub = Arc::new(Hub::open(
+        &copy.join("seed"),
+        &copy.join("hub.sqlite"),
+        Policy::default(),
+    )?);
+    let replica = copy_answering(&rt, &copy, replica_hub).await?;
+    ensure!(replica.take_over().await? == 1);
+    ensure!(replica.leadership().await? == Leadership::Leads(1));
+    replica.refuse_evidence();
+    let told_replica = told(&replica);
+    let _doubting = Doubting::of();
+
+    let mut back: Option<(Arc<Openings>, Told)> = None;
+    let mut done = None;
+    for block in 0..800 {
+        rt.mine(1)?;
+        let round = replica.answer_requests().await?;
+        ensure!(
+            round.failed == 0,
+            "the replica: {round:?} {:?}",
+            told_replica.lock().unwrap()
+        );
+        if block == 2 {
+            // Started again on its own machine, its data as it left it.
+            let master = copy_answering(&rt, &at, hub.clone()).await?;
+            ensure!(master.leadership().await? == Leadership::Superseded(1));
+            master.refuse_evidence();
+            let told_master = told(&master);
+            back = Some((master, told_master));
+        }
+        if let Some((master, told_master)) = &back {
+            let round = master.answer_requests().await?;
+            ensure!(
+                round.failed == 0,
+                "the master: {round:?} {:?}",
+                told_master.lock().unwrap()
+            );
+        }
+        let r =
+            recovery::advance(&wallet, &chain, &mine.join("wallet.sqlite"), rate).await?[0].clone();
+        ensure!(r.stage != Stage::Lost, "{r:?}");
+        if r.stage == Stage::Done {
+            done = Some(r);
+            break;
+        }
+    }
+    let done = done.context("never paid")?;
+    let (master, told_master) = back.context("the master never came back")?;
+    ensure!(master.leadership().await? == Leadership::Superseded(1));
+    // Each copy signed one response to her request at most, the one the
+    // master did: the replica, finding it on Bitcoin, signed none.
+    for (who, dir) in [("the replica", &copy), ("the master", &at)] {
+        let responses = responses_to(dir, &request)?;
+        ensure!(
+            responses.iter().all(|r| r == &first),
+            "{who} signed another response: {responses:?}"
+        );
+    }
+    for told in [&told_replica, &told_master] {
+        let alerts = told.lock().unwrap().clone();
+        ensure!(
+            alerts
+                .iter()
+                .all(|m| !m.contains("disagree") && !m.contains("no longer hold")),
+            "{alerts:?}"
+        );
+    }
+    ensure!(done.response.is_some(), "no response: {done:?}");
+    ensure!(
+        done.assertion.is_some() && done.challenge.is_some(),
+        "{done:?}"
+    );
+    ensure!(done.corrected == Some(98_304), "{done:?}");
+    // Paid by an answer to her challenge, not by a timeout.
+    ensure!(done.payout.is_some() && done.timeout.is_none(), "{done:?}");
+    let received = done.received.context("nothing received")?;
+    ensure!(
+        received < 131_071,
+        "{received} of a claim of 131071: {done:?}"
+    );
+    eprintln!("taken over mid-dispute: a challenged claim of 131071 paid {received}");
     Ok(())
 }
 
