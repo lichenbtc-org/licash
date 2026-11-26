@@ -209,7 +209,7 @@ pub struct Openings {
     /// The responder's health, told the operator as it changes.
     vigil: Mutex<vigil::Vigil>,
     /// What the node's wallet last said it holds, in sat: the most it
-    /// funds an F with ([`terms::fundable`]). None until it says.
+    /// funds an F with ([`Timing::fundable`]). None until it says.
     funds: Mutex<Option<u64>>,
     /// Whom the hub writes each one-time answer to before it signs it
     /// ([`Openings::witnessed_by`]): until told, it signs no contract.
@@ -820,7 +820,7 @@ impl Openings {
     /// of a cap so large: none if it funds none. As `most` if not known.
     fn most_funded(&self, most: u32) -> u32 {
         match self.funds() {
-            Some(balance) => terms::fundable(balance).unwrap_or(0).min(most),
+            Some(balance) => self.timing().fundable(balance).unwrap_or(0).min(most),
             None => most,
         }
     }
@@ -842,8 +842,9 @@ impl Openings {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .replace(balance);
-        let cap = terms::fundable(balance);
-        if before.map(terms::fundable) != Some(cap) {
+        let timing = self.timing();
+        let cap = timing.fundable(balance);
+        if before.map(|b| timing.fundable(b)) != Some(cap) {
             match cap {
                 Some(cap) => tracing::info!(balance, cap, "the contracts' wallet funds caps up to"),
                 None => tracing::warn!(balance, "the contracts' wallet funds no contract"),
@@ -1882,6 +1883,15 @@ mod tests {
         // The operator's scale: a slower prover than measured.
         commit(8);
         assert!(room(&openings).is_err());
+        // Terms of a longer window since (Mutinynet's 2,880 blocks to
+        // assert in) leave these contracts theirs: no more room than
+        // before, where that window alone would hold them all.
+        let longer = Timing::of(ChainProfile::Mutinynet, None).unwrap();
+        let theirs = terms::proof_blocks_of(&base);
+        assert!(longer.proof_blocks() > 100 * theirs);
+        let before = std::mem::replace(&mut *openings.timing.write().unwrap(), longer);
+        assert!(room(&openings).is_err());
+        *openings.timing.write().unwrap() = before;
         let mut scaled = test_openings(dir.path());
         scaled.prover = openings.prover.take();
         scaled.scale_proofs(0.5).unwrap();

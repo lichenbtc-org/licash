@@ -182,7 +182,7 @@ struct Chain {
     /// Let holders choose a contract's cap up to this many sat, taken
     /// down to a size (2^n - 1 sat, 131 071 the least), and how long it
     /// lasts up to `--contracts-max-blocks`, besides the fixed terms
-    /// (131 071 sat over 1 000 blocks, 1 912 on Mutinynet): a holder's
+    /// (131 071 sat over 1 000 blocks, 4 752 on Mutinynet): a holder's
     /// deposit funds a contract of its own part by default, any larger one
     /// she asks the hub funding the rest of it, at `--contracts-rate`.
     /// Advertised as no more than the hub's wallet funds.
@@ -205,7 +205,7 @@ struct Chain {
     )]
     contracts_fixed_only: bool,
     /// The most blocks a contract a holder chooses lasts: the fixed
-    /// terms' at least (1 912 on Mutinynet). By default a year of
+    /// terms' at least (4 752 on Mutinynet). By default a year of
     /// Bitcoin's blocks (about 18 days of Mutinynet's).
     #[arg(
         long = "contracts-max-blocks",

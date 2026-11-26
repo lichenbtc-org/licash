@@ -409,17 +409,21 @@ impl Openings {
         Ok(Answer::Frames(frames))
     }
 
-    /// Refused 503 unless the hub's prover makes, in an assert window, the
-    /// largest proof of an exit of each contract it committed to and one of
-    /// `cycles` for opening `id`, one after another: their holders may all
-    /// exit at once, and a claim it does not prove in time is paid all it
-    /// asks. Without a prover (the mock authority's proofs), room for any.
+    /// Refused 503 unless the hub's prover makes, in an assert window (the
+    /// shortest of theirs), the largest proof of an exit of each contract
+    /// it committed to and one of `cycles` for opening `id`, one after
+    /// another: their holders may all exit at once, and a claim it does not
+    /// prove in time is paid all it asks. Without a prover (the mock
+    /// authority's proofs), room for any.
     pub(super) fn room_for(&self, id: &[u8; 32], cycles: u64) -> Result<(), Refused> {
         let Some(prover) = &self.prover else {
             return Ok(());
         };
         let states = self.store().committed(id).map_err(Refused::unavailable)?;
         let mut all = vec![cycles];
+        // The shortest window any of them is proven in: a contract opened
+        // before the hub's terms changed keeps its own.
+        let mut blocks = self.timing().proof_blocks();
         // The header chain's batch a dispute may wait for, made once for all
         // of them: the blocks since the last receipt are at most a day's.
         if let Some(chain) = &self.chain {
@@ -430,8 +434,8 @@ impl Openings {
                 Refused::unavailable(format!("a contract the hub committed to is unread: {e:#}"))
             })?;
             all.push(base_cycles(&peek.base));
+            blocks = blocks.min(terms::proof_blocks_of(&peek.base));
         }
-        let blocks = self.timing().proof_blocks();
         let (need, have) = prover.room(&all, blocks).map_err(|why| {
             Refused::unavailable(format!("the hub's prover is not ready ({why}): later"))
         })?;

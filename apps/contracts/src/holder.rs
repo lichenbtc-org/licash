@@ -1703,6 +1703,7 @@ mod tests {
         let keyset = keyset.keyset().unwrap();
         let regtest = ChainProfile::Core30DefaultRegtest;
         let signet = ChainProfile::Core30Signet;
+        let mainnet = ChainProfile::Core30Mainnet;
         let mutinynet = ChainProfile::Mutinynet;
         // At the floor's work and at the most a hub asks beyond it.
         let deepest = |profile| {
@@ -1710,7 +1711,7 @@ mod tests {
             let timing = Timing::of(profile, None).unwrap();
             (timing.with_work_depth(floor + crate::hub::terms::MAX_EXTRA_WORK)).unwrap()
         };
-        let timings = [regtest, signet, mutinynet]
+        let timings = [regtest, signet, mainnet, mutinynet]
             .into_iter()
             .flat_map(|profile| {
                 [
@@ -1721,7 +1722,12 @@ mod tests {
         for (profile, timing) in timings {
             let checkpoint = Checkpoint::genesis(profile).unwrap();
             let tip = checkpoint.height();
-            let quote = timing.quote(keyset.clone(), checkpoint);
+            let mut quote = timing.quote(keyset.clone(), checkpoint);
+            if profile == mainnet {
+                // No program is trusted there yet, so its hub quotes no
+                // graph of its own: of the one the signets quote.
+                quote.graph.id = licash::recovery::PI1_ALONE_FROM;
+            }
             let offer = Offer {
                 bounds: timing.bounds(&quote),
                 quote,
@@ -1750,8 +1756,9 @@ mod tests {
             assert!(window > u32::from(g.publication_window) + 1, "{profile}");
         }
         // Regtest's as before; signet's 180 blocks after asserting, of
-        // its 1 000, and 12 to respond; Mutinynet's the same blocks, of
-        // its 1 912.
+        // its 1 000, and 12 to respond; Bitcoin's network's 456, of its
+        // 2 016, and 144 to respond; Mutinynet's the same blocks, of its
+        // 4 752.
         let gap = |profile| {
             let timing = Timing::of(profile, None).unwrap();
             let quote = timing.quote(keyset.clone(), Checkpoint::genesis(profile).unwrap());
@@ -1759,8 +1766,11 @@ mod tests {
         };
         assert_eq!(gap(regtest), (AFTER_ASSERT, 2));
         assert_eq!(gap(signet), (180, 12));
-        assert_eq!(gap(mutinynet), (180, 12));
-        assert!(Timing::of(ChainProfile::Core30Mainnet, None).is_err());
+        assert_eq!(gap(mainnet), (456, 144));
+        assert_eq!(gap(mutinynet), (456, 144));
+        // Terms alone open no contract on Bitcoin's network: no program is
+        // trusted there yet.
+        assert!(crate::trust(mainnet).is_err());
     }
 
     /// Of terms she chose within the hub's range, the fewest blocks it
@@ -1778,11 +1788,7 @@ mod tests {
             ppm_year: 10_000,
             ppm_year_funded: 0,
         };
-        for profile in [
-            ChainProfile::Core30DefaultRegtest,
-            ChainProfile::Core30Signet,
-            ChainProfile::Mutinynet,
-        ] {
+        for profile in ChainProfile::ALL {
             let timing = Timing::of(profile, Some(range)).unwrap();
             let r = timing.range().unwrap();
             let checkpoint = Checkpoint::genesis(profile).unwrap();
@@ -1791,7 +1797,13 @@ mod tests {
                 (16_777_215, 26_280),
                 (r.max_cap, r.max_blocks),
             ] {
-                let quote = timing.quote_for(keyset.clone(), checkpoint.clone(), cap, blocks, 0);
+                let mut quote =
+                    timing.quote_for(keyset.clone(), checkpoint.clone(), cap, blocks, 0);
+                if profile == ChainProfile::Core30Mainnet {
+                    // As its hub will quote it, once a program is trusted
+                    // there: of the graph the signets quote.
+                    quote.graph.id = licash::recovery::PI1_ALONE_FROM;
+                }
                 quote.check(profile).unwrap();
                 let offer = Offer {
                     bounds: timing.bounds(&quote),

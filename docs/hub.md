@@ -196,9 +196,13 @@ Restoring on another host, while contracts may be in dispute:
    route, only once the copy is known to be the newest: an older ledger
    takes spent notes again.
 
-A contract's response window (12 blocks at least on signet) is how long
-the hub may be down while a holder exits, from her request to its response
-confirming: a restore must fit within it.
+A contract's response window (12 blocks at least on signet, 144 on
+Mutinynet, 72 minutes there) is how long the hub may be down
+while a holder exits, from her request to its response confirming: a
+restore must fit within it. So must it fit within the window to answer a
+challenge of a proof the hub asserted (12 blocks on signet, 144 on
+Mutinynet), which its holder may publish at any block of the challenge
+window: unanswered, it pays the claim all it asks and the hub's reserve.
 
 Never replace `<data>/hub.sqlite` while the hub runs: the hub halts, and
 `/health` answers 503, until it is restarted. There is no migration: a
@@ -456,8 +460,9 @@ funded with what the hub may lock, bounds the collateral at stake.
 `/v1/info` names its fixed terms: the cap (131,071 sat), the price a wallet
 pays to open one (the holder's 25,000 sat reserve and the hub's opening fee,
 `--contracts-fee`, 10,000 sat by default, half a year's interest at 20% on
-the 100,000 sat reserve the hub locks in every contract) and the blocks to its
-close (1,000); the openings take `/v1/contracts`. By default wallets may also
+a 100,000 sat reserve: the hub locks one in every contract, of 100,000 sat on
+regtest and signet and 60,000 on Mutinynet) and the blocks to its
+close (1,000, or Mutinynet's 4,752); the openings take `/v1/contracts`. By default wallets may also
 choose a contract's cap up to `--contracts-max-cap` (33,554,431 sat by
 default) and how long it lasts up to `--contracts-max-blocks` (a year of
 Bitcoin's blocks, 52,560, by default) (`/v1/contracts/quote?cap=SAT&blocks=N`);
@@ -487,8 +492,8 @@ them. A hub that takes no deposits (`--deposit-sweep-address`) opens no
 contract and says so at startup: every contract's default returns the
 holder's reserve to a deposit of the hub's (below). `/v1/info` then names that range,
 its largest cap no more than the contracts' wallet funds (its confirmed
-balance, asked each minute with `getbalances`, less the hub's 100,000 sat
-reserve and 50,000 for fees): a larger cap is refused as unavailable. A
+balance, asked each minute with `getbalances`, less the hub's reserve
+and 50,000 sat for fees): a larger cap is refused as unavailable. A
 login limited by `-rpcwhitelist` needs `getbalances` among its calls, or
 the hub advertises the range's largest cap whatever its wallet holds.
 For a wallet to choose a hub by before it pays a deposit, `/v1/info` also
@@ -615,17 +620,51 @@ protects nothing. On signet and Mutinynet they are under the genuine programs
 kept in `r0/programs/` (new contracts under the newest, those opened before
 under theirs, each played to its end), a trial: RISC Zero's shared Groth16
 setup, the signets' headers checked by their work alone and not the
-network's signature of each block. The hub's terms there are signet's least:
+network's signature of each block. The hub's terms on signet are its least:
 144 blocks (a day, on signet) for the wallet to answer a challenge and for
 each party's outputs to wait, 3 blocks deep, 12 blocks at least to respond to
 a request, 144 for the holder to contest a response and 48 for the hub to
-prove and assert it once contested (a proof takes hours on a CPU). On
-Mutinynet the same blocks, a twentieth of the time, but for what a proof
-takes: 960 blocks to prove and assert, hours as signet's 48 are, with the
-fixed contract and the shortest chosen as many blocks longer (1,912 and
-1,488). A proof's cost follows the contract's blocks (7.2 k cycles each) in
+prove and assert it once contested (a proof takes hours on a CPU). A proof's
+cost follows the contract's blocks (7.2 k cycles each) in
 the graphs before id 11, so a contract's length is chosen in blocks, not in time;
-in id 11 on it does not (below). No other network yet.
+in id 11 on it does not (below).
+
+The terms of Bitcoin's network are set for a hub whose downtime costs it
+what a claim asks, and that locks little in each contract. It has 144 blocks
+(a day) at least to respond to a request, time to bring back a hub that
+dropped or to start its standby, and 144 more to prove and assert a response
+once contested, time to rent machines when many holders exit at once
+(`LICASH_R0_WORKERS`, below). The holder has 288 blocks (two days) to challenge a
+false proof and 144 to contest a response, and the hub 144 (a day, where
+signet has 12) to answer a challenge, which may come at any block of those
+two days: a hub down when it comes has as long to be brought back as one
+down at a request. Each party's outputs wait 144, and
+funding, requests and publications are final 6 blocks deep. The hub's reserve
+is 60,000 sat: the least a contract's transactions are built with is 58,252
+sat (their fee floors, their anchors and what the holder's request hands back
+to the holder), and only what the reserve holds above that repays the holder
+the fee of the transaction that disproves a false proof (20.7 kvB) beyond 1
+sat/vB, about 1.1 sat/vB in all. A holder who must challenge when blocks
+cost more pays the difference, which is why that window is two days. The
+hub's own transactions pay their fees from its wallet's fee coins, not from
+the reserve. A contract lasts 1,296 blocks (nine days) at least, and its cap
+is 268,435,454 sat at most, the widest whose forced close the holder's 25,000
+sat reserve affords at 3 sat/vB. No contract opens on Bitcoin's network yet:
+no program is trusted there, and a hub started with `--contracts` on it
+refuses to run.
+
+Mutinynet rehearses those terms: the same blocks and the same reserve, a
+twentieth of the time, but for what a proof takes, 2,880 blocks to prove and
+assert, the day that Bitcoin's 144 are, with the fixed contract and the
+shortest chosen as many blocks longer (4,752 and 4,032); it is 3 blocks deep,
+as signet, and its caps are bounded by `--contracts-max-cap` alone. Its days
+to respond and to answer a challenge are 144 blocks there, 72 minutes: a
+drill of a hub brought back in time is that much harsher than on Bitcoin's
+network. Before this release its
+terms were signet's, with 960 blocks to prove and assert and a 100,000 sat
+reserve. Contracts opened then keep them, and the hub admits new ones by the
+shortest assert window among the contracts it holds (see
+[Upgrading](#upgrading)).
 
 A proof reads Bitcoin through block headers, so a hub's statement asks for
 work on top of a holder's request's response: a chain mined in private
@@ -911,7 +950,8 @@ sync or cut off, and once if the responder's rounds fail for 10 minutes.
 It alerts again once each recovers.
 
 A response commits the hub to a proof: its assertion must confirm within
-the assert window (48 blocks on signet, 2 of them to confirm in), or the
+the assert window (48 blocks on signet, 2,880 on Mutinynet, 2 of them to
+confirm in), or the
 holder's timeout pays her what she claims, as if it had not responded. So
 the hub proves one statement at a time, earliest deadline first, and
 responds to a claim only if its prover can still make that proof in time
@@ -1197,6 +1237,13 @@ Before starting it:
   (its enrollments are refused), and answers as ever, but still serves
   wallets. An upgraded hub with witnesses asks them which copy leads at
   start and every minute; one unreachable is tolerated.
+- On Mutinynet, new contracts take the terms of Bitcoin's network (above):
+  144 blocks at least to respond, 2,880 to prove and assert, 288 for the
+  holder to challenge and 144 for the hub to answer, a 60,000 sat reserve,
+  4,032 blocks at least and 4,752 for the fixed terms. A hub there refuses to start, saying which,
+  with a `--lock-window` below 144 blocks (the default) or a
+  `--contracts-max-blocks` below 4,752 (the default is 52,560). Contracts
+  open keep their terms. Signet's and regtest's terms are unchanged.
 - Openings speak version 3 of the opening protocol: she signs her deposit
   into F before the hub signs. Upgrade the hub first, then the apps. An app
   of version 2 opens no contract at a hub of version 3 until it is updated.

@@ -52,8 +52,8 @@ stay small, and payments cross between hubs.
 
 ### How much must a hub lock up?
 
-Its reserve (100,000 sat by default) and the part of the cap you do not
-fund yourself. By default it charges interest only on its own part.
+Its reserve (100,000 sat on signet, 60,000 on Mutinynet, as planned for
+Bitcoin's network) and the part of the cap you do not fund yourself. By default it charges interest only on its own part.
 
 ### What does the hub see?
 
