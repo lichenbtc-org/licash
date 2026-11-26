@@ -416,14 +416,14 @@ impl Openings {
         // The chain program's headers are the hub's, kept from the first
         // contract's checkpoint.
         let mut chain_told = None;
-        let chain = match (trust.mock, trust.chained) {
-            (false, Some(program)) => {
+        let chain = match trust.chained {
+            Some(program) => {
                 let (chain, told) = chain::HubChain::open(data, program, profile)?;
                 chain_told = told
                     .map(|why| format!("a receipt of the hub's header chain is not kept: {why}"));
                 Some(Arc::new(chain))
             }
-            _ => None,
+            None => None,
         };
         let openings = Arc::new(Self {
             data: data.to_owned(),

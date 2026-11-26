@@ -641,6 +641,21 @@ impl HubChain {
         Ok(())
     }
 
+    /// Of a mock chain program (regtest's, which no prover runs): the
+    /// batches through block `height` made at once, each receipt's journal
+    /// the chain's own and its file empty, which a mock proof binds alone.
+    pub fn mock_through(&self, height: u32) -> Result<()> {
+        self.demand(height);
+        while self.receipt_through(height).is_none() {
+            let Some(pending) = self.next_batch()? else {
+                bail!("no batch to prove through block {height}");
+            };
+            std::fs::write(pending.work.join("receipt"), [])?;
+            self.done(&pending)?;
+        }
+        Ok(())
+    }
+
     /// The newest receipt through block `height`, if there is one.
     pub fn receipt_through(&self, height: u32) -> Option<Receipt> {
         let s = self.state();

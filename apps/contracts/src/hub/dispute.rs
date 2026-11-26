@@ -1784,6 +1784,9 @@ impl Openings {
             .follow(&self.source, tip.min(last.saturating_add(depth)))
             .await?;
         chain.demand(last);
+        if o.mock {
+            chain.mock_through(last)?;
+        }
         let Some(receipt) = chain.receipt_through(last) else {
             // the hub's prover makes it, with no dispute to prove before
             return Ok(Err(Played::Idle));
