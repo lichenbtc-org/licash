@@ -677,6 +677,7 @@ async fn used(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     found_hubs(phone).await?;
     cashed_out(eco, phone).await?;
     visited(eco, phone).await?;
+    bridged(eco, phone).await?;
     contracted(eco, phone).await?;
     stats(phone).await?;
 
@@ -691,6 +692,146 @@ async fn used(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     logs(phone).await?;
     guided_again(phone).await?;
     restored(phone, hub, &silent.to_string()).await
+}
+
+/// An account at the bridge at hub 2 kept for its owner alone, added with
+/// the pairing code its operator reads out: topped up from hub 1, an app
+/// connected with the URI it copies, paid from outside at its Lightning
+/// Address, which Receive shows, then frozen and its notes exported to the
+/// app, which uses hub 2 by now (`visited`).
+async fn bridged(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
+    let bridge = eco.bridge2();
+    // Renewed: a code to pair with however often the stack ran.
+    let pairing = eco
+        .exec("bridge2", &["licash-bridge", "pairing", "--renew"])
+        .await?;
+    let pairing = String::from_utf8(pairing)?.trim().to_owned();
+    ensure!(!pairing.is_empty(), "no pairing code printed");
+    phone.tap("Settings").await?;
+    phone.tap_id("bridges").await?;
+    phone.fill_id("bridge-url", bridge).await?;
+    phone.fill_id("bridge-pairing", &pairing).await?;
+    phone.tap_id("add-bridge").await?;
+    // Added, its page open: nothing in the account yet.
+    phone.tagged("bridge-balance", "0 sat", 60).await?;
+
+    // Topped up from hub 1 over Lightning, less hub 2's fee on receiving.
+    phone.fill_id("bridge-top-up-amount", "2000").await?;
+    phone.tap_id("bridge-top-up").await?;
+    phone.wait("Topping up", 60).await?;
+    let topped = bridge_balance(phone, 0).await?;
+    ensure!(
+        (1_900..=2_000).contains(&topped),
+        "{topped} sat credited of 2000"
+    );
+
+    // An app connected: its URI copied, pasted as into the app (in a
+    // field of the page's, left before it is imported).
+    let connect = phone.scroll_to_id("connect-app").await?;
+    phone.tap_view(&connect).await?;
+    phone.fill_id("app-name", "Zapper").await?;
+    phone.tap_id("connect").await?;
+    phone.tap_id("copy-uri").await?;
+    phone.tagged("copy-uri", "Copied", 10).await?;
+    phone.tap_id("connected-done").await?;
+    phone.by_id("bridge-app", 30).await?;
+    phone.back().await?;
+    phone.scroll_to_id("import-text").await?;
+    let pasted = phone.paste_id("import-text").await?;
+    ensure!(
+        pasted.starts_with("nostr+walletconnect://"),
+        "{pasted:?} pasted"
+    );
+
+    // Its Lightning Address, named, at the URL it is published at: the
+    // bridges' page opened again, what was pasted gone with it.
+    phone.tap("Back").await?;
+    phone.tap_id("bridges").await?;
+    phone.tap_id("bridge").await?;
+    phone.tagged("bridge-address", "None", 30).await?;
+    phone.tap_id("bridge-address").await?;
+    phone.fill_id("address-name", "phone").await?;
+    phone.tap_id("save-address").await?;
+    let host = bridge.strip_prefix("http://").unwrap_or(bridge);
+    phone
+        .tagged("bridge-address", &format!("phone@{host}"), 30)
+        .await?;
+    // Shown on Receive, under More.
+    phone.back().await?;
+    phone.tap("Back").await?;
+    phone.back_to("receive").await?;
+    phone.tap_id("receive").await?;
+    phone.tap_id("other-ways").await?;
+    phone.by_id("way-address", 60).await?;
+    phone.tap_id("way-address").await?;
+    phone
+        .tagged("lightning-address", &format!("phone@{host}"), 30)
+        .await?;
+    phone.tap("Back").await?;
+    phone.home(30).await?;
+    // Paid there from outside, as LNURL-pay has it.
+    let pay = eco
+        .get_json(&format!("{bridge}/.well-known/lnurlp/phone"))
+        .await?;
+    ensure!(pay["tag"] == "payRequest", "{pay}");
+    let callback = pay["callback"].as_str().context("a callback")?;
+    let invoice = eco.get_json(&format!("{callback}?amount=1000000")).await?;
+    let pr = invoice["pr"]
+        .as_str()
+        .with_context(|| format!("{invoice}"))?;
+    ensure!(
+        eco.pay(OUTSIDE, pr).await??,
+        "the node outside did not pay {pr}"
+    );
+    phone.tap("Settings").await?;
+    phone.tap_id("bridges").await?;
+    phone.tap_id("bridge").await?;
+    let paid = bridge_balance(phone, topped).await?;
+    ensure!(
+        (topped + 900..=topped + 1_000).contains(&paid),
+        "{} sat credited of 1000",
+        paid - topped
+    );
+
+    // Frozen, its notes exported to the app: imported, of a hub it uses.
+    let export = phone.scroll_to_id("export-bridge").await?;
+    phone.tap_view(&export).await?;
+    phone.tap_id("confirm").await?;
+    let said = phone.by_id("confirmed", 120).await?;
+    ensure!(
+        said.text.contains(" notes worth ")
+            && !said.text.starts_with("0 notes")
+            && !said.text.contains("left out"),
+        "{:?} said of the export",
+        said.text
+    );
+    phone.tap("Done").await?;
+    phone.back().await?;
+    phone.scroll_to_id("imported").await?;
+    phone.tap("Back").await?;
+    phone.back_to("receive").await?;
+    Ok(())
+}
+
+/// The balance of the bridge account whose page is open, in sat, once
+/// above `above`: the page left and opened again until it is, as it reads
+/// the account as it opens.
+async fn bridge_balance(phone: &Phone, above: u64) -> anyhow::Result<u64> {
+    until(
+        &format!("a bridge account above {above} sat"),
+        180,
+        || async {
+            phone.back().await?;
+            phone.tap_id("bridge").await?;
+            let shown = until("the account read", 30, || async {
+                let view = phone.by_id("bridge-balance", 10).await?;
+                Ok(view.text.ends_with(" sat").then_some(amount(&view.text)))
+            })
+            .await?;
+            Ok((shown > above).then_some(shown))
+        },
+    )
+    .await
 }
 
 /// The onboarding again, from Settings, for a wallet holding and protected
