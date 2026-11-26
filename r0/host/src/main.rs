@@ -24,6 +24,10 @@
 //! The export is JSON: the image id, the journal and the 256-byte Groth16
 //! seal (`lichen_babe::risc0::proof_from_seal`'s input), all hex.
 //!
+//! With `LICASH_R0_WITH_PARENT` set, as the hub sets it, the prover does not
+//! outlive the process that ran it, nor the GPU build and the workers it
+//! runs in turn: a proof the hub stops is stopped.
+//!
 //! Built with the `cuda` feature (as `licash-r0-cuda`), it proves on the
 //! GPU. The CPU build proves through such a build beside it when it finds a
 //! usable GPU, and on the CPU otherwise: one command, whichever the device.
@@ -156,6 +160,7 @@ fn with_assumptions<'a>(
 }
 
 fn main() -> Result<()> {
+    probe::with_parent();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {

@@ -46,6 +46,21 @@ pub fn program(program: Option<&str>) -> Result<Vec<u8>> {
     std::fs::read(&path).with_context(|| format!("no packed program at {}", path.display()))
 }
 
+/// With `LICASH_R0_WITH_PARENT` set, this process is killed when the one
+/// that ran it ends, and so are those it runs of this program in turn (its
+/// CUDA build, a worker on this machine), which inherit the variable: a
+/// proof whose prover the hub stops, or that the hub dies under, is not left
+/// proving on the GPU beside the next. On Linux alone.
+pub fn with_parent() {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("LICASH_R0_WITH_PARENT").is_some() {
+        use rustix::process::{set_parent_process_death_signal, Signal};
+        if let Err(e) = set_parent_process_death_signal(Some(Signal::KILL)) {
+            eprintln!("LICASH_R0_WITH_PARENT: {e}");
+        }
+    }
+}
+
 /// The CUDA build beside this one, if any.
 pub fn cuda_build() -> Option<PathBuf> {
     if cfg!(feature = "cuda") {

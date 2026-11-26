@@ -2380,6 +2380,7 @@ dependencies = [
  "risc0-zkos-v1compat",
  "risc0-zkp",
  "risc0-zkvm",
+ "rustix 1.1.6",
  "serde_json",
  "tempfile",
 ]

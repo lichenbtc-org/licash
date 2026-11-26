@@ -2,8 +2,8 @@
 //! many proofs are due at once, where this machine alone proves one at a
 //! time (docs/r0.md).
 //!
-//! `LICASH_R0_WORKERS` names them, a command each (one a line, or `;`
-//! between them). A worker is handed a job: a directory of a run of
+//! `LICASH_R0_WORKERS` names them, a command with its arguments each (one
+//! a line, or `;` between them). A worker is handed a job: a directory of a run of
 //! segments ([`CHUNK`] at most) and what their execution made, its first
 //! segment and the one after its last. It leaves their join there as
 //! `range`, as `licash-r0 range-prove <dir> <from> <to>` does on the machine
@@ -188,11 +188,13 @@ fn job(
     if dir.join("assumptions").exists() {
         give(Path::new("assumptions"))?;
     }
-    // In a process group of its own: stopped, so is whatever it started
-    // (a shell's pipeline, its `ssh`).
+    // The worker's own process, not a shell's child (stopped with this one,
+    // if this program: [`probe::with_parent`]), in a process group of its
+    // own: stopped, so is whatever it started (a shell's pipeline, its
+    // `ssh`).
     let mut child = Command::new("sh")
         .arg("-c")
-        .arg(format!("{worker} \"$@\""))
+        .arg(format!("exec {worker} \"$@\""))
         .arg("sh")
         .arg(&job)
         .arg(from.to_string())
@@ -207,8 +209,8 @@ fn job(
         }
         let late = started.elapsed() >= limit;
         if late || stop.load(Ordering::Relaxed) {
-            let group = format!("-{}", child.id());
-            let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
+            let group = rustix::process::Pid::from_child(&child);
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
             let _ = child.kill();
             let _ = child.wait();
             match late {

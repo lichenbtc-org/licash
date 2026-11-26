@@ -866,6 +866,10 @@ impl Inner {
     fn command(&self) -> Command {
         let mut cmd = Command::new(&self.command);
         cmd.stdin(Stdio::null());
+        // Stopped, or the hub gone, the prover leaves nothing proving: its
+        // GPU build and its workers on this machine stop with it
+        // (r0/host).
+        cmd.env("LICASH_R0_WITH_PARENT", "1");
         cmd
     }
 
