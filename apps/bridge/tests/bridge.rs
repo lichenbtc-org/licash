@@ -895,6 +895,34 @@ async fn a_lightning_address_is_paid_and_zapped() {
     assert_eq!(balance(&net, &owner), 24_000);
 }
 
+/// Anyone may ask an address for invoices: past 64 unpaid it refuses,
+/// so that they fill that address alone.
+#[tokio::test]
+async fn an_address_refuses_more_invoices_than_so_many_unpaid() {
+    let net = Net::with(Config {
+        public_url: Some("https://pay.test/".into()),
+        ..Config::default()
+    })
+    .await;
+    let owner = net.owner(0).await;
+    net.bridge.set_username(&owner, Some("alice")).unwrap();
+    let app = licash_bridge::router(net.bridge.clone());
+    for n in 0..64 {
+        let paid = get_json(
+            &app,
+            &format!("/lnurlp/alice/callback?amount={}", 2_000 + n),
+        )
+        .await;
+        assert!(paid["pr"].is_string(), "{n}: {paid}");
+    }
+    let refused = get_json(&app, "/lnurlp/alice/callback?amount=2000").await;
+    assert_eq!(refused["status"], "ERROR", "{refused}");
+    assert!(
+        refused["reason"].as_str().unwrap().contains("unpaid"),
+        "{refused}"
+    );
+}
+
 #[tokio::test]
 async fn an_owner_freezes_the_bridge_and_imports_its_notes_to_claim() {
     let net = Net::new(false).await;

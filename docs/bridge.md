@@ -56,6 +56,19 @@ It accepts NIP-57 zap requests and publishes the zap receipt on the
 requested relays once paid. The hub's fee on receiving comes out of what
 the account is paid.
 
+Anyone may ask an address for invoices, so each address has at most 64
+unpaid and unexpired at once (its top-ups included). Past that it refuses
+until some are paid or expire, so a flood fills that address alone. The
+hub takes at most 8 unpaid receipts from one source, and the bridge is one
+source unless the hub trusts it as a proxy. The bridge asks for each
+address's invoices as a proxy of its caller would: it names the caller in
+`X-Forwarded-For`, after whatever the caller's own proxy forwarded. Run the
+hub with `--trusted-proxy <the bridge's address>` (and that of any proxy
+in front of the bridge, which must replace rather than append to its
+clients' `X-Forwarded-For`, as [docs/hub.md](hub.md) says of Traefik), so
+that each caller counts apart. Otherwise every caller shares the bridge's
+8. NWC invoices are asked for no caller, and count as the bridge's own.
+
 ### Announcing
 
 An open bridge with a public URL announces itself on its relays with

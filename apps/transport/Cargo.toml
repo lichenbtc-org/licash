@@ -12,10 +12,11 @@ tracing.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "socks"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 futures-util = { version = "0.3", default-features = false, features = ["alloc"], optional = true }
+tokio = { workspace = true, features = ["rt"] }
 licash-tor = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 webpki-roots = "1"
