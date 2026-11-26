@@ -116,6 +116,13 @@ or NIP-04 as the request was, and publishes its info event hourly. A
 payment reserves its amount and the most fee first; what it did not spend
 returns once settled. Revoking a connection ends it for good.
 
+The bridge answers a request at most 5 minutes behind or ahead of its own
+clock, and each request of a live connection once: it remembers what it
+answered for those 5 minutes, up to 65,536 requests, and answers none past
+that until older ones age out, rather than forgetting one that could be
+replayed. Requests of no live connection are answered with an error and
+not remembered.
+
 ## When the hub stops cooperating
 
 The notes the bridge holds are at its hub. Should the hub stop

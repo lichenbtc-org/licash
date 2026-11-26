@@ -4,7 +4,7 @@
 //! methods it serves and both ciphers.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{BTreeSet, HashSet},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
@@ -32,11 +32,17 @@ pub const METHODS: [Method; 6] = [
     Method::GetInfo,
 ];
 
-/// Requests remembered as answered, against relays sending one twice.
-const REMEMBERED: usize = 4096;
+/// The most requests remembered as answered, against one sent twice: past
+/// it, those of live connections are not answered until older ones are
+/// past [`MAX_AGE`], rather than forgotten while they could be replayed.
+const REMEMBERED: usize = 65_536;
 
 /// How much a request's time may be ahead of the bridge's, in seconds.
 const AHEAD: u64 = 300;
+
+/// How much a request's time may be behind the bridge's, in seconds: one
+/// older is not answered, so that what it asked is remembered only so long.
+const MAX_AGE: u64 = 300;
 
 fn code(e: &Error) -> ErrorCode {
     match e {
@@ -86,18 +92,29 @@ pub fn info_event<T: Transport>(bridge: &Bridge<T>) -> anyhow::Result<Event> {
     )
 }
 
-/// The answer to `event`, a request, if it is one to this bridge: signed
-/// by it, encrypted to its client as it came.
-pub async fn answer<T: Transport>(bridge: &Bridge<T>, event: &Event) -> Option<Event> {
+/// Whether `event` is a request to this bridge, signed, of a time within
+/// [`MAX_AGE`] behind `now` and [`AHEAD`] of it, and not expired.
+fn addressed<T: Transport>(bridge: &Bridge<T>, event: &Event, now: Timestamp) -> bool {
     let me = bridge.keys().public_key();
-    if event.kind != Kind::WalletConnectRequest
-        || !event.tags.public_keys().any(|p| p == me)
-        || event.verify().is_err()
-        || event.is_expired()
-        || event.created_at > Timestamp::now() + AHEAD
-    {
+    event.kind == Kind::WalletConnectRequest
+        && event.tags.public_keys().any(|p| p == me)
+        && event.created_at <= now + AHEAD
+        && event.created_at + MAX_AGE >= now
+        && !event.is_expired_at(now)
+        && event.verify().is_ok()
+}
+
+/// The answer to `event`, a request, if it is one to this bridge
+/// ([`addressed`]): signed by it, encrypted to its client as it came.
+pub async fn answer<T: Transport>(bridge: &Bridge<T>, event: &Event) -> Option<Event> {
+    if !addressed(bridge, event, Timestamp::now()) {
         return None;
     }
+    reply(bridge, event).await
+}
+
+/// The answer to `event`, a request [`addressed`] to this bridge.
+async fn reply<T: Transport>(bridge: &Bridge<T>, event: &Event) -> Option<Event> {
     let cipher = cipher_of(event);
     let secret = bridge.keys().secret_key();
     let request = cipher
@@ -322,26 +339,43 @@ fn lookup(a: licash_api::bridge::Activity) -> LookupInvoiceResponse {
     }
 }
 
-/// The requests answered lately, by id.
+/// The requests of live connections answered lately, by id: each until
+/// it is past [`MAX_AGE`], and so not answered again anyway.
 #[derive(Default)]
 struct Answered {
     ids: HashSet<EventId>,
-    order: VecDeque<EventId>,
+    by_time: BTreeSet<(Timestamp, EventId)>,
+}
+
+/// Whether to answer a request.
+#[derive(Debug, PartialEq, Eq)]
+enum Admission {
+    First,
+    /// Answered already.
+    Again,
+    /// [`REMEMBERED`] are kept: not answered, rather than one forgotten.
+    Full,
 }
 
 impl Answered {
-    /// False if `id` was answered already.
-    fn first(&mut self, id: EventId) -> bool {
-        if !self.ids.insert(id) {
-            return false;
-        }
-        self.order.push_back(id);
-        if self.order.len() > REMEMBERED {
-            if let Some(old) = self.order.pop_front() {
-                self.ids.remove(&old);
+    /// Note the request `id` of `created_at` answered `now`.
+    fn admit(&mut self, id: EventId, created_at: Timestamp, now: Timestamp) -> Admission {
+        while let Some(&(at, old)) = self.by_time.first() {
+            if at + MAX_AGE >= now {
+                break;
             }
+            self.by_time.pop_first();
+            self.ids.remove(&old);
         }
-        true
+        if self.ids.contains(&id) {
+            return Admission::Again;
+        }
+        if self.ids.len() >= REMEMBERED {
+            return Admission::Full;
+        }
+        self.ids.insert(id);
+        self.by_time.insert((created_at, id));
+        Admission::First
     }
 }
 
@@ -395,19 +429,29 @@ pub async fn run<T: Transport + 'static>(bridge: Arc<Bridge<T>>) -> anyhow::Resu
         let ClientNotification::Event { event, .. } = notification else {
             continue;
         };
-        if event.kind != Kind::WalletConnectRequest {
+        let now = Timestamp::now();
+        if !addressed(&bridge, &event, now) {
             continue;
         }
-        let first = answered
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .first(event.id);
-        if !first {
-            continue;
+        // Remembered if of a live connection: another's is refused anyway,
+        // and so needs no remembering.
+        if bridge.link(&event.pubkey.to_bytes()).is_ok() {
+            let admitted = answered
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .admit(event.id, event.created_at, now);
+            match admitted {
+                Admission::First => {}
+                Admission::Again => continue,
+                Admission::Full => {
+                    tracing::warn!("{REMEMBERED} NWC requests answered lately: one not answered");
+                    continue;
+                }
+            }
         }
         let (bridge, client) = (bridge.clone(), client.clone());
         tokio::spawn(async move {
-            if let Some(response) = answer(&bridge, &event).await {
+            if let Some(response) = reply(&bridge, &event).await {
                 if let Err(e) = client.send_event(&response).await {
                     tracing::warn!("answering an NWC request: {e}");
                 }
@@ -475,5 +519,55 @@ async fn publish(zap: &crate::lnurl::ZapReceipt) -> bool {
             tracing::debug!("publishing a zap receipt: {e}");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(n: u8) -> EventId {
+        EventId::from_byte_array([n; 32])
+    }
+
+    /// A request is answered once while it may be answered at all, and
+    /// past the most remembered none is forgotten: more wait until older
+    /// ones are past their age.
+    #[test]
+    fn a_request_is_answered_once_within_its_age() {
+        let mut answered = Answered::default();
+        let (at, now) = (Timestamp::from_secs(10_000), Timestamp::from_secs(10_100));
+        assert_eq!(answered.admit(id(1), at, now), Admission::First);
+        assert_eq!(answered.admit(id(1), at, now), Admission::Again);
+        // Kept as long as it is not too old to be answered.
+        let last = at + MAX_AGE;
+        assert_eq!(answered.admit(id(1), at, last), Admission::Again);
+        // Ahead of the bridge's clock: kept until past its own age.
+        let ahead = now + AHEAD;
+        assert_eq!(answered.admit(id(2), ahead, now), Admission::First);
+        // Past its age, let go: it is not answered anyway.
+        assert_eq!(answered.admit(id(2), ahead, last + 1), Admission::Again);
+        assert!(!answered.ids.contains(&id(1)));
+        assert_eq!(answered.by_time.len(), 1);
+    }
+
+    #[test]
+    fn past_the_most_remembered_requests_wait_rather_than_one_is_forgotten() {
+        let mut answered = Answered::default();
+        let now = Timestamp::from_secs(10_000);
+        for n in 0..REMEMBERED as u64 {
+            let mut bytes = [0; 32];
+            bytes[..8].copy_from_slice(&n.to_be_bytes());
+            let at = Timestamp::from_secs(now.as_secs() - n % 100);
+            let first = answered.admit(EventId::from_byte_array(bytes), at, now);
+            assert_eq!(first, Admission::First);
+        }
+        assert_eq!(answered.admit(id(1), now, now), Admission::Full);
+        let zero = EventId::from_byte_array([0; 32]);
+        assert_eq!(answered.admit(zero, now, now), Admission::Again);
+        // Once the oldest are past their age, room again.
+        let later = now + MAX_AGE - 98;
+        assert_eq!(answered.admit(id(1), later, later), Admission::First);
+        assert_eq!(answered.ids.len(), answered.by_time.len());
     }
 }

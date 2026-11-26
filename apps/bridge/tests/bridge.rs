@@ -1299,3 +1299,32 @@ async fn stalled_requests_hold_no_more_places_than_the_most_served_at_once() {
     }
     assert_eq!(call(&app, pay_request, None).await.status, 200);
 }
+
+/// A request older than five minutes is not answered: what the bridge
+/// answered is remembered only so long, so one replayed later is refused
+/// by its age. One not quite so old is answered.
+#[tokio::test]
+async fn an_nwc_request_older_than_five_minutes_is_not_answered() {
+    use nostr::prelude::{EventBuilder, FinalizeEvent, Keys, Kind, Tag, Timestamp};
+    let net = Net::new(false).await;
+    let owner = net.owner(0).await;
+    let connected = net
+        .bridge
+        .connect(&owner, &connect(&[Permission::Receive], None))
+        .unwrap();
+    let uri = NostrWalletConnectUri::parse(&connected.uri).unwrap();
+    let sent = |ago: u64| {
+        let request = nip47::Request::get_balance();
+        let content = Nip47Ciphers::NIP04
+            .encrypt(&uri.secret, &uri.public_key, &request.as_json())
+            .unwrap();
+        EventBuilder::new(Kind::WalletConnectRequest, content)
+            .tag(Tag::public_key(uri.public_key))
+            .custom_created_at(Timestamp::from_secs(Timestamp::now().as_secs() - ago))
+            .finalize(&Keys::new(uri.secret.clone()))
+            .unwrap()
+    };
+    assert!(nwc::answer(&net.bridge, &sent(310)).await.is_none());
+    let answered = nwc::answer(&net.bridge, &sent(290)).await;
+    assert!(answered.is_some());
+}
