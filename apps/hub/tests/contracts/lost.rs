@@ -163,10 +163,10 @@ async fn a_fold_whose_signature_answer_was_lost_pays_her_as_it_confirms() -> Res
         done.len() == 1
             && done[0].stage == Stage::Done
             && done[0].fold.is_some()
-            && done[0].received == Some(151_071),
+            && done[0].received == Some(156_071),
         "{done:?}"
     );
-    ensure!(scan(wallet, chain).await? == before + 151_071);
+    ensure!(scan(wallet, chain).await? == before + 156_071);
     ensure!(available(wallet)? == 65_536 + n.contract.funded);
     Ok(())
 }
@@ -196,10 +196,10 @@ async fn a_fold_whose_signature_never_reached_the_hub_folds_asked_again() -> Res
         done.len() == 1
             && done[0].stage == Stage::Done
             && done[0].fold == Some(txid)
-            && done[0].received == Some(151_071),
+            && done[0].received == Some(156_071),
         "{done:?}"
     );
-    ensure!(scan(wallet, chain).await? == before + 151_071);
+    ensure!(scan(wallet, chain).await? == before + 156_071);
     ensure!(available(wallet)? == 65_536 + n.contract.funded);
     Ok(())
 }

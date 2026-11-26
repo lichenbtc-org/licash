@@ -664,7 +664,7 @@ async fn a_wallet_opens_contracts_at_a_hub_and_sees_them_confirm() -> Result<()>
         ..ask()
     };
     let refused = holder::open(&wallet, &chain, &mine.join("wallet.sqlite"), &url, cheap).await;
-    ensure!(format!("{:#}", refused.unwrap_err()).contains("23000 sat to open"));
+    ensure!(format!("{:#}", refused.unwrap_err()).contains("28000 sat to open"));
 
     // Opened on the smaller coin: F signed whole, broadcast, her coin
     // reserved for it.
@@ -1361,9 +1361,9 @@ async fn a_holder_claims_the_notes_she_funded_that_a_silent_hub_never_issued() -
     wallet.watch_silent(None, rt.height()?)?;
     // The price of a hub's one contract, 28 000 sat, and 3 000 hers.
     let to = wallet.fallback_address()?.script_pubkey();
-    rt.fund(&to, Amount::from_sat(26_000))?;
+    rt.fund(&to, Amount::from_sat(31_000))?;
     rt.mine(1)?;
-    ensure!(scan(&wallet, &chain).await? == 26_000);
+    ensure!(scan(&wallet, &chain).await? == 31_000);
     let opened = holder::open(&wallet, &chain, &mine.join("wallet.sqlite"), &url, ask()).await?;
     ensure!(
         opened.funded == 3_000 && !opened.funded_received,
@@ -2227,14 +2227,14 @@ async fn a_holder_closes_her_contract_on_her_notes_and_its_fold_pays_them_to_her
         fold.output[0].value.to_sat() == 131_071 + 25_000,
         "{fold:?}"
     );
-    ensure!(scan(wallet, chain).await? == before + 151_071);
+    ensure!(scan(wallet, chain).await? == before + 156_071);
     let rate = FeeRate::from_sat_per_vb(2).context("a rate")?;
     let done = recovery::advance(wallet, chain, &mine.join("wallet.sqlite"), rate).await?;
     ensure!(
         done.len() == 1
             && done[0].stage == Stage::Done
             && done[0].fold == Some(txid)
-            && done[0].received == Some(151_071)
+            && done[0].received == Some(156_071)
             && done[0].claimed == 131_071,
         "{done:?}"
     );
@@ -2246,7 +2246,7 @@ async fn a_holder_closes_her_contract_on_her_notes_and_its_fold_pays_them_to_her
     rt.mine(u64::from(n.contract.close_height) - u64::from(rt.height()?) + 1)?;
     let round = n.openings.answer_requests().await?;
     ensure!(round == Default::default(), "{round:?}");
-    ensure!(scan(wallet, chain).await? == before + 151_071);
+    ensure!(scan(wallet, chain).await? == before + 156_071);
     Ok(())
 }
 
