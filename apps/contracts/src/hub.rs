@@ -117,6 +117,16 @@ const INSTANCE_TIME: Duration = Duration::from_secs(30 * 60);
 /// spare. One larger is refused unread past it.
 const SMALL_BODY: usize = 256 << 10;
 
+/// The most bytes of an opening's first request: her Open (some hundred
+/// bytes) and the quote it takes (some tens of thousands).
+const OPEN_BODY: usize = 1 << 20;
+
+/// The most bytes of an opening's next message: her commitment and her
+/// openings grow with its instances, each about 2.3 MB at the 78 of the
+/// hub's terms and some 4 MB at [`licash_contract::MAX_INSTANCES`].
+/// Her instances, larger, are uploaded apart ([`INSTANCE`]).
+const STEP_BODY: usize = 16 << 20;
+
 /// How long a small request's body ([`SMALL_BODY`]) may take to arrive.
 const SMALL_BODY_TIME: Duration = Duration::from_secs(30);
 
@@ -1100,8 +1110,14 @@ pub fn router(openings: Arc<Openings>) -> Router {
     };
     Router::new()
         .route(QUOTE, get(quote).layer(budget(2, REQUEST_TIME)))
-        .route(OPEN, post(open).layer(budget(2, REQUEST_TIME)))
-        .route(STEP, post(step).layer(budget(2, REQUEST_TIME)))
+        .route(
+            OPEN,
+            post(open).layer((budget(2, REQUEST_TIME), DefaultBodyLimit::max(OPEN_BODY))),
+        )
+        .route(
+            STEP,
+            post(step).layer((budget(2, REQUEST_TIME), DefaultBodyLimit::max(STEP_BODY))),
+        )
         // A holder uploads three at a time: two holders at once.
         .route(INSTANCE, post(instance).layer(budget(6, INSTANCE_TIME)))
         .route(FOLD, post(offer_fold).layer(small(2)))
@@ -1109,6 +1125,7 @@ pub fn router(openings: Arc<Openings>) -> Router {
         .route(FOLD_SIGN, post(sign_fold).layer(small(2)))
         .route(EVIDENCE, post(show_evidence).layer(small(2)))
         .route(PROOF, post(show_proof).layer(small(2)))
+        // Its body unread.
         .route(FUNDED, post(funded).layer(budget(2, REQUEST_TIME)))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(openings)
@@ -1424,6 +1441,28 @@ mod tests {
             let response = app.clone().oneshot(request).await.unwrap();
             assert_eq!(response.status(), status);
             assert_eq!(polled.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_openings_messages_are_bounded_by_what_they_can_hold() {
+        use axum::http::Request as HttpRequest;
+
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(Arc::new(test_openings(dir.path())));
+        let id = crate::hex_id(&[3; 32]);
+        for (route, most) in [(OPEN, OPEN_BODY), (STEP, STEP_BODY)] {
+            let url = route.replace("{id}", &id);
+            let request = HttpRequest::post(&url)
+                .body(Body::from(vec![0; most + 1]))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{route}");
+            let request = HttpRequest::post(&url)
+                .body(Body::from(vec![0; most]))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{route}");
         }
     }
 

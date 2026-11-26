@@ -406,7 +406,9 @@ buffering or node RPC. One source (an onion circuit, an address, or a trusted
 proxy's client) has at most 8 contract requests in flight at once; more
 receive 503 at once. Four concurrent instance downloads remain supported.
 Admission lasts through response delivery, with a five-minute deadline for
-request handling. Requests about a contract opened (folds, evidence,
+request handling. An opening's first request takes at most 1 MiB, and
+each next message (her commitment and openings, about 2.3 MB each at 78
+instances) at most 16 MiB. Requests about a contract opened (folds, evidence,
 proofs) take bodies of at most 256 KiB, which must arrive within 30
 seconds. Each such route reads up to 32 bodies at once, and answers two
 requests at a time only once their bodies have arrived, so clients
