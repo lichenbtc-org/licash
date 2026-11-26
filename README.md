@@ -26,7 +26,7 @@ for day-to-day spending, as a checking account.
 | Receive while offline                    | No                                  | Yes                             | Yes                | Yes, within a hub or onchain                               |
 | A payment is safe from operator collusion | Yes                                | After the next round            | No                 | Yes, immediately                                           |
 | The operator sees                        | Your balance and every payment      | Inputs, outputs and amounts     | Only anonymous notes | Only anonymous notes, not your balance or who pays whom  |
-| Cost of an exit without the operator     | One small transaction               | Your branch of the tree         | No exit            | About 15 kvB and a few days, more if disputed              |
+| Cost of an exit without the operator     | One small transaction               | Your branch of the tree         | No exit            | About 7 kvB and a few days, more if disputed               |
 
 ## Why
 

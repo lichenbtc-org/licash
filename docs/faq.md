@@ -25,7 +25,7 @@ started must the wallet be online for its deadlines, and the app tells you.
 ### Who pays the Bitcoin fees of a recovery?
 
 Each side pays for its own moves. A recovery the hub does not dispute is
-about 15 kvB in all, and you pay it, partly from the reserve you put in
+about 7 kvB in all, and you pay it, partly from the reserve you put in
 the contract. A dispute adds the hub's proof and, only against a false one,
 your challenge. A close you both sign is a single transaction.
 
