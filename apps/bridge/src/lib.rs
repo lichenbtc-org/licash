@@ -33,7 +33,7 @@ use licash_api::{
     bridge::{self, Activity, Connect, Connected, Direction, Info, Permission, State},
     Code, Problem,
 };
-use licash_wallet::{InvoiceState, Lock, LockState, Transport, Wallet};
+use licash_wallet::{InvoiceState, Lock, LockState, ReceiveOffer, Transport, Wallet};
 use lightning_invoice::Bolt11Invoice;
 use nostr::prelude::{Keys, NostrWalletConnectUri, RelayUrl, SecretKey};
 use rand_core::{OsRng, RngCore};
@@ -121,6 +121,9 @@ fn wallet_error(e: licash_wallet::Error) -> Error {
 pub struct Config {
     /// The hub its wallet pays and is paid through.
     pub hub: String,
+    /// The swap provider it pays and is paid over Lightning through, should
+    /// its hub run no Lightning gateway.
+    pub via: Option<String>,
     /// Whether anyone may register an account.
     pub open: bool,
     pub name: Option<String>,
@@ -161,6 +164,20 @@ pub struct Bridge<T> {
     /// Held while its notes change hands other than by payments (unlinked)
     /// or are exported: never both at once.
     notes: tokio::sync::Mutex<()>,
+    /// What its provider last said it takes to have it paid at its hub,
+    /// once asked ([`Bridge::ask_provider`]).
+    offer: Mutex<Option<ReceiveOffer>>,
+}
+
+/// What an invoice paying the bridge may ask, and through whom.
+struct Receiving {
+    /// The fee on its amount, asked on top.
+    fee: licash_api::Fee,
+    /// The least and the most it pays, in sat.
+    min: u64,
+    max: u64,
+    /// The provider making it, if not the hub.
+    via: Option<String>,
 }
 
 /// A payment being made or followed, for as long as it is held.
@@ -237,7 +254,88 @@ impl<T: Transport> Bridge<T> {
             keys: Keys::new(secret),
             paying: Mutex::new(HashSet::new()),
             notes: tokio::sync::Mutex::new(()),
+            offer: Mutex::new(None),
         })
+    }
+
+    /// Its hub's Lightning gateway, as the hub last said: None if it runs
+    /// none.
+    fn gateway(&self) -> Result<Option<licash_api::Lightning>, Error> {
+        // The wallet keys a hub by the URL it reaches it at first.
+        let urls = self
+            .wallet
+            .hub_urls(&self.config.hub)
+            .map_err(wallet_error)?;
+        let hubs = self.wallet.hubs().map_err(wallet_error)?;
+        Ok(hubs
+            .into_iter()
+            .find(|(url, _)| urls.contains(url))
+            .and_then(|(_, info)| info.lightning))
+    }
+
+    /// The provider it pays through: None through its hub's gateway, if it
+    /// runs one, or with no provider.
+    fn paying_via(&self) -> Result<Option<&str>, Error> {
+        match &self.config.via {
+            Some(via) if self.gateway()?.is_none() => Ok(Some(via)),
+            _ => Ok(None),
+        }
+    }
+
+    /// What it takes to be paid: through its hub's gateway, or else its
+    /// provider's terms as it last said.
+    fn receiving(&self) -> Result<Receiving, Error> {
+        if let Some(l) = self.gateway()? {
+            return Ok(Receiving {
+                fee: l.receive,
+                min: l.min_receive,
+                max: l.max_receive,
+                via: None,
+            });
+        }
+        let hub = &self.config.hub;
+        let Some(via) = &self.config.via else {
+            return Err(Error::Unavailable(format!(
+                "hub {hub} takes no Lightning payments"
+            )));
+        };
+        let offer = self.offer.lock().unwrap_or_else(PoisonError::into_inner);
+        let offer = offer.as_ref().ok_or_else(|| {
+            Error::Unavailable(format!("provider {via} takes no payments at hub {hub} now"))
+        })?;
+        Ok(Receiving {
+            fee: offer.terms.fee,
+            min: offer.terms.min,
+            max: offer.max,
+            via: Some(via.clone()),
+        })
+    }
+
+    /// Ask its provider again what it takes to have it paid, should its hub
+    /// run no gateway: kept for [`Bridge::info`] and its Lightning
+    /// Addresses. Its last answer is kept while it cannot be reached.
+    async fn ask_provider(&self) -> Result<(), Error> {
+        let Some(via) = &self.config.via else {
+            return Ok(());
+        };
+        if self.gateway()?.is_some() {
+            return Ok(());
+        }
+        let asked = self.wallet.receive_offer(via, &self.config.hub).await;
+        let offer = match asked {
+            Ok(offer) => Some(offer),
+            // It takes none there now.
+            Err(e @ licash_wallet::Error::Invalid(_)) => {
+                tracing::warn!(%via, "the provider: {e}");
+                None
+            }
+            Err(e) => {
+                tracing::debug!(%via, "the provider: {e}");
+                return Ok(());
+            }
+        };
+        *self.offer.lock().unwrap_or_else(PoisonError::into_inner) = offer;
+        Ok(())
     }
 
     pub fn wallet(&self) -> &Wallet<T> {
@@ -255,16 +353,7 @@ impl<T: Transport> Bridge<T> {
 
     /// What it says of itself.
     pub fn info(&self) -> Result<Info, Error> {
-        let hub = &self.config.hub;
-        // The wallet keys a hub by the URL it reaches it at first.
-        let urls = self.wallet.hub_urls(hub).map_err(wallet_error)?;
-        let hubs = self.wallet.hubs().map_err(wallet_error)?;
-        let receive_fee = hubs
-            .iter()
-            .find(|(url, _)| urls.contains(url))
-            .and_then(|(_, info)| info.lightning.as_ref())
-            .map(|l| l.receive)
-            .ok_or_else(|| Error::Unavailable(format!("hub {hub} takes no Lightning payments")))?;
+        let receive_fee = self.receiving()?.fee;
         Ok(Info {
             name: self.config.name.clone(),
             network: self.wallet.network().to_string(),
@@ -760,10 +849,19 @@ impl<T: Transport> Bridge<T> {
             return Err(Error::Insufficient(format!("{amount} msat asked")));
         }
         let hub = &self.config.hub;
-        let fee = self
-            .wallet
-            .invoice_fee(hub, request)
-            .map_err(wallet_error)?;
+        let via = self.paying_via()?;
+        // Through the provider, its fee and the hub's on the lock in all.
+        let (fee, provider_fee) = match via {
+            None => {
+                let fee = self.wallet.invoice_fee(hub, request);
+                (fee.map_err(wallet_error)?, 0)
+            }
+            Some(via) => {
+                let quote = (self.wallet.invoice_quote_via(via, hub, request, u64::MAX)).await;
+                let quote = quote.map_err(wallet_error)?;
+                (quote.costs(), quote.fee)
+            }
+        };
         if max_fee.is_some_and(|max| fee.saturating_mul(1000) > max) {
             return Err(Error::Quota(format!(
                 "it costs {fee} sat on top, more than allowed"
@@ -822,10 +920,18 @@ impl<T: Transport> Bridge<T> {
             Ok(payment)
         })?;
         tracing::info!(hash = %hex::encode(hash), amount, reserve, "paying");
-        let paid = self
-            .wallet
-            .pay_invoice_within(hub, request, Some(fee))
-            .await;
+        let paid = match via {
+            None => {
+                self.wallet
+                    .pay_invoice_within(hub, request, Some(fee))
+                    .await
+            }
+            Some(via) => {
+                (self.wallet)
+                    .pay_invoice_via_within(via, hub, request, provider_fee, Some(fee))
+                    .await
+            }
+        };
         self.conclude(&payment, paid)
     }
 
@@ -833,8 +939,9 @@ impl<T: Transport> Bridge<T> {
     fn lock_for(&self, payment: &Payment) -> Result<Option<Lock>, Error> {
         let locks = self.wallet.locks().map_err(wallet_error)?;
         Ok(locks.into_iter().find(|lock| {
+            // Paying its invoice through the hub, or through a provider.
             lock.hash == payment.hash
-                && lock.invoice.is_some()
+                && (lock.invoice.is_some() || lock.via.is_some())
                 && lock.created_at >= payment.started_at
         }))
     }
@@ -997,11 +1104,21 @@ impl<T: Transport> Bridge<T> {
             (None, Some(d)) if memo.is_none() => Some(sha256(d.as_bytes())),
             _ => None,
         };
-        let asked = self
-            .wallet
-            .invoice_exact(&self.config.hub, amount, memo, committed)
-            .await
-            .map_err(wallet_error)?;
+        let hub = &self.config.hub;
+        self.ask_provider().await?;
+        let asked = match self.receiving()?.via {
+            None => {
+                self.wallet
+                    .invoice_exact(hub, amount, memo, committed)
+                    .await
+            }
+            Some(via) => {
+                (self.wallet)
+                    .invoice_exact_through(&via, hub, amount, memo, committed)
+                    .await
+            }
+        }
+        .map_err(wallet_error)?;
         let request = asked
             .request
             .ok_or_else(|| Error::Unavailable("its hub made no invoice yet".into()))?;
@@ -1056,6 +1173,7 @@ impl<T: Transport> Bridge<T> {
 
     /// Take every payment and invoice under way on: what was decided.
     pub async fn round(&self) -> Result<usize, Error> {
+        self.ask_provider().await?;
         let (payments, receipts) = self
             .store
             .read(|c| Ok((store::pending_payments(c)?, store::pending_receipts(c)?)))?;

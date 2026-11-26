@@ -160,22 +160,16 @@ impl<T: Transport> Bridge<T> {
         Ok((account.id, format!("{name}@{domain}")))
     }
 
-    /// What an invoice of its hub may ask, in msat: at least and at most.
+    /// What an invoice of its hub, or of its provider, may ask, in msat:
+    /// at least and at most.
     fn sendable(&self) -> Result<(u64, u64), Error> {
-        let hub = &self.config.hub;
-        let urls = self.wallet.hub_urls(hub).map_err(crate::wallet_error)?;
-        let hubs = self.wallet.hubs().map_err(crate::wallet_error)?;
-        let terms = hubs
-            .into_iter()
-            .find(|(url, _)| urls.contains(url))
-            .and_then(|(_, info)| info.lightning)
-            .ok_or_else(|| Error::Unavailable(format!("hub {hub} takes no Lightning payments")))?;
-        let asks = |notes: u64| (notes + terms.receive.due(notes)).saturating_mul(1000);
-        let mut most = asks(terms.max_receive);
+        let terms = self.receiving()?;
+        let asks = |notes: u64| (notes + terms.fee.due(notes)).saturating_mul(1000);
+        let mut most = asks(terms.max);
         if let Some(max) = self.config.max_balance {
             most = most.min(max);
         }
-        Ok((asks(terms.min_receive.max(1)), most))
+        Ok((asks(terms.min.max(1)), most))
     }
 
     /// The LNURL-pay request of the address of `name` (LUD-06).

@@ -1,6 +1,7 @@
 //! The bridge over a hub in process whose gateway pays and is paid through
-//! a fake node: accounts paired and topped up, NWC requests answered within
-//! their connections' limits, and payments decided once their locks are.
+//! a fake node, or over one without a gateway through a swap provider's:
+//! accounts paired and topped up, NWC requests answered within their
+//! connections' limits, and payments decided once their locks are.
 
 #[path = "../../hub/tests/chain/mod.rs"]
 mod chain;
@@ -24,6 +25,7 @@ use licash_hub_service::lightning::{
     fake::{Fake, Outcome},
     Config as Gateway_, Gateway,
 };
+use licash_swaps::{Provider, ReceiveTerms};
 use licash_wallet::{Response, Transport, Wallet};
 use nostr::nips::nip47::{
     self, ErrorCode, LookupInvoiceRequest, MakeInvoiceRequest, Nip47Ciphers, NostrWalletConnectUri,
@@ -32,6 +34,7 @@ use nostr::nips::nip47::{
 use tower::ServiceExt;
 
 const HUB: &str = "http://hub.test";
+const PROVIDER: &str = "http://provider.test";
 
 const TIMING: Timing = Timing {
     window: 40,
@@ -42,9 +45,10 @@ const TIMING: Timing = Timing {
     max_lag: 120,
 };
 
-/// The hub's router, reached at [`HUB`].
+/// The hub's router, reached at [`HUB`], and a swap provider's at
+/// [`PROVIDER`], if any.
 #[derive(Clone)]
-struct Local(Router);
+struct Local(Router, Option<Router>);
 
 impl Transport for Local {
     fn request(
@@ -52,8 +56,13 @@ impl Transport for Local {
         url: &str,
         body: Option<Vec<u8>>,
     ) -> impl std::future::Future<Output = Result<Response, String>> + Send {
-        let path = url.strip_prefix(HUB).unwrap_or(url).to_owned();
-        let app = self.0.clone();
+        let (app, path) = match (url.strip_prefix(PROVIDER), &self.1) {
+            (Some(path), Some(provider)) => (provider.clone(), path.to_owned()),
+            _ => (
+                self.0.clone(),
+                url.strip_prefix(HUB).unwrap_or(url).to_owned(),
+            ),
+        };
         async move { Ok(call(&app, &path, body).await) }
     }
 }
@@ -78,8 +87,13 @@ async fn call(app: &Router, path: &str, body: Option<Vec<u8>>) -> Response {
 
 struct Net {
     app: Router,
+    /// The node paying and paid for the bridge: its hub's gateway's, or
+    /// its provider's.
     node: Arc<Fake>,
     gateway: Arc<Gateway>,
+    /// The provider it pays and is paid through, if its hub runs no
+    /// gateway.
+    provider: Option<Arc<Provider<Local>>>,
     bridge: Arc<Bridge<Local>>,
     pairing: String,
     chain: chain::Chain,
@@ -105,11 +119,27 @@ impl Net {
     }
 
     async fn with(config: Config) -> Self {
+        Self::at(config, TIMING, false).await
+    }
+
+    /// A bridge at a hub serving it no gateway, paying and paid through a
+    /// provider at [`PROVIDER`] charging 2 sat to pay and to receive, over
+    /// its own node. The provider holds notes there paid in through a
+    /// gateway the hub serves elsewhere, which the bridge never reaches.
+    async fn via(config: Config) -> Self {
+        let timing = Timing {
+            window: 144,
+            ..TIMING
+        };
+        Self::at(config, timing, true).await
+    }
+
+    async fn at(config: Config, timing: Timing, via: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let (seed, db) = (dir.path().join("seed"), dir.path().join("hub.sqlite"));
         Hub::init(&seed, &db, 6).unwrap();
         let policy = Policy {
-            timing: TIMING,
+            timing,
             ..Policy::default()
         };
         let hub = Arc::new(Hub::open(&seed, &db, policy).unwrap());
@@ -145,23 +175,77 @@ impl Net {
         node.tip(chain.height(), chain.tip());
         gateway.round().await;
 
-        let path = dir.path().join("bridge.sqlite");
         let regtest = ChainProfile::Core30DefaultRegtest;
-        let wallet = Wallet::create(&path, &[7; 32], regtest, Local(app.clone())).unwrap();
+        let (app, node, provider) = match via {
+            false => (app, node, None),
+            true => {
+                let path = dir.path().join("provider.sqlite");
+                let wallet =
+                    Wallet::create(&path, &[0x50; 32], regtest, Local(app.clone(), None)).unwrap();
+                wallet.add_hub(HUB).await.unwrap();
+                let invoice = wallet.invoice(HUB, 500).await.unwrap();
+                let mut hash = [0; 32];
+                hex::decode_to_slice(&invoice.hash, &mut hash).unwrap();
+                let cltv = node.held_cltv(hash).unwrap() as u32;
+                node.pay_held(hash, chain.height() + cltv);
+                gateway.round().await;
+                let invoice = wallet.follow_invoice(&invoice.hash).await.unwrap();
+                assert_eq!(invoice.state, licash_wallet::InvoiceState::Received);
+                let own = Arc::new(Fake::new());
+                own.tip(chain.height(), chain.tip());
+                let swaps = licash_swaps::Config {
+                    margin: 6,
+                    confirm: 4,
+                    ..licash_swaps::Config::default()
+                };
+                let receives = ReceiveTerms {
+                    fee: Fee { base: 2, ppm: 0 },
+                    min: 1,
+                    max: 50_000,
+                    max_open: 10,
+                };
+                let pays = licash_api::swaps::Lightning {
+                    node: own.pubkey(),
+                    fee: Fee { base: 2, ppm: 0 },
+                    max: 50_000,
+                    slack: 24,
+                };
+                let provider = Provider::create(wallet, swaps)
+                    .unwrap()
+                    .take_receives(own.clone(), receives)
+                    .unwrap()
+                    .pay_lightning(own.clone(), pays)
+                    .unwrap();
+                // Serving the hub's API alone, no gateway: the bridge's.
+                let bare = licash_hub_service::router(hub.clone(), Default::default());
+                (bare, own, Some(Arc::new(provider)))
+            }
+        };
+        let path = dir.path().join("bridge.sqlite");
+        let reaches = Local(
+            app.clone(),
+            (provider.as_ref()).map(|p| licash_swaps_service::router(p.clone(), None)),
+        );
+        let wallet = Wallet::create(&path, &[7; 32], regtest, reaches).unwrap();
         wallet.add_hub(HUB).await.unwrap();
         let pairing = Bridge::init(&wallet).unwrap();
         let config = Config {
             hub: HUB.into(),
+            via: provider.as_ref().map(|_| PROVIDER.into()),
             relays: vec!["wss://relay.test".into()],
             ..config
         };
         let bridge = Arc::new(Bridge::open(wallet, config).unwrap());
-        // The gateway pays and settles as a running hub does.
+        // The gateway and the provider pay and settle as running ones do.
         let rounds = {
-            let gateway = gateway.clone();
+            let (gateway, provider) = (gateway.clone(), provider.clone());
             tokio::spawn(async move {
                 loop {
                     gateway.round().await;
+                    if let Some(provider) = &provider {
+                        let _ = provider.follow_invoices().await;
+                        let _ = provider.follow_receives().await;
+                    }
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             })
@@ -170,6 +254,7 @@ impl Net {
             app,
             node,
             gateway,
+            provider,
             bridge,
             pairing,
             chain,
@@ -185,6 +270,12 @@ impl Net {
         let cltv = self.node.held_cltv(bytes).unwrap() as u32;
         self.node.pay_held(bytes, self.chain.height() + cltv);
         self.gateway.round().await;
+        if let Some(provider) = &self.provider {
+            // Locked to the bridge, claimed, then settled.
+            provider.follow_receives().await.unwrap();
+            self.bridge.round().await.unwrap();
+            provider.follow_receives().await.unwrap();
+        }
         self.bridge.round().await.unwrap();
     }
 
@@ -1049,4 +1140,75 @@ async fn an_open_bridge_registers_so_many_accounts_an_hour_and_in_all() {
         matches!(&full, Err(Error::Quota(m)) if m.contains("at most")),
         "{full:?}"
     );
+}
+
+#[tokio::test]
+async fn a_bridge_at_a_hub_without_a_gateway_is_topped_up_and_pays_through_its_provider() {
+    let net = Net::via(Config::default()).await;
+    // Its provider's terms, once asked.
+    net.bridge.round().await.unwrap();
+    assert_eq!(
+        net.bridge.info().unwrap().receive_fee,
+        Fee { base: 2, ppm: 0 }
+    );
+    // Topped up through the provider: 100 sat asked, 98 credited.
+    let owner = net.owner(100_000).await;
+    assert_eq!(balance(&net, &owner), 98_000);
+    // Of a part of a sat: refused, a provider's invoices asking whole ones.
+    let sub_sat = net.bridge.top_up(&owner, 10_500).await;
+    assert!(matches!(sub_sat, Err(Error::Invalid(_))), "{sub_sat:?}");
+
+    let connected = net
+        .bridge
+        .connect(&owner, &connect(&[Permission::Pay], None))
+        .unwrap();
+    let uri = NostrWalletConnectUri::parse(&connected.uri).unwrap();
+    let preimage = [5; 32];
+    let request = net
+        .node
+        .invoice(20_000, lock_hash(&preimage), 18, Outcome::Pay(preimage));
+    let pay = nip47::Request::pay_invoice(PayInvoiceRequest {
+        id: None,
+        invoice: request,
+        amount: None,
+    });
+    let paid = ask(&net, &uri, pay, Nip47Ciphers::NIP44V2).await;
+    let Some(ResponseResult::PayInvoice(paid)) = paid.result else {
+        panic!("{paid:?}");
+    };
+    assert_eq!(paid.preimage, hex::encode(preimage));
+    // The provider's 2 sat, and the hub's on the lock, if any.
+    let fees = paid.fees_paid.unwrap();
+    assert!(fees >= 2_000, "{fees}");
+    assert_eq!(balance(&net, &owner), 98_000 - 20_000 - fees);
+    assert_eq!(net.node.sent().len(), 1);
+    let locks = net.bridge.wallet().locks().unwrap();
+    assert!(locks[0].via.is_some(), "{locks:?}");
+}
+
+#[tokio::test]
+async fn a_lightning_address_is_paid_through_the_provider_of_a_hub_without_a_gateway() {
+    let net = Net::via(Config {
+        public_url: Some("https://pay.test".into()),
+        ..Config::default()
+    })
+    .await;
+    let owner = net.owner(0).await;
+    net.bridge.round().await.unwrap();
+    net.bridge.set_username(&owner, Some("alice")).unwrap();
+    let app = licash_bridge::router(net.bridge.clone());
+    let pay = get_json(&app, "/.well-known/lnurlp/alice").await;
+    // 1 sat of notes at least, the provider's 2 on top.
+    assert_eq!(pay["minSendable"].as_u64(), Some(3_000));
+    let metadata = pay["metadata"].as_str().unwrap();
+    // Of a part of a sat: refused.
+    let refused = get_json(&app, "/lnurlp/alice/callback?amount=21500").await;
+    assert_eq!(refused["status"], "ERROR");
+    let paid = get_json(&app, "/lnurlp/alice/callback?amount=21000").await;
+    let invoice: lightning_invoice::Bolt11Invoice = paid["pr"].as_str().unwrap().parse().unwrap();
+    assert_eq!(invoice.amount_milli_satoshis(), Some(21_000));
+    assert_eq!(committed(&invoice), sha256(metadata.as_bytes()));
+    let hash = hex::encode(invoice.payment_hash().as_ref() as &[u8]);
+    net.pay_in(&hash).await;
+    assert_eq!(balance(&net, &owner), 19_000);
 }

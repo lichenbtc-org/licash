@@ -37,6 +37,8 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 licash-hub.workspace = true
 licash-hub-service = { path = "../hub", features = ["fake"] }
+licash-swaps.workspace = true
+licash-swaps-service = { path = "../swaps" }
 http-body-util = "0.1"
 nostr-sdk = { version = "0.45.6", features = ["local-relay"] }
 tempfile = "3.27"

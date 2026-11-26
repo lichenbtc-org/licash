@@ -3414,6 +3414,8 @@ dependencies = [
  "licash-hub-service",
  "licash-nostr",
  "licash-store",
+ "licash-swaps",
+ "licash-swaps-service",
  "licash-tor",
  "licash-transport",
  "licash-wallet",

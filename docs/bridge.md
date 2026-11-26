@@ -2,7 +2,8 @@
 
 `licash-bridge` serves Nostr Wallet Connect (NIP-47) for apps out of
 accounts it keeps, over a Licash wallet of its own at one hub: it pays
-invoices through the hub's Lightning gateway and takes payments there.
+invoices through the hub's Lightning gateway, or else a swap provider's,
+and takes payments there.
 Optionally it gives its accounts Lightning Addresses, with zaps. It is
 custodial: the bridge holds what its accounts hold. Anyone can run one,
 for themselves or as a provider for others, and a wallet can use several.
@@ -21,6 +22,19 @@ licash-bridge --data ./bridge run --listen 0.0.0.0:8090 \
 licash-bridge --data ./bridge status
 licash-bridge --data ./bridge pairing --renew  # hand the account to a new wallet
 ```
+
+At a hub that runs no Lightning gateway, `run --via URL` (or
+`LICASH_BRIDGE_VIA`) names a swap provider ([swaps.md](swaps.md)) to pay
+and be paid through instead: it pays the bridge's invoices for a lock of
+their amount and its fee, and makes its invoices, locking what they are
+paid to the bridge at the hub. The provider is trusted for its fees and
+sees each payment's amount, and links the bridge's receipts. Its terms
+are asked again each round: its fee on receiving is what the bridge's info
+names, and its limits are the Lightning Addresses'. Invoices through a
+provider ask whole satoshis: a top-up or a Lightning Address payment of a
+part of one is refused. The provider must name the feature
+`receive-exact` for the bridge to be paid through it. A hub with a gateway
+is always paid through it.
 
 Back up `<data>/wallet.sqlite`: it holds the bridge's wallet and its
 accounts, connections, payments and invoices in one SQLite database.
