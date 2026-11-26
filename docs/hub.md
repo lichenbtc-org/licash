@@ -809,7 +809,11 @@ wait ends. Of the same `b` and another `E`, a contract of graph id 16 on has
 the hub post its signed response again, which reads the txid alone: its
 statement owes a claim nothing whose `E` her one-time key signed twice, the
 other signature shown in its input with no evidence. Before graph 16, of
-another `E` alone, it responds no more, and her timeout pays her. On mainnet the hub
+another `E` alone, it responds no more, and her timeout pays her. Her
+publication a reorg took out after the response, and withheld since, the hub
+takes her slot back by its reclaim when she contests, and proves her claim,
+empty, owed nothing; one mined in its place that her `E` makes ineligible it
+proves owed nothing alike, with no evidence. On mainnet the hub
 decides on a request 6 blocks deep for that. So the hub signs none where it can tell one was:
 the openings keep each answer before it is signed, and one kept with nothing
 pinned for it, as when the pins' rows were lost, is not decided anew. Nor is

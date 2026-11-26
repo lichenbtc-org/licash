@@ -822,28 +822,7 @@ impl Openings {
             .await?
         else {
             // She never published: the slot is the hub's after k.
-            let k = u32::from(o.babe.spec.windows.k);
-            if tip.saturating_add(1) >= r_at.saturating_add(k) {
-                // Its slot's value alone pays no fee: a fee coin with it.
-                let prevout = r.output[slot.vout as usize].clone();
-                let tx = o.reclaim(hub.keys())?;
-                let tx = self
-                    .with_fee(
-                        id,
-                        hub,
-                        "reclaim",
-                        tx,
-                        prevout.clone(),
-                        None,
-                        &CoinTree::Fee,
-                    )
-                    .await?;
-                let tx = self.sealed(id, hub, o, "reclaim", tx, prevout)?;
-                if self.post(&tx).await {
-                    return Ok(Played::Posted("reclaim"));
-                }
-            }
-            return Ok(Played::Idle);
+            return self.reclaim(id, hub, o, r, r_at, tip).await;
         };
         let request = presign(&o.set, "request")?;
         if p.input.iter().all(|i| i.previous_output != slot) {
@@ -1764,9 +1743,75 @@ impl Openings {
         Ok(Ok(proof))
     }
 
+    /// Her slot, unspent, taken by the hub's reclaim once it may (`k`
+    /// blocks after her request): her claim then reads as empty, owed
+    /// nothing.
+    async fn reclaim(
+        &self,
+        id: &[u8; 32],
+        hub: &Hub,
+        o: &HubOpening,
+        r: &Transaction,
+        r_at: u32,
+        tip: u32,
+    ) -> Result<Played> {
+        let k = u32::from(o.babe.spec.windows.k);
+        if tip.saturating_add(1) < r_at.saturating_add(k) {
+            return Ok(Played::Idle);
+        }
+        // Its slot's value alone pays no fee: a fee coin with it.
+        let prevout = r.output[SLOT as usize].clone();
+        let tx = o.reclaim(hub.keys())?;
+        let tx = self
+            .with_fee(
+                id,
+                hub,
+                "reclaim",
+                tx,
+                prevout.clone(),
+                None,
+                &CoinTree::Fee,
+            )
+            .await?;
+        let tx = self.sealed(id, hub, o, "reclaim", tx, prevout)?;
+        Ok(match self.post(&tx).await {
+            true => Played::Posted("reclaim"),
+            false => Played::Idle,
+        })
+    }
+
+    /// Whether her claim, as the spend of her slot `p` (in a block at
+    /// `p_at`) publishes it, is owed nothing with no evidence: one a
+    /// reorganization replaced with another publication, or the hub's
+    /// reclaim. Evidence against such a claim, ineligible, fails the
+    /// statement; none proves it.
+    async fn owed_nothing_alone(
+        &self,
+        o: &HubOpening,
+        r: &Transaction,
+        (p, p_at): (&Transaction, u32),
+    ) -> Result<bool> {
+        let block = self.block_at(p_at).await?;
+        let carrier = licash_hp::carrier(&o.base);
+        let request = presign(&o.set, "request")?;
+        let filed = dispute::published(carrier, &request.tx, &block, &p.compute_txid())?;
+        let (b, e) = o.requested_b(r)?;
+        let headers = self.headers(o, p_at).await?;
+        let chain = licash_hp::chain(&o.base, &headers).map_err(|e| anyhow!("{e}"))?;
+        let request = Request {
+            amount: b,
+            claim_digest: e,
+        };
+        let owed =
+            recovery::owed(&o.base, &request, &filed, &[], &chain).map_err(|e| anyhow!("{e}"))?;
+        Ok(owed.owed == 0)
+    }
+
     /// The statement's input for the hub's assertion on `pinned` evidence,
     /// checked: once its disclosure, if the evidence needs one, is deep
-    /// enough (else what it played instead).
+    /// enough (else what it played instead). Of her slot unspent (a
+    /// reorganization took her publication out), the hub's reclaim first;
+    /// of a claim owed nothing alone, no evidence.
     #[allow(clippy::too_many_arguments)]
     async fn input(
         &self,
@@ -1787,17 +1832,39 @@ impl Openings {
             txid: r.compute_txid(),
             vout: SLOT,
         };
-        let (p_at, p) = self
+        let Some((p_at, p)) = self
             .spend(slot, &r.output[slot.vout as usize], r_at, tip)
             .await?
-            .context("responded with no publication")?;
+        else {
+            // Responded on a publication a reorganization took out, and
+            // withheld since: the slot is the hub's.
+            if self.once(id, "publication gone") {
+                self.alert(&format!(
+                    "contract {}: the hub responded, and her publication is in no block \
+                     now (a reorganization). It takes her slot back, and proves her claim \
+                     owed nothing.",
+                    crate::hex_id(id)
+                ));
+            }
+            return Ok(Err(self.reclaim(id, hub, o, r, r_at, tip).await?));
+        };
+        if tip < p_at.saturating_add(depth) {
+            return Ok(Err(Played::Idle));
+        }
         // Her other signature on `E`, if a reorganization mined her request
         // signing another `E` than the one the hub answered: her claim owed
-        // nothing by it, with no evidence and no disclosure.
+        // nothing by it, with no evidence and no disclosure. So too a claim
+        // owed nothing alone, as another publication a reorganization mined
+        // in place of the one the hub answered.
         let other_e = self.other_e(id, o, r)?;
-        let evidence = match other_e {
-            Some(_) => Vec::new(),
-            None => pinned_evidence(o, pinned)?,
+        let alone = other_e.is_none()
+            && self
+                .owed_nothing_alone(o, r, (&p, p_at))
+                .await
+                .unwrap_or(false);
+        let evidence = match other_e.is_some() || alone {
+            true => Vec::new(),
+            false => pinned_evidence(o, pinned)?,
         };
         let disclosures = recovery::disclosures(&evidence).map_err(|e| anyhow!("{e}"))?;
         let disclosure = if disclosures == Disclosures::empty() {

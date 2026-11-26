@@ -5269,6 +5269,164 @@ async fn a_hub_proves_its_response_by_her_two_signatures_on_e_after_a_reorg_mine
     Ok(())
 }
 
+/// Her stale claim, published, answered and contested: then a reorg takes
+/// her publication out of the chain, and mines again all that followed it
+/// (her request with it, if in one block), as anyone may, all public, but
+/// her publication (withheld, as by her own miner). The hub, its evidence
+/// against her claim now against none, takes her slot back by its reclaim
+/// and proves her claim, empty, owed nothing, with no evidence: she is paid
+/// what the response says, not what she claims and her reserve.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_hub_reclaims_her_slot_and_proves_its_response_after_a_reorg_takes_her_publication_out(
+) -> Result<()> {
+    use licash_contracts::holder::recovery::{self, Stage};
+    use serde_json::{json, Value};
+
+    let s = stale_claim([35; 32]).await?;
+    s.openings.refuse_evidence();
+    // A coin for her contest's fee.
+    let to = s.wallet.fallback_address()?.script_pubkey();
+    s.rt.fund(&to, Amount::from_sat(100_000))?;
+    s.rt.mine(1)?;
+    scan(&s.wallet, &s.chain).await?;
+    let told = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let alerts = told.clone();
+    s.openings.alert_with(Arc::new(move |message: &str| {
+        alerts.lock().unwrap().push(message.to_owned())
+    }));
+    let count = |of: &str| {
+        let told = told.lock().unwrap();
+        told.iter().filter(|m| m.contains(of)).count()
+    };
+    let db = s.mine.join("wallet.sqlite");
+    let advance = || recovery::advance(&s.wallet, &s.chain, &db, s.rate);
+    let node = rpc_of(&s.rt, None)?;
+    // Played up to her contest in a block, before the hub sees it.
+    let mut contested = None;
+    for _ in 0..300 {
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        let r = advance().await?[0].clone();
+        ensure!(!matches!(r.stage, Stage::Lost | Stage::Done), "{r:?}");
+        s.rt.mine(1)?;
+        if let (Some(txid), Some(x)) = (r.request, r.response) {
+            let main = bitcoin::OutPoint { txid: x, vout: 0 };
+            if s.rt.confirmations(&x)?.is_some() && !s.rt.is_unspent(&main)? {
+                contested = Some((txid, x));
+                break;
+            }
+        }
+    }
+    let (txid, x) = contested.context("never contested")?;
+    // Her publication: the spend of her request's slot.
+    // (Its slot output: the main output, the anchor, the slot.)
+    let slot = bitcoin::OutPoint { txid, vout: 2 };
+    let r_at = s.rt.confirmations(&txid)?.context("unconfirmed")?;
+    let mut published = None;
+    for at in r_at..=s.rt.height()? {
+        let spends = |tx: &bitcoin::Transaction| tx.input.iter().any(|i| i.previous_output == slot);
+        if let Some(tx) = s.rt.block_txs(at)?.into_iter().find(spends) {
+            published = Some((tx, at));
+            break;
+        }
+    }
+    let (p, p_at) = published.context("no publication")?;
+    // What was mined from her publication's block on, but it and what
+    // spends it.
+    let mut gone = std::collections::HashSet::from([p.compute_txid()]);
+    let mut again = Vec::new();
+    for at in p_at..=s.rt.height()? {
+        for tx in s.rt.block_txs(at)?.into_iter().skip(1) {
+            if tx
+                .input
+                .iter()
+                .any(|i| gone.contains(&i.previous_output.txid))
+            {
+                gone.insert(tx.compute_txid());
+            } else if !gone.contains(&tx.compute_txid()) {
+                again.push(tx);
+            }
+        }
+    }
+
+    let hash: Value = node.rpc("getblockhash", json!([p_at])).await?;
+    let _: Option<Value> = node.rpc_optional("invalidateblock", json!([hash])).await?;
+    let _: Value = node
+        .rpc(
+            "prioritisetransaction",
+            json!([p.compute_txid().to_string(), 0, -100_000_000]),
+        )
+        .await?;
+    // In a block of the chain now (the node's index keeps the blocks a
+    // reorg left too).
+    async fn mined(node: &Source, txid: bitcoin::Txid) -> bool {
+        let tx: Result<Value> = node
+            .rpc("getrawtransaction", json!([txid.to_string(), true]))
+            .await;
+        tx.is_ok_and(|tx| tx["confirmations"].as_u64().unwrap_or(0) > 0)
+    }
+    // All but her publication mined again, each once it may be.
+    for _ in 0..100 {
+        let mut left = 0;
+        for tx in &again {
+            if !mined(&node, tx.compute_txid()).await {
+                left += 1;
+                let _ = s.rt.send_raw_any_fee(tx);
+            }
+        }
+        if left == 0 {
+            break;
+        }
+        s.rt.mine(1)?;
+    }
+    ensure!(mined(&node, x).await, "its response unmined");
+    ensure!(
+        !s.rt.is_unspent(&bitcoin::OutPoint { txid: x, vout: 0 })?,
+        "uncontested"
+    );
+    ensure!(s.rt.is_unspent(&slot)?, "her publication mined");
+
+    // Her contest, and the hub's assertion spending it.
+    let contest = (again.iter())
+        .find(|t| {
+            t.input
+                .iter()
+                .any(|i| i.previous_output == bitcoin::OutPoint { txid: x, vout: 0 })
+        })
+        .context("no contest")?
+        .compute_txid();
+    let mut last = None;
+    for _ in 0..200 {
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        eprintln!("{} {round:?}", s.rt.height()?);
+        // Her wallet, its publication in no block, waits on it: not under
+        // test.
+        last = advance().await.ok().map(|r| r[0].stage);
+        let asserted = !s.rt.is_unspent(&bitcoin::OutPoint {
+            txid: contest,
+            vout: 0,
+        })?;
+        if asserted {
+            ensure!(
+                count("takes her slot back") == 1,
+                "{:?}",
+                told.lock().unwrap()
+            );
+            ensure!(!s.rt.is_unspent(&slot)?, "her slot unspent");
+            let told = told.lock().unwrap();
+            ensure!(
+                told.iter().all(|m| !m.contains("does not hold")),
+                "{told:?}"
+            );
+            return Ok(());
+        }
+        s.rt.mine(1)?;
+    }
+    anyhow::bail!("never asserted: {last:?}, told {:?}", told.lock().unwrap())
+}
+
 /// The transaction of `rt`'s `harness` wallet (the hub's) that funded
 /// `coin`, in the mempool, replaced by a spend of its inputs back to that
 /// wallet at a higher fee: `coin` gone, and what spent it with it, as an
