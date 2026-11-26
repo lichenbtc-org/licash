@@ -168,6 +168,75 @@ mod tests {
         id
     }
 
+    /// The programs contracts opened before [`signet`] are played under,
+    /// as `apps/contracts` keeps them (`SIGNET_BEFORE`), read from its source.
+    fn signet_before() -> Vec<String> {
+        let source = String::from_utf8(kept("../../apps/contracts/src/lib.rs")).unwrap();
+        let at = source
+            .find("pub const SIGNET_BEFORE:")
+            .expect("the programs before");
+        let rest = &source[at..];
+        let list = &rest[rest.find('=').expect("their list")..];
+        let list = &list[..list.find("];").expect("their end")];
+        // each `hex!("…")`, quoted
+        list.split('"')
+            .skip(1)
+            .step_by(2)
+            .map(|id| {
+                assert!(
+                    id.len() == 64 && id.bytes().all(|c| c.is_ascii_hexdigit()),
+                    "{id}"
+                );
+                id.to_owned()
+            })
+            .collect()
+    }
+
+    /// The inputs the statement's tests export (`export_inputs`,
+    /// `export_worst_inputs`, `export_chained_inputs`, docs/r0.md), made by
+    /// this checkout's code, of contracts on `graph` (`LICASH_HP_GRAPH`) if
+    /// named, with the chained input's receipt of the chain, which proves
+    /// nothing (`chain-fake`), as `hp-exec` counts one. Of a graph named,
+    /// the chained input alone.
+    fn exported(graph: Option<u32>) -> (tempfile::TempDir, Vec<Receipt>) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut export = std::process::Command::new(env!("CARGO"));
+        export
+            .current_dir(&root)
+            .env("LICASH_HP_INPUTS", dir.path())
+            .args(["test", "--locked", "--release", "--manifest-path"])
+            .arg(root.join("regtest/Cargo.toml"))
+            .args(["-p", "licash-hp", "--test", "statement", "--"]);
+        match graph {
+            Some(graph) => export
+                .env("LICASH_HP_GRAPH", graph.to_string())
+                .arg("export_chained_inputs"),
+            None => export.env_remove("LICASH_HP_GRAPH").arg("export_"),
+        };
+        let out = export.output().unwrap();
+        assert!(
+            out.status.success(),
+            "the export: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let receipt = dir.path().join("chain-2.bin");
+        let batch = dir.path().join("batch-2.bin");
+        crate::chain::fake(batch.to_str().unwrap(), receipt.to_str().unwrap()).unwrap();
+        let receipts = crate::hp::receipts(&[receipt.display().to_string()]).unwrap();
+        (dir, receipts)
+    }
+
+    /// The exported inputs of no rest output, each with whether it is chained.
+    const PLAIN: [(&str, bool); 6] = [
+        ("answered", false),
+        ("unanswered", false),
+        ("answered-funded", false),
+        ("worst", false),
+        ("worst-alone", false),
+        ("answered-chained", true),
+    ];
+
     fn bench_base() -> Base {
         HubInput::from_bytes(&kept("bench.bin")).unwrap().base
     }
@@ -182,43 +251,14 @@ mod tests {
     }
 
     /// The pinned program decides each input the statement's tests export
-    /// (`export_inputs`, `export_worst_inputs`, `export_chained_inputs`,
-    /// docs/r0.md), made by this checkout's code, as the library does: none
-    /// it can't read, nor one it decides otherwise. The chained input's
-    /// receipt of the chain proves nothing (`chain-fake`), as `hp-exec`
-    /// counts one.
+    /// ([`exported`]) as the library does: none it can't read, nor one it
+    /// decides otherwise.
     #[test]
     fn the_pinned_program_decides_what_the_current_code_exports() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let out = std::process::Command::new(env!("CARGO"))
-            .current_dir(&root)
-            .env("LICASH_HP_INPUTS", dir.path())
-            .args(["test", "--locked", "--release", "--manifest-path"])
-            .arg(root.join("regtest/Cargo.toml"))
-            .args(["-p", "licash-hp", "--test", "statement", "export_"])
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "the export: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        let (dir, receipts) = exported(None);
         let pinned = probe::program(Some(&signet())).unwrap();
         let path = |name: &str| dir.path().join(format!("{name}.bin"));
-        let receipt = path("chain-2");
-        crate::chain::fake(path("batch-2").to_str().unwrap(), receipt.to_str().unwrap()).unwrap();
-        let receipts = crate::hp::receipts(&[receipt.display().to_string()]).unwrap();
-        let inputs = [
-            ("answered", false),
-            ("unanswered", false),
-            ("answered-funded", false),
-            ("answered-rest", false),
-            ("worst", false),
-            ("worst-alone", false),
-            ("answered-chained", true),
-        ];
-        for (name, chained) in inputs {
+        for (name, chained) in PLAIN.into_iter().chain([("answered-rest", false)]) {
             let bytes = std::fs::read(path(name)).unwrap();
             let receipts = if chained { &receipts[..] } else { &[] };
             decides(&pinned, &bytes, receipts).unwrap_or_else(|e| panic!("{name}: {e:#}"));
@@ -226,12 +266,45 @@ mod tests {
         // What it proves and refuses, both: unanswered is refused.
         assert!(crate::hp::expected(&std::fs::read(path("unanswered")).unwrap()).is_err());
         assert!(crate::hp::expected(&std::fs::read(path("answered")).unwrap()).is_ok());
-        // A contract of a rest output, which the program before it refuses.
-        let rested = std::fs::read(path("answered-rest")).unwrap();
-        assert!(crate::hp::expected(&rested).is_ok());
-        let before = "1808247519df8436457abfb21a7a5173e0b9948db0b75ee3dce0e93bc9443658";
-        let before = probe::program(Some(before)).unwrap();
-        assert!(decides(&before, &rested, &[]).is_err());
+        // A contract of a rest output, proved.
+        assert!(crate::hp::expected(&std::fs::read(path("answered-rest")).unwrap()).is_ok());
+    }
+
+    /// Each program contracts opened before the pinned one are played
+    /// under decides their contracts as this checkout's library does, on
+    /// the graph ids exported by default and, chained, on the one they
+    /// opened on (14, `licash::recovery::SIGNED_FROM`, whose contracts no
+    /// program decides but on their chain): the hub decides with the
+    /// library and proves with the program, so a program deciding otherwise
+    /// is a response the hub cannot prove. A contract of a rest output,
+    /// which none of them was built for, each refuses.
+    #[test]
+    fn the_programs_before_decide_their_contracts_as_the_current_code() {
+        let before = signet_before();
+        assert!(!before.is_empty());
+        let programs: Vec<_> = before
+            .iter()
+            .map(|id| probe::program(Some(id)).unwrap())
+            .collect();
+        for graph in [None, Some(licash::recovery::SIGNED_FROM)] {
+            let (dir, receipts) = exported(graph);
+            let path = |name: &str| dir.path().join(format!("{name}.bin"));
+            for (id, program) in before.iter().zip(&programs) {
+                for (name, chained) in PLAIN
+                    .into_iter()
+                    .filter(|(_, chained)| graph.is_none() || *chained)
+                {
+                    let bytes = std::fs::read(path(name)).unwrap();
+                    let receipts = if chained { &receipts[..] } else { &[] };
+                    decides(program, &bytes, receipts)
+                        .unwrap_or_else(|e| panic!("{id} on {graph:?}, {name}: {e:#}"));
+                }
+                if graph.is_none() {
+                    let rested = std::fs::read(path("answered-rest")).unwrap();
+                    assert!(decides(program, &rested, &[]).is_err(), "{id}");
+                }
+            }
+        }
     }
 
     /// An input of any Base, chained or not, is one the library reads

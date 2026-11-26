@@ -1542,7 +1542,9 @@ mod chained {
         for (i, byte) in chain.iter_mut().enumerate() {
             *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
         }
-        let (f, spent) = stale_on(ON);
+        // On `LICASH_HP_GRAPH` if set, one chained (r0/host's programs before).
+        let on = std::env::var("LICASH_HP_GRAPH").map_or(ON, |n| n.parse().unwrap());
+        let (f, spent) = stale_on(on);
         let x = exit(&f.base, f.b, &f.e, &f.bytes, 64);
         let evidence = std::slice::from_ref(&spent);
         // the chain through the response's block, in two batches
