@@ -27,8 +27,8 @@ pub fn lock_of(quote: &Quote) -> u32 {
 }
 
 /// The notes a contract of the fixed terms protects, in sat: the least
-/// of the sizes ([`licash_api::sizes`]).
-pub const CAP: u32 = 131_071;
+/// cap ([`licash_api::MIN_CAP`]).
+pub const CAP: u32 = licash_api::MIN_CAP;
 
 /// The holder's reserve, from her deposit.
 pub const RESERVE_ALICE: u64 = 20_000;
@@ -69,24 +69,16 @@ pub fn quote_ceiling() -> f64 {
     MAX_RATE_SAT_PER_KVB as f64 / 1_000.0
 }
 
-/// The most notes a contract may protect, in sat: of a 31-bit graph, the
-/// widest the graph's construction takes (its units counted in a `u32`).
-pub const MAX_CAP: u32 = (1 << licash_api::MAX_SIZE_BITS) - 1;
+/// The most notes a contract may protect, in sat: of a 31-bit graph
+/// ([`licash_api::MAX_CAP`]).
+pub const MAX_CAP: u32 = licash_api::MAX_CAP;
 
-/// The fewest bits of the graph's payout: the fixed terms' graph.
-const MIN_BITS: u8 = licash_api::MIN_SIZE_BITS as u8;
-
-/// The largest cap the hub's wallet funds with `balance` sat: its
-/// graph's payout, all ones in as many bits as it is wide, at least
-/// `MIN_BITS`; its reserve; and `FUNDING_MARGIN`. None if not even
-/// the narrowest graph is funded.
+/// The largest cap the hub's wallet funds with `balance` sat: its graph's
+/// payout, which pays exactly the cap ([`licash_api::is_cap`]); its
+/// reserve; and `FUNDING_MARGIN`. None if not even the least is funded.
 pub fn fundable(balance: u64) -> Option<u32> {
     let left = balance.checked_sub(RESERVE_HUB + FUNDING_MARGIN)?;
-    let bits = (u64::BITS - left.saturating_add(1).leading_zeros()).saturating_sub(1);
-    (bits >= u32::from(MIN_BITS)).then(|| {
-        let most = (1u64 << bits.min(31)) - 1;
-        u32::try_from(most).unwrap_or(MAX_CAP).min(MAX_CAP)
-    })
+    licash_api::cap_at_most(left)
 }
 
 /// The caps and durations a hub lets holders choose besides its fixed
@@ -94,7 +86,7 @@ pub fn fundable(balance: u64) -> Option<u32> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Range {
     /// The most a contract protects, in sat: [`CAP`] to [`MAX_CAP`],
-    /// taken down to a size ([`licash_api::size_at_most`]).
+    /// taken down to a cap ([`licash_api::cap_at_most`]).
     pub max_cap: u32,
     /// The most blocks one lasts: [`LOCK`] at least.
     pub max_blocks: u32,
@@ -186,7 +178,7 @@ impl Timing {
             );
         }
         let range = range.map(|r| Range {
-            max_cap: licash_api::size_at_most(u64::from(r.max_cap)).unwrap_or(CAP),
+            max_cap: licash_api::cap_at_most(u64::from(r.max_cap)).unwrap_or(CAP),
             ..r
         });
         Ok(Self {
@@ -307,8 +299,8 @@ impl Timing {
     }
 
     /// Refused unless a holder may ask for `cap` sat over `blocks`: the
-    /// fixed terms, or terms within the hub's range, its cap one of the
-    /// sizes ([`licash_api::sizes`]).
+    /// fixed terms, or terms within the hub's range, its cap any it
+    /// pays exactly ([`licash_api::is_cap`]).
     pub fn allows(&self, cap: u32, blocks: u32) -> Result<()> {
         if (cap, blocks) == (CAP, self.lock) {
             return Ok(());
@@ -320,10 +312,12 @@ impl Timing {
             );
         };
         ensure!(
-            (range.min_cap..=range.max_cap).contains(&cap) && licash_api::is_size(cap),
-            "a cap of {cap} sat: not a size of {} to {} (2^n - 1 sat)",
+            range.allows_cap(cap),
+            "a cap of {cap} sat: not one of {} to {} (its payout's rest, past 2^n - 1 sat, \
+             none or {} sat at least)",
             range.min_cap,
-            range.max_cap
+            range.max_cap,
+            licash_api::MIN_REST
         );
         ensure!(
             (range.min_blocks..=range.max_blocks).contains(&blocks),
@@ -408,7 +402,8 @@ impl Timing {
 
     /// The hub's quote on `keyset` at `checkpoint` of `cap` sat over
     /// `blocks`, `funded` of them by its holder: a graph of 1-sat units
-    /// as wide as the cap needs, 17 bits at least, its headers reaching the
+    /// whose payout pays the cap exactly ([`licash_api::payout_bits`], and
+    /// one output of the rest), 17 bits at least, its headers reaching the
     /// close, its challenge 12 blocks, her reserve 20 000 sat and its fee
     /// 3 000 and its rates, its graph returning the hub its reserve if it
     /// never responds ([`RETURNING`]). Of [`CAP`] and [`LOCK`], none
@@ -421,7 +416,7 @@ impl Timing {
         blocks: u32,
         funded: u32,
     ) -> Quote {
-        let bits = (u32::BITS - cap.leading_zeros()) as u8;
+        let bits = licash_api::payout_bits(cap);
         let floors = Floors::of(self.profile);
         let (instances, kept) = match self.profile {
             ChainProfile::Core30DefaultRegtest => (4, 2),
@@ -433,7 +428,7 @@ impl Timing {
             graph: GraphTerms {
                 id: self.graph_id(),
                 unit_sats: 1,
-                bits: bits.max(MIN_BITS),
+                bits: bits.max(licash_api::payout_bits(CAP)),
                 low_bits: 9,
                 deposit_units: funded,
                 close_height: 0,
@@ -518,12 +513,15 @@ mod tests {
 
     #[test]
     fn a_wallet_funds_the_widest_graph_it_holds_with_its_reserve_and_margin() {
-        let narrowest = (1u64 << MIN_BITS) - 1 + RESERVE_HUB + FUNDING_MARGIN;
+        let narrowest = u64::from(CAP) + RESERVE_HUB + FUNDING_MARGIN;
         assert_eq!(fundable(narrowest), Some(CAP));
         assert_eq!(fundable(narrowest - 1), None);
         assert_eq!(fundable(0), None);
-        // Half a bitcoin: 25 bits, short of 26.
-        assert_eq!(fundable(50_000_000), Some(33_554_431));
+        // Half a bitcoin: all of it but the reserve and margin.
+        assert_eq!(fundable(50_000_000), Some(49_850_000));
+        // a rest of under 512 sat: down to the 17 bits
+        assert_eq!(fundable(narrowest + 511), Some(CAP));
+        assert_eq!(fundable(narrowest + 512), Some(CAP + 512));
         assert_eq!(fundable(u64::MAX), Some(MAX_CAP));
     }
 
@@ -693,13 +691,9 @@ mod tests {
         same.fees.opening_fee_quote = fixed.fees.opening_fee_quote;
         assert_eq!(digest(&same), digest(&fixed));
 
-        // Each size 2^n - 1 of n bits, its graph's payout all ones: the
-        // hub locks what it protects, 17 bits to 31.
-        for (n, size) in (17..=31).zip(licash_api::sizes()) {
-            let q = quote(size, 1_000);
-            assert_eq!(q.graph.bits, n);
-            assert_eq!(u64::from(q.cap), (1u64 << n) - 1);
-        }
+        // Each 2^n - 1 of n bits, its graph's payout all ones, and any
+        // other cap of as many as its binary outputs pay at most, its rest
+        // one output more: the hub locks what it protects, 17 bits to 31.
         let base = |q: &Quote| {
             licash::base::Base::new(licash::base::Parts {
                 cap: q.cap,
@@ -710,7 +704,30 @@ mod tests {
                 ..parts.clone()
             })
         };
-        assert!(base(&quote(MAX_CAP, 1_000)).is_ok());
+        for n in 17..=31u8 {
+            let q = quote(((1u64 << n) - 1) as u32, 1_000);
+            assert_eq!(q.graph.bits, n);
+            assert_eq!(base(&q).unwrap().parts().pool().unwrap(), q.cap);
+        }
+        for (cap, bits) in [
+            (200_000, 17),
+            (1_000_000, 19),
+            (CAP + 512, 17),
+            (MAX_CAP, 31),
+        ] {
+            let q = quote(cap, 1_000);
+            assert_eq!(q.graph.bits, bits, "{cap}");
+            let base = base(&q).unwrap();
+            assert_eq!(
+                base.parts().pool().unwrap(),
+                cap,
+                "the pool the cap exactly"
+            );
+            assert_eq!(
+                base.parts().graph_value().unwrap(),
+                u64::from(cap) + 120_000
+            );
+        }
     }
 
     /// Past half its most contracts, the hub's fee doubles at each eighth
@@ -834,8 +851,8 @@ mod tests {
 
         let timing = Timing::of(ChainProfile::Core30Signet, Some(RANGE)).unwrap();
         let range = timing.range().unwrap();
-        // Its largest cap the operator's, down to a size.
-        assert_eq!((range.min_cap, range.max_cap), (CAP, 67_108_863));
+        // Its largest cap the operator's.
+        assert_eq!((range.min_cap, range.max_cap), (CAP, 100_000_000));
         assert_eq!((range.min_blocks, range.max_blocks), (576, 26_280));
         // No bound by her coin: announced as none, for wallets that read one.
         assert_eq!(
@@ -844,12 +861,16 @@ mod tests {
         );
         assert!(timing.allows(CAP, LOCK).is_ok());
         assert!(timing.allows(67_108_863, 26_280).is_ok());
+        assert!(timing.allows(100_000_000, 26_280).is_ok());
         assert!(timing.allows(1_048_575, 576).is_ok());
+        assert!(timing.allows(15_000_000, LOCK).is_ok());
+        assert!(timing.allows(1_048_575 + 512, LOCK).is_ok());
         for (cap, blocks) in [
             (CAP - 1, LOCK),
             (CAP + 1, LOCK),
             (1_048_576, LOCK),
-            (15_000_000, LOCK),
+            (1_048_575 + 511, LOCK),
+            (100_000_001, LOCK),
             (134_217_727, LOCK),
             (CAP, 575),
             (CAP, 26_281),

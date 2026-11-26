@@ -563,6 +563,7 @@ fn ask() -> Ask {
         blocks: 300,
         max_price: 30_000,
         cap: None,
+        inbound: 0,
         deposit: None,
     }
 }
@@ -829,6 +830,7 @@ async fn a_wallet_opens_a_contract_of_terms_it_chose_on_a_small_coin() -> Result
         blocks: 2_000,
         max_price: price,
         cap: Some(2_097_151),
+        inbound: 0,
         deposit: Some(small.outpoint),
     };
     let first = holder::open(&wallet, &chain, &mine.join("wallet.sqlite"), &url, ask).await?;
@@ -845,6 +847,7 @@ async fn a_wallet_opens_a_contract_of_terms_it_chose_on_a_small_coin() -> Result
         blocks: 300,
         max_price: fixed_price,
         cap: None,
+        inbound: 0,
         deposit: None,
     };
     let second = holder::open(&wallet, &chain, &mine.join("wallet.sqlite"), &url, fixed).await?;
@@ -1946,6 +1949,7 @@ async fn with_notes<T: licash_wallet::Transport>(seed: [u8; 32], transport: T) -
     .await?;
     let chosen = Ask {
         cap: Some(131_071),
+        inbound: 0,
         ..ask()
     };
     let contract = holder::open(&wallet, &chain, &mine.join("wallet.sqlite"), &url, chosen).await?;
@@ -2826,6 +2830,7 @@ async fn a_holder_recovers_her_cap_of_notes_beyond_it_from_a_hub_that_answered()
         holder_wallet(&rt, &chain, dir.path(), &url, [10; 32], &[COIN, COIN]).await?;
     let chosen = Ask {
         cap: Some(131_071),
+        inbound: 0,
         ..ask()
     };
     let opened = holder::open(&wallet, &chain, &mine.join("wallet.sqlite"), &url, chosen).await?;
@@ -3042,6 +3047,7 @@ async fn stale_copy<T: licash_wallet::Transport>(
     let (mine, wallet) = holder_wallet(&rt, &chain, dir.path(), &url, seed, &[COIN, COIN]).await?;
     let chosen = Ask {
         cap: Some(131_071),
+        inbound: 0,
         ..ask()
     };
     let opened = holder::open(&wallet, &chain, &mine.join("wallet.sqlite"), &url, chosen).await?;
@@ -3360,6 +3366,7 @@ async fn a_force_close_claims_an_unsettled_locks_refund_once_expired_at_depth() 
     // Long enough for her exit to close it after the lock's refund is owed.
     let chosen = Ask {
         cap: Some(131_071),
+        inbound: 0,
         blocks: 1_000,
         ..ask()
     };
@@ -3503,6 +3510,7 @@ async fn uncertified_refund(
     .await?;
     let chosen = Ask {
         cap: Some(131_071),
+        inbound: 0,
         blocks: 1_000,
         ..ask()
     };
@@ -3695,6 +3703,7 @@ async fn a_force_close_claims_the_notes_of_a_payment_its_hub_never_released() ->
     .await?;
     let chosen = Ask {
         cap: Some(131_071),
+        inbound: 0,
         blocks: 1_000,
         ..ask()
     };
@@ -3816,6 +3825,7 @@ async fn a_force_close_claims_a_lock_paying_her_once_activated_at_depth() -> Res
     .await?;
     let chosen = Ask {
         cap: Some(131_071),
+        inbound: 0,
         blocks: 1_000,
         ..ask()
     };
@@ -3970,6 +3980,7 @@ async fn an_activation_whose_block_leaves_the_chain_is_found_again_and_claimed()
     .await?;
     let chosen = Ask {
         cap: Some(131_071),
+        inbound: 0,
         blocks: 1_000,
         ..ask()
     };
@@ -6156,8 +6167,9 @@ async fn a_holder_funds_part_of_her_contract_and_is_issued_its_notes_once_f_is_b
     ensure!(scan(&wallet, &chain).await? == 1_000_000);
     let coin = wallet.silent_coins()?[0].outpoint;
 
-    // Her coin is spent whole: the smallest contract that takes it, her part
-    // of it what the price leaves, the hub's interest on the rest only.
+    // Her coin is spent whole: a contract of her part, what the price leaves
+    // of it, and of what the hub adds to make a cap, its interest on that
+    // only.
     let range = (info.contracts.and_then(|c| c.range)).context("no range")?;
     let quote = holder::offer(&wallet, &url, None, 0).await?;
     let (denominations, notes) = holder::funding_notes(&quote.quote);
@@ -6168,6 +6180,7 @@ async fn a_holder_funds_part_of_her_contract_and_is_issued_its_notes_once_f_is_b
         330,
         (&denominations, notes),
         0,
+        0,
     )
     .context("no contract takes the coin")?;
     let (cap, funded) = (fitted.cap, fitted.funded);
@@ -6176,6 +6189,7 @@ async fn a_holder_funds_part_of_her_contract_and_is_issued_its_notes_once_f_is_b
         blocks: 300,
         max_price: 30_000,
         cap: None,
+        inbound: 0,
         deposit: Some(coin),
     };
     let opened = holder::open_with(&wallet, &chain, &mine.join("wallet.sqlite"), &url, ask).await?;
@@ -6699,6 +6713,7 @@ async fn a_force_close_claims_a_deposit_its_hub_kept_once_activated_at_depth() -
     followed(&hub, &source, &deposits).await?;
     let chosen = Ask {
         cap: Some(131_071),
+        inbound: 0,
         blocks: 1_000,
         ..ask()
     };

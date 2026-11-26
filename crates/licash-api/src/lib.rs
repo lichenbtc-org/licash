@@ -1089,26 +1089,59 @@ fn is_bitcoins_year(year: &u32) -> bool {
     *year == YEAR_BLOCKS
 }
 
-/// The fewest and most bits of a contract's size (size ([`sizes`])).
-pub const MIN_SIZE_BITS: u32 = 17;
-pub const MAX_SIZE_BITS: u32 = 31;
+/// The least and most notes a contract protects, its cap, in sat: a
+/// graph of 17 bits all ones, and of 31.
+pub const MIN_CAP: u32 = (1 << 17) - 1;
+pub const MAX_CAP: u32 = (1 << 31) - 1;
 
-/// The sizes a contract comes in, in sat, smallest first: `2^n - 1` for
-/// `n` of [`MIN_SIZE_BITS`] to [`MAX_SIZE_BITS`], 131 071 to
-/// 2 147 483 647. Its graph pays out in as many bits, all of them ones:
-/// the hub locks exactly what it protects.
-pub fn sizes() -> impl DoubleEndedIterator<Item = u32> {
-    (MIN_SIZE_BITS..=MAX_SIZE_BITS).map(|n| ((1u64 << n) - 1) as u32)
+/// The least a contract's payout pays in one output of the rest of its
+/// cap ([`payout_bits`]), in sat: its graph's least bit, `2^low_bits`.
+pub const MIN_REST: u32 = 1 << 9;
+
+/// The bits of the payout of a contract of `cap` sat: the most whose
+/// outputs, `2^i` sat each, pay at most the cap all together; one output
+/// more, of the rest, pays what they leave of it (`cap - (2^bits - 1)`,
+/// below `2^bits`).
+pub fn payout_bits(cap: u32) -> u8 {
+    (u64::from(cap) + 1).ilog2() as u8
 }
 
-/// Whether `cap` is one of the [`sizes`].
-pub fn is_size(cap: u32) -> bool {
-    sizes().any(|s| s == cap)
+/// What the payout's binary outputs leave of a contract of `cap` sat,
+/// paid by one output more: 0 where they pay it all.
+pub fn payout_rest(cap: u32) -> u32 {
+    let binary = ((1u64 << payout_bits(cap)) - 1) as u32;
+    cap - binary
 }
 
-/// The largest of the [`sizes`] no more than `sat`, if any.
-pub fn size_at_most(sat: u64) -> Option<u32> {
-    sizes().rev().find(|&s| u64::from(s) <= sat)
+/// Whether a contract may be of `cap` sat: from [`MIN_CAP`] to [`MAX_CAP`],
+/// and the rest its binary outputs leave none, or an output of
+/// [`MIN_REST`] at least (one below would be dust, or near it). Any other
+/// cap is one: the payout pays exactly what the hub locks.
+pub fn is_cap(cap: u32) -> bool {
+    let rest = payout_rest(cap);
+    (MIN_CAP..=MAX_CAP).contains(&cap) && (rest == 0 || rest >= MIN_REST)
+}
+
+/// The smallest cap of at least `sat` ([`is_cap`]): `sat` itself, or
+/// [`MIN_CAP`], or up to [`MIN_REST`] sat more. None past [`MAX_CAP`].
+pub fn cap_at_least(sat: u64) -> Option<u32> {
+    let cap = u32::try_from(sat.max(u64::from(MIN_CAP))).ok()?;
+    let cap = match payout_rest(cap) {
+        rest if rest > 0 && rest < MIN_REST => cap - rest + MIN_REST,
+        _ => cap,
+    };
+    (cap <= MAX_CAP).then_some(cap)
+}
+
+/// The largest cap of at most `sat` ([`is_cap`]): `sat` itself, or
+/// [`MAX_CAP`], or up to [`MIN_REST`] sat less. None below [`MIN_CAP`].
+pub fn cap_at_most(sat: u64) -> Option<u32> {
+    let cap = u32::try_from(sat.min(u64::from(MAX_CAP))).ok()?;
+    let cap = match payout_rest(cap) {
+        rest if rest > 0 && rest < MIN_REST => cap - rest,
+        _ => cap,
+    };
+    (cap >= MIN_CAP).then_some(cap)
 }
 
 /// What a contract's opening costs its holder, besides her reserve,
@@ -1136,7 +1169,7 @@ impl ContractFee {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContractRange {
     /// The notes a contract protects, in sat: at least, at most, each a
-    /// size ([`sizes`]), and those between of the [`sizes`] only.
+    /// cap ([`is_cap`]), and any cap between.
     pub min_cap: u32,
     pub max_cap: u32,
     /// Blocks from its opening to its close: at least, at most.
@@ -1184,20 +1217,25 @@ impl ContractRange {
             .saturating_add(self.fee(cap, blocks, funded).total())
     }
 
-    /// The [`sizes`] a holder may choose, smallest first.
-    pub fn sizes(&self) -> Vec<u32> {
-        sizes()
-            .filter(|s| (self.min_cap..=self.max_cap).contains(s))
-            .collect()
+    /// Whether a holder may choose a contract of `cap` sat: a cap
+    /// ([`is_cap`]) within the range.
+    pub fn allows_cap(&self, cap: u32) -> bool {
+        (self.min_cap..=self.max_cap).contains(&cap) && is_cap(cap)
     }
 
-    /// The largest size a contract may have, its holder depositing a
+    /// The smallest cap a holder may choose of at least `sat`: none past
+    /// the most.
+    pub fn cap_at_least(&self, sat: u64) -> Option<u32> {
+        cap_at_least(sat.max(u64::from(self.min_cap))).filter(|&c| c <= self.max_cap)
+    }
+
+    /// The largest cap a contract may have, its holder depositing a
     /// coin of `coin` sat: none less than the least.
     pub fn max_cap_for(&self, coin: u64) -> Option<u32> {
         let most = coin
             .saturating_mul(u64::from(self.per_coin))
             .min(u64::from(self.max_cap));
-        size_at_most(most).filter(|&s| s >= self.min_cap)
+        cap_at_most(most).filter(|&s| s >= self.min_cap)
     }
 }
 

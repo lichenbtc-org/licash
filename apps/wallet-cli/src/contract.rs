@@ -103,6 +103,8 @@ pub struct Asked {
     pub blocks: Option<u32>,
     pub max_price: Option<u64>,
     pub cap: Option<u32>,
+    /// Sat past her part asked of the hub, on its terms.
+    pub inbound: u32,
     pub coin: Option<bitcoin::OutPoint>,
     /// At a hub charging more than is sane too.
     pub any_fees: bool,
@@ -110,8 +112,8 @@ pub struct Asked {
 
 /// Open a contract at `hub` closing `blocks` from now [default: as late
 /// as the hub allows], paying at most `max_price` [default: no ceiling
-/// beyond sane fees], protecting at least `cap` sat if chosen [default: the
-/// smallest contract that takes the coin whole], paid from `coin` [default:
+/// beyond sane fees], protecting at least `cap` sat if chosen [default: her
+/// part and `inbound` sat more, asked of the hub], paid from `coin` [default:
 /// the smallest free that a contract takes whole]. Her coin is spent whole:
 /// what the reserve and the hub's fee leave of it is her part of the
 /// contract, issued back to her as notes.
@@ -138,6 +140,7 @@ pub async fn open(
         blocks,
         max_price: asked.max_price.unwrap_or(u64::MAX),
         cap: asked.cap,
+        inbound: asked.inbound,
         deposit: asked.coin,
     };
     let opening = async {
@@ -267,6 +270,7 @@ pub async fn open_paid(
         blocks: asked.blocks.unwrap_or(offered.blocks),
         max_price: asked.max_price.unwrap_or(u64::MAX),
         cap: asked.cap,
+        inbound: asked.inbound,
         deposit: None,
     };
     let source = crate::payout::source(chain.unwrap_or_default())?;
@@ -315,7 +319,7 @@ pub async fn open_paid(
 
 /// What a contract at `hub` costs, itemized, before it is opened: `cap`
 /// sat over `blocks` [default: the hub's fixed terms], `funded` of it hers,
-/// and the sizes it lets holders choose.
+/// and the caps it lets holders choose.
 pub fn terms(
     wallet: &Wallet<Http>,
     hub: &str,
@@ -346,23 +350,20 @@ pub fn terms(
         lines.push_str(&format!("\nroom         none: {why}"));
     }
     if let Some(range) = offered.range {
-        let sizes = range.sizes();
-        value["sizes"] = json!(sizes);
+        value["min_cap"] = json!(range.min_cap);
+        value["max_cap"] = json!(range.max_cap);
         value["min_blocks"] = json!(range.min_blocks);
         value["max_blocks"] = json!(range.max_blocks);
         value["per_coin"] = json!(range.per_coin);
-        let sizes: Vec<_> = sizes
-            .iter()
-            .map(|&s| crate::say::grouped(s.into()))
-            .collect();
         // A bound by the coin paying, of hubs before none was: none said of those since.
         let per_coin = match range.per_coin {
             u32::MAX => String::new(),
             times => format!(", at most {times} times the coin paying it"),
         };
         lines.push_str(&format!(
-            "\nsizes        {} sat{per_coin}\nblocks       {} to {}",
-            sizes.join(", "),
+            "\ncaps         {} to {} sat{per_coin}\nblocks       {} to {}",
+            crate::say::grouped(range.min_cap.into()),
+            crate::say::grouped(range.max_cap.into()),
             crate::say::grouped(range.min_blocks.into()),
             crate::say::grouped(range.max_blocks.into()),
         ));
@@ -446,14 +447,16 @@ impl Terms {
             });
         };
         let cap = cap.unwrap_or(offered.cap);
-        let sizes = range.sizes();
         anyhow::ensure!(
-            sizes.contains(&cap),
-            "{hub} offers no contracts of {} sat: choose one of {} sat",
+            range.allows_cap(cap),
+            "{hub} offers no contracts of {} sat: choose one of {} to {} sat{}",
             crate::say::grouped(cap.into()),
-            (sizes.iter().map(|&s| crate::say::grouped(s.into())))
-                .collect::<Vec<_>>()
-                .join(", ")
+            crate::say::grouped(range.min_cap.into()),
+            crate::say::grouped(range.max_cap.into()),
+            match range.cap_at_least(cap.into()) {
+                Some(up) => format!(", such as {}", crate::say::grouped(up.into())),
+                None => String::new(),
+            }
         );
         funds_at_most(funded, cap)?;
         Ok(Self {
@@ -1070,14 +1073,17 @@ mod tests {
     }
 
     #[test]
-    fn fixed_terms_are_priced_over_the_hubs_blocks_and_only_sizes_are_chosen() {
+    fn fixed_terms_are_priced_over_the_hubs_blocks_and_only_caps_are_chosen() {
         let fixed = Terms::of("hub", &offered(Some(range())), None, Some(300), 0).unwrap();
         assert_eq!((fixed.cap, fixed.blocks), (131_071, 1_000));
         assert_eq!(fixed.price, range().price(131_071, 1_000, 0));
-        let odd = Terms::of("hub", &offered(Some(range())), Some(200_000), Some(300), 0);
+        let any = Terms::of("hub", &offered(Some(range())), Some(200_000), Some(300), 0);
+        assert_eq!(any.unwrap().cap, 200_000);
+        // A rest of under 512 sat past 2^17 - 1: the next cap up said.
+        let odd = Terms::of("hub", &offered(Some(range())), Some(131_100), Some(300), 0);
         let odd = format!("{:#}", odd.err().unwrap());
         assert!(
-            odd.contains("131,071, 262,143, 524,287, 1,048,575 sat"),
+            odd.contains("131,071 to 1,048,575 sat, such as 131,583"),
             "{odd}"
         );
         let over = Terms::of("hub", &offered(Some(range())), Some(131_071), None, 131_072);

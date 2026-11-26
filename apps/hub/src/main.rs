@@ -179,8 +179,9 @@ struct Chain {
     /// down to a size (2^n - 1 sat, 131 071 the least), and how long it
     /// lasts up to `--contracts-max-blocks`, besides the fixed terms
     /// (131 071 sat over 1 000 blocks, 1 912 on Mutinynet): a holder's
-    /// deposit funds the smallest that it fits, the hub the rest of it, at
-    /// `--contracts-rate`. Advertised as no more than the hub's wallet funds.
+    /// deposit funds a contract of its own part by default, any larger one
+    /// she asks the hub funding the rest of it, at `--contracts-rate`.
+    /// Advertised as no more than the hub's wallet funds.
     #[arg(
         long = "contracts-max-cap",
         value_name = "SAT",

@@ -64,6 +64,7 @@ async fn a_wallet_with_no_coin_pays_for_a_contract_with_notes() -> anyhow::Resul
         blocks: offered.blocks,
         max_price: 40_000,
         cap: None,
+        inbound: 0,
         deposit: None,
     };
     let coin = paid::coin(&alice, hub1, ask, 0).await?;

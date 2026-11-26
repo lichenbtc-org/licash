@@ -85,7 +85,13 @@ pub async fn coin<T: Transport>(
     floor: u64,
 ) -> Result<Coin> {
     let planned = |pricing: &Pricing, dust: u64, notes: (&[u64], usize), least: u32| {
-        plan(pricing, ask.blocks, dust, notes, (least, floor))
+        plan(
+            pricing,
+            ask.blocks,
+            dust,
+            notes,
+            (least, ask.inbound, floor),
+        )
     };
     sized(wallet, hub, ask, planned).await
 }
@@ -101,7 +107,8 @@ pub async fn coin_worth<T: Transport>(
     value: u64,
 ) -> Result<Coin> {
     let fitted = |pricing: &Pricing, dust: u64, notes: (&[u64], usize), least: u32| {
-        fit(pricing, ask.blocks, value, dust, notes, least).map(|fitted| (value, fitted))
+        fit(pricing, ask.blocks, value, dust, notes, least, ask.inbound)
+            .map(|fitted| (value, fitted))
     };
     sized(wallet, hub, ask, fitted).await
 }
@@ -186,10 +193,12 @@ pub async fn pay<T: Transport>(
     );
     let store = Store::open(wallet_file)?;
     let ask = &coin.ask;
+    // Its cap as planned, the inbound asked in it: the opening, carried on,
+    // asks that cap and no inbound more.
     store.insert_paid(
         &quote.ticket,
         &coin.hub,
-        (ask.blocks, ceiling(ask, coin.price), ask.cap),
+        (ask.blocks, ceiling(ask, coin.price), Some(coin.fit.cap)),
         coin.value,
     )?;
     tracing::info!(
@@ -222,20 +231,26 @@ fn ceiling(ask: &Ask, price: u64) -> u64 {
     }
 }
 
-/// The coin to pay for, and the contract it fits ([`fit`]): of the smallest
-/// cap of `least` at least that a coin of its price and her part fits
-/// whole, her part [`PART`] at least, more if the hub takes contracts of so
-/// many times a coin at most and the cap needs it, or for the coin to be
-/// worth `floor` at least.
+/// The coin to pay for, and the contract it fits ([`fit`]): her part
+/// [`PART`] at least, the cap the smallest of it and `inbound` sat more,
+/// `least` at least, that a coin of its price and her part fits whole; her
+/// part more if the hub takes contracts of so many times a coin at most
+/// and the cap needs it, or for the coin to be worth `floor` at least.
 fn plan(
     pricing: &Pricing,
     blocks: u32,
     dust: u64,
     (denominations, notes): (&[u64], usize),
-    (least, floor): (u32, u64),
+    (least, inbound, floor): (u32, u32, u64),
 ) -> Option<(u64, Fit)> {
     let makes = |f: u64| fundable(denominations, notes, f) == f;
-    for cap in pricing.caps(u64::MAX, least) {
+    let mut funded = PART;
+    for _ in 0..PLANS {
+        while funded <= u64::from(licash_api::MAX_CAP) && !makes(funded) {
+            funded += 1;
+        }
+        let part = u32::try_from(funded).ok()?;
+        let cap = pricing.cap_for(u64::MAX, funded + u64::from(inbound), least)?;
         // The least coin a contract of this cap takes.
         let needed = match pricing {
             Pricing::Range(range) if cap != range.min_cap => {
@@ -243,35 +258,32 @@ fn plan(
             }
             _ => 0,
         };
-        let price = pricing.price(cap, blocks, 1);
         let needed = needed.max(floor);
-        let mut funded = needed.saturating_sub(price).max(PART);
-        for _ in 0..PLANS {
-            while funded <= u64::from(cap) && !makes(funded) {
-                funded += 1;
-            }
-            let Ok(part) = u32::try_from(funded) else {
-                break;
-            };
-            if part > cap {
-                break;
-            }
-            let value = funded + pricing.price(cap, blocks, part);
-            // As the opening fits it, of this cap.
-            match fit(pricing, blocks, value, dust, (denominations, notes), least) {
-                Some(fitted) if fitted.cap == cap && value >= needed => {
-                    return Some((value, fitted))
-                }
-                _ => funded += value.max(needed) - value + 1,
-            }
+        let value = funded + pricing.price(cap, blocks, part);
+        if value < needed {
+            funded += needed - value;
+            continue;
+        }
+        // As the opening fits it.
+        match fit(
+            pricing,
+            blocks,
+            value,
+            dust,
+            (denominations, notes),
+            least,
+            inbound,
+        ) {
+            Some(fitted) => return Some((value, fitted)),
+            None => funded += 1,
         }
     }
     None
 }
 
-/// How many parts of hers are tried for a cap, each the next she may fund,
-/// before the next cap: the price falling as her part rises is all that
-/// moves them.
+/// How many parts of hers are tried, each the next she may fund: the
+/// price falling as her part rises, and the cap rising with it, are all
+/// that moves them.
 const PLANS: usize = 64;
 
 /// Carry on with the openings paid for in `store`, at `tip`: follow each
@@ -351,6 +363,7 @@ async fn carry_on_one<T: Transport, C: Chain>(
         blocks: row.blocks,
         max_price: row.max_price,
         cap: row.cap,
+        inbound: 0,
         deposit: Some(coin.outpoint),
     };
     match open_at(wallet, chain, wallet_file, &row.hub, ask, true, RESUMES).await {
@@ -426,6 +439,7 @@ mod tests {
             blocks: 1_000,
             max_price,
             cap: None,
+            inbound: 0,
             deposit: None,
         };
         assert_eq!(ceiling(&ask(u64::MAX), 31_000), 31_000);
@@ -442,7 +456,7 @@ mod tests {
             cap: 3_584,
             price: 21_000,
         };
-        let (value, fitted) = plan(&fixed, 1_000, 330, (&wide, 32), (0, 0)).unwrap();
+        let (value, fitted) = plan(&fixed, 1_000, 330, (&wide, 32), (0, 0, 0)).unwrap();
         let part = PART as u32;
         assert_eq!(
             (value, fitted),
@@ -456,12 +470,12 @@ mod tests {
         );
         // Notes of 16 sat at the least: her part the next they make.
         let coarse: Vec<u64> = (4..32).map(|i| 1 << i).collect();
-        let (value, fitted) = plan(&fixed, 1_000, 330, (&coarse, 32), (0, 0)).unwrap();
+        let (value, fitted) = plan(&fixed, 1_000, 330, (&coarse, 32), (0, 0, 0)).unwrap();
         assert_eq!((value, fitted.funded), (21_008 + PART, part + 8));
 
         let range = range();
         let pricing = Pricing::Range(&range);
-        let (value, fitted) = plan(&pricing, 52_560, 330, (&wide, 32), (0, 0)).unwrap();
+        let (value, fitted) = plan(&pricing, 52_560, 330, (&wide, 32), (0, 0, 0)).unwrap();
         assert_eq!(
             (fitted.cap, u64::from(fitted.funded)),
             (range.min_cap, PART)
@@ -470,7 +484,7 @@ mod tests {
         assert!(value - pays < 330, "{value} for {pays}");
         // Of a larger cap asked: the smallest of it at least, the coin
         // large enough for it.
-        let (value, larger) = plan(&pricing, 52_560, 330, (&wide, 32), (200_000, 0)).unwrap();
+        let (value, larger) = plan(&pricing, 52_560, 330, (&wide, 32), (200_000, 0, 0)).unwrap();
         assert!(larger.cap >= 200_000);
         assert!(value * u64::from(range.per_coin) >= u64::from(larger.cap));
     }
@@ -483,27 +497,27 @@ mod tests {
         let wide: Vec<u64> = (0..32).map(|i| 1 << i).collect();
         let range = range();
         let pricing = Pricing::Range(&range);
-        let (usual, planned) = plan(&pricing, 52_560, 330, (&wide, 32), (0, 0)).unwrap();
+        let (usual, planned) = plan(&pricing, 52_560, 330, (&wide, 32), (0, 0, 0)).unwrap();
         let floor = usual + 7_294;
-        let (value, fitted) = plan(&pricing, 52_560, 330, (&wide, 32), (0, floor)).unwrap();
+        let (value, fitted) = plan(&pricing, 52_560, 330, (&wide, 32), (0, 0, floor)).unwrap();
         assert!(value >= floor && value - floor < 330, "{value} for {floor}");
         assert_eq!(fitted.cap, planned.cap);
         assert!(fitted.funded > planned.funded + 7_000, "{fitted:?}");
         assert_eq!(
-            fit(&pricing, 52_560, value, 330, (&wide, 32), 0),
+            fit(&pricing, 52_560, value, 330, (&wide, 32), 0, 0),
             Some(fitted)
         );
         // A floor below the usual coin changes nothing.
-        let lower = plan(&pricing, 52_560, 330, (&wide, 32), (0, usual - 1));
+        let lower = plan(&pricing, 52_560, 330, (&wide, 32), (0, 0, usual - 1));
         assert_eq!(lower, Some((usual, planned)));
         let fixed = Pricing::Fixed {
             cap: 3_584,
             price: 21_000,
         };
-        let (value, fitted) = plan(&fixed, 1_000, 330, (&wide, 32), (0, 23_000)).unwrap();
+        let (value, fitted) = plan(&fixed, 1_000, 330, (&wide, 32), (0, 0, 23_000)).unwrap();
         assert_eq!((value, fitted.funded), (23_000, 2_000));
         // Her part larger than the contract: none to pay for.
-        assert_eq!(plan(&fixed, 1_000, 330, (&wide, 32), (0, 25_000)), None);
+        assert_eq!(plan(&fixed, 1_000, 330, (&wide, 32), (0, 0, 25_000)), None);
     }
 
     /// A claim paying a higher fee than budgeted leaves her a coin worth
@@ -514,16 +528,16 @@ mod tests {
         let wide: Vec<u64> = (0..32).map(|i| 1 << i).collect();
         let range = range();
         let pricing = Pricing::Range(&range);
-        let (value, planned) = plan(&pricing, 52_560, 330, (&wide, 32), (0, 0)).unwrap();
+        let (value, planned) = plan(&pricing, 52_560, 330, (&wide, 32), (0, 0, 0)).unwrap();
         // The hub's interest rising as her part falls: a little less than
         // her part is room to spare.
         for less in [1, 100, PART / 2] {
-            let fitted = fit(&pricing, 52_560, value - less, 330, (&wide, 32), 0).unwrap();
+            let fitted = fit(&pricing, 52_560, value - less, 330, (&wide, 32), 0, 0).unwrap();
             assert_eq!(fitted.cap, planned.cap, "{less} sat less");
             assert!(fitted.funded < planned.funded);
         }
         assert_eq!(
-            fit(&pricing, 52_560, value - PART, 330, (&wide, 32), 0),
+            fit(&pricing, 52_560, value - PART, 330, (&wide, 32), 0, 0),
             None
         );
     }

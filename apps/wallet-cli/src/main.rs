@@ -544,10 +544,17 @@ enum Command {
         #[arg(long)]
         max_price: Option<u64>,
         /// The least notes it protects, in sat, if the hub lets holders
-        /// choose (its info's range), over --blocks [default: the
-        /// smallest that takes the coin whole].
+        /// choose (its info's range), over --blocks [default: your part
+        /// and --inbound, up to a cap the hub takes].
         #[arg(long, requires = "blocks")]
         cap: Option<u32>,
+        /// Sat it protects past your part, the hub funding them on its
+        /// terms (its interest on its part): room to receive in. Of a hub
+        /// letting holders choose [default: none, the contract all yours
+        /// but what makes it a cap the hub takes, under 512 sat, or its
+        /// least].
+        #[arg(long, default_value_t = 0)]
+        inbound: u32,
         /// The coin on Bitcoin to pay it from, as TXID:VOUT [default: the
         /// smallest free that a contract takes whole]. The coin is spent
         /// whole: it pays the reserve and the hub's fee, and all the rest
@@ -606,14 +613,14 @@ enum Command {
     },
     /// What a contract at HUB costs, itemized, before opening it: the
     /// hub's opening fee, its interest by the year on the part it funds
-    /// and on yours, your reserve and your part, and the sizes and
+    /// and on yours, your reserve and your part, and the caps and
     /// durations it lets holders choose.
     ContractTerms {
         hub: String,
         /// Blocks from now to its close [default: the hub's fixed terms].
         #[arg(long)]
         blocks: Option<u32>,
-        /// The notes it protects, in sat, one of the hub's sizes [default:
+        /// The notes it protects, in sat, within the hub's range [default:
         /// the hub's fixed terms].
         #[arg(long)]
         cap: Option<u32>,
@@ -1566,6 +1573,7 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
             blocks,
             max_price,
             cap,
+            inbound,
             coin,
             any_fees,
             with_notes,
@@ -1580,6 +1588,7 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
                 blocks,
                 max_price,
                 cap,
+                inbound,
                 coin,
                 any_fees,
             };

@@ -1373,12 +1373,13 @@ mod tests {
         *openings.timing.get_mut().unwrap() =
             Timing::of(ChainProfile::Core30DefaultRegtest, Some(range)).unwrap();
         let max = |o: &Openings| o.advertise().range.unwrap().max_cap;
-        // Not known yet: as the operator set it, down to a size.
-        assert_eq!(max(&openings), 67_108_863);
+        // Not known yet: as the operator set it.
+        assert_eq!(max(&openings), 100_000_000);
+        // All of its balance but its reserve and margin, 150 000 sat.
         *openings.funds.lock().unwrap() = Some(50_000_000);
-        assert_eq!(max(&openings), 33_554_431);
+        assert_eq!(max(&openings), 49_850_000);
         *openings.funds.lock().unwrap() = Some(1_000_000);
-        assert_eq!(max(&openings), 524_287);
+        assert_eq!(max(&openings), 850_000);
         // None funded: its least, and opening one is refused.
         *openings.funds.lock().unwrap() = Some(200_000);
         assert_eq!(max(&openings), terms::CAP);
@@ -1420,10 +1421,10 @@ mod tests {
         let advertised = openings.advertise().range.unwrap();
         assert_eq!(advertised.max_cap, advertised.min_cap);
         *openings.funds.lock().unwrap() = Some(1_000_000);
-        assert_eq!(said(&openings), (Some(524_287), Room::Open));
+        assert_eq!(said(&openings), (Some(850_000), Room::Open));
         // Ten bitcoin: the most it offers, not what it holds.
         *openings.funds.lock().unwrap() = Some(1_000_000_000);
-        assert_eq!(said(&openings), (Some(67_108_863), Room::Open));
+        assert_eq!(said(&openings), (Some(100_000_000), Room::Open));
         assert!(!openings.advertise().full);
     }
 

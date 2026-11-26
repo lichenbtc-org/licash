@@ -346,14 +346,16 @@ pub fn contract_fee(range: ContractRange, cap: u64, blocks: u32, funded: u64) ->
     }
 }
 
-/// The sizes a contract within `range` comes in, in sat, smallest first.
+/// The smallest cap a contract within `range` may have of `sat` at least,
+/// in sat: `sat` itself, or the least, or under 512 sat more (a cap whose
+/// payout pays exactly what the hub locks). None past the most.
 #[uniffi::export]
-pub fn contract_sizes(range: ContractRange) -> Vec<u64> {
-    range.api().sizes().into_iter().map(u64::from).collect()
+pub fn contract_cap_at_least(range: ContractRange, sat: u64) -> Option<u64> {
+    range.api().cap_at_least(sat).map(u64::from)
 }
 
 /// The most a contract within `range` protects, paid from a coin of
-/// `coin` sat: the largest size it covers, none if less than the least.
+/// `coin` sat: the largest cap it covers, none if less than the least.
 #[uniffi::export]
 pub fn contract_max_cap(range: ContractRange, coin: u64) -> Option<u64> {
     range.api().max_cap_for(coin).map(u64::from)
@@ -367,17 +369,22 @@ pub struct ContractFit {
 }
 
 /// The contract within `range` over `blocks` that a coin of `coin` sat
-/// pays for whole, of `least_cap` sat at least: the smallest cap, and in it
-/// her part the most the coin pays beside the price, as many notes of her
-/// hub's `denominations` as a claim names (`notes`) making it exactly, and
-/// leaving less than `dust`. No change comes back from a coin, so what its
-/// contract does not take, it does not take. None if no contract does.
+/// pays for whole: her part the most the coin pays beside the price, as
+/// many notes of her hub's `denominations` as a claim names (`notes`)
+/// making it exactly, and leaving less than `dust`; its cap the smallest of
+/// her part and `inbound` sat more (liquidity asked of the hub, at its
+/// interest), `least_cap` sat at least. With no inbound, the hub funds
+/// nothing of it but what makes a cap. No change comes back from a coin,
+/// so what its contract does not take, it does not take. None if no
+/// contract does.
+#[allow(clippy::too_many_arguments)]
 #[uniffi::export]
 pub fn contract_fit(
     range: ContractRange,
     blocks: u32,
     coin: u64,
     least_cap: u64,
+    inbound: u64,
     dust: u64,
     denominations: Vec<u64>,
     notes: u32,
@@ -391,6 +398,7 @@ pub fn contract_fit(
         dust,
         (&denominations, notes),
         sat32(least_cap),
+        sat32(inbound),
     )?;
     Some(ContractFit {
         cap: u64::from(fitted.cap),

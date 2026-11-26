@@ -1398,21 +1398,21 @@ fn a_hubs_contract_range_is_left_out_when_none_and_prices_the_hubs_part_by_the_y
         3_509_654_502_496
     );
 
-    // Its sizes: 2^n - 1 sat within its bounds, 131 071 the least.
-    let sizes = range.sizes();
-    assert_eq!(sizes.len(), 11);
-    assert_eq!(
-        (sizes[0], sizes[1], sizes[10]),
-        (131_071, 262_143, 134_217_727)
-    );
-    assert_eq!(licash_api::sizes().count(), 15);
-    assert_eq!(licash_api::sizes().last(), Some(2_147_483_647));
-    assert!(licash_api::is_size(1_048_575) && !licash_api::is_size(1_048_576));
-    assert!(!licash_api::is_size(65_535));
-    // The largest size twice her coin covers, within the hub's bounds.
-    assert_eq!(range.max_cap_for(10_000_000), Some(16_777_215));
+    // Its caps: any within its bounds, 131 071 the least, whose payout's
+    // rest is none or an output of 512 sat at least.
+    assert!(range.allows_cap(131_071) && range.allows_cap(134_217_727));
+    assert!(range.allows_cap(200_000) && range.allows_cap(131_071 + 512));
+    assert!(!range.allows_cap(131_072) && !range.allows_cap(131_071 + 511));
+    assert!(!range.allows_cap(131_070) && !range.allows_cap(134_217_728));
+    assert_eq!(range.cap_at_least(0), Some(131_071));
+    assert_eq!(range.cap_at_least(131_100), Some(131_071 + 512));
+    assert_eq!(range.cap_at_least(10_000_000), Some(10_000_000));
+    assert_eq!(range.cap_at_least(134_217_728), None);
+    // The largest cap twice her coin covers, within the hub's bounds.
+    assert_eq!(range.max_cap_for(10_000_000), Some(20_000_000));
     assert_eq!(range.max_cap_for(90_000_000), Some(134_217_727));
     assert_eq!(range.max_cap_for(65_536), Some(131_071));
+    assert_eq!(range.max_cap_for(65_600), Some(131_071));
     assert_eq!(range.max_cap_for(65_535), None);
     assert_eq!(range.max_cap_for(u64::MAX), Some(134_217_727));
 }
@@ -1609,4 +1609,60 @@ fn a_signed_bridge_request_verifies_for_its_path_and_time_only() {
     moved.at += 1;
     assert!(moved.verify(REGISTER, 1_000).is_err());
     assert!(Signed::sign(&[0; 32], REGISTER, 0, String::new()).is_err());
+}
+
+/// A contract's cap is any number of sat from 2^17 - 1 to 2^31 - 1 whose
+/// payout's rest, past its binary outputs, is none or an output of 512
+/// sat at least; rounded to one up or down by less than 512 sat.
+#[test]
+fn a_cap_is_any_size_its_payout_pays_exactly() {
+    use licash_api::{
+        cap_at_least, cap_at_most, is_cap, payout_bits, payout_rest, MAX_CAP, MIN_CAP, MIN_REST,
+    };
+    assert_eq!((MIN_CAP, MAX_CAP, MIN_REST), (131_071, 2_147_483_647, 512));
+    assert_eq!((payout_bits(131_071), payout_rest(131_071)), (17, 0));
+    assert_eq!((payout_bits(262_142), payout_rest(262_142)), (17, 131_071));
+    assert_eq!((payout_bits(262_143), payout_rest(262_143)), (18, 0));
+    assert_eq!(
+        (payout_bits(1_000_000), payout_rest(1_000_000)),
+        (19, 475_713)
+    );
+    for cap in [
+        131_071, 131_583, 200_000, 262_142, 262_143, 1_000_000, MAX_CAP,
+    ] {
+        assert!(is_cap(cap), "{cap}");
+        assert_eq!(
+            (cap_at_least(cap.into()), cap_at_most(cap.into())),
+            (Some(cap), Some(cap))
+        );
+        let rest = payout_rest(cap);
+        assert!(rest < 1 << payout_bits(cap) && payout_bits(cap) <= 31);
+    }
+    for cap in [
+        0,
+        131_070,
+        131_072,
+        131_582,
+        262_144,
+        262_143 + 511,
+        MAX_CAP + 1,
+        u32::MAX,
+    ] {
+        assert!(!is_cap(cap), "{cap}");
+    }
+    assert_eq!(cap_at_least(131_072), Some(131_583));
+    assert_eq!(cap_at_least(262_144), Some(262_143 + 512));
+    assert_eq!(cap_at_least(0), Some(MIN_CAP));
+    assert_eq!(cap_at_least(u64::from(MAX_CAP) + 1), None);
+    assert_eq!(cap_at_most(131_582), Some(131_071));
+    assert_eq!(cap_at_most(262_200), Some(262_143));
+    assert_eq!(cap_at_most(u64::MAX), Some(MAX_CAP));
+    assert_eq!(cap_at_most(131_070), None);
+    // Every cap rounded is one, within MIN_REST.
+    for sat in (MIN_CAP as u64..600_000).step_by(37) {
+        let (up, down) = (cap_at_least(sat).unwrap(), cap_at_most(sat).unwrap());
+        assert!(is_cap(up) && is_cap(down));
+        assert!(u64::from(up) >= sat && u64::from(up) - sat < u64::from(MIN_REST));
+        assert!(u64::from(down) <= sat && sat - u64::from(down) < u64::from(MIN_REST));
+    }
 }

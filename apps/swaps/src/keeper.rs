@@ -90,11 +90,11 @@ impl Sizes {
     }
 }
 
-/// A contract's cap, sized to what it protects: the next size up
-/// ([`licash_api::sizes`], about twice `cap`) while what the provider
-/// holds at its hub (`exposure`) is three quarters of the `limit` its
-/// contracts there protect or more, the next down while it is less than
-/// a quarter, else `cap`, down to a size; within `sizes`.
+/// A contract's cap, sized to what it protects: about twice `cap` while
+/// what the provider holds at its hub (`exposure`) is three quarters of
+/// the `limit` its contracts there protect or more, about half while it is
+/// less than a quarter, else `cap`, down to a cap
+/// ([`licash_api::cap_at_most`]); within `sizes`.
 pub fn resize(cap: u32, exposure: u64, limit: u64, sizes: Option<Sizes>) -> u32 {
     let Some(Sizes { least, most }) = sizes else {
         return cap;
@@ -106,7 +106,7 @@ pub fn resize(cap: u32, exposure: u64, limit: u64, sizes: Option<Sizes>) -> u32 
     } else {
         u64::from(cap)
     };
-    let sized = licash_api::size_at_most(sized).unwrap_or(least);
+    let sized = licash_api::cap_at_most(sized).unwrap_or(least);
     sized.clamp(least, most.max(least))
 }
 
@@ -977,6 +977,8 @@ impl<T: Transport + 'static> Keeper<T> {
             blocks,
             max_price,
             cap,
+            // the cap is the liquidity it asks of the hub
+            inbound: 0,
             deposit: None,
         };
         holder::open_with(wallet, &self.chain, &self.wallet_file, hub, ask).await
@@ -1182,12 +1184,15 @@ mod tests {
         // Within what the hub and the provider's coin let it be.
         assert_eq!(resize(4_194_303, 800_000, 800_000, sizes), 4_194_303);
         assert_eq!(resize(131_071, 0, 6_000, sizes), 131_071);
-        // A cap of no size, down to one.
-        assert_eq!(resize(1_500_000, 50, 100, sizes), 1_048_575);
+        // Any cap kept as it is; one its payout pays not exactly (a rest
+        // under 512 sat), down to one.
+        assert_eq!(resize(1_500_000, 50, 100, sizes), 1_500_000);
+        assert_eq!(resize(1_048_575 + 100, 50, 100, sizes), 1_048_575);
+        assert_eq!(resize(1_500_000, 75, 100, sizes), 3_000_001);
         // Of fixed terms only: as it was.
         assert_eq!(resize(131_071, 4_096, 4_096, None), 131_071);
         // A coin of 1 000 000 sat, twice it at most, at a hub funding
-        // 33 554 431: the largest size within.
+        // 33 554 431: twice it.
         let range = licash_api::ContractRange {
             min_cap: 131_071,
             max_cap: 33_554_431,
@@ -1204,7 +1209,7 @@ mod tests {
             Sizes::of(range, 1_000_000),
             Some(Sizes {
                 least: 131_071,
-                most: 1_048_575
+                most: 2_000_000
             })
         );
         assert_eq!(Sizes::of(range, 65_535), None);
