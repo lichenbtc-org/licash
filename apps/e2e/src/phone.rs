@@ -163,9 +163,9 @@ impl Phone {
     }
 
     /// Install the app, its data cleared, and have the device reach the
-    /// hubs, the relay, the swap provider and Bitcoin Core of `eco` at the
-    /// ports published on this host. Bitcoin Core's peer-to-peer port is
-    /// 18444 on the device.
+    /// hubs, the relay, the swap provider, the bridges and Bitcoin Core of
+    /// `eco` at the ports published on this host. Bitcoin Core's
+    /// peer-to-peer port is 18444 on the device.
     pub async fn fresh(&self, eco: &Eco) -> anyhow::Result<()> {
         let apk = self.apk.to_str().context("the APK's path")?;
         self.adb(&["install", "-r", "-g", apk]).await?;
@@ -178,7 +178,8 @@ impl Phone {
             ))
             .await?;
         }
-        for url in [eco.hub(1), eco.hub(2), eco.relay(), eco.swaps()] {
+        let reached = [eco.hub(1), eco.hub(2), eco.relay(), eco.swaps()];
+        for url in reached.into_iter().chain([eco.bridge(), eco.bridge2()]) {
             let at = format!("tcp:{}", port(url)?);
             self.adb(&["reverse", &at, &at]).await?;
         }
@@ -362,6 +363,23 @@ impl Phone {
         tokio::time::sleep(Duration::from_millis(500)).await;
         self.type_text(text).await?;
         self.hide_keyboard().await
+    }
+
+    /// Tap the field tagged `id` and paste what was copied into it, as a
+    /// keyboard's paste key does: what the field then holds, the keyboard
+    /// hidden after.
+    pub async fn paste_id(&self, id: &str) -> anyhow::Result<String> {
+        self.tap_id(id).await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        // KEYCODE_PASTE.
+        self.shell("input keyevent 279").await?;
+        let field = until(&format!("something pasted in {id:?}"), 10, || async {
+            let field = self.views().await?.into_iter().find(|v| v.id == id);
+            Ok(field.filter(|v| !v.text.is_empty()))
+        })
+        .await?;
+        self.hide_keyboard().await?;
+        Ok(field.text)
     }
 
     pub async fn hide_keyboard(&self) -> anyhow::Result<()> {

@@ -63,6 +63,8 @@ pub struct Eco {
     swaps: String,
     /// The NWC bridge's URL, as published on this host.
     bridge: String,
+    /// The owner-only NWC bridge's URL, as published on this host.
+    bridge2: String,
     /// The Gotify server's URL, as published on this host.
     gotify: String,
     /// Bitcoin Core's peer-to-peer address, as published on this host.
@@ -115,6 +117,7 @@ impl Eco {
             relay: String::new(),
             swaps: String::new(),
             bridge: String::new(),
+            bridge2: String::new(),
             gotify: String::new(),
             p2p: String::new(),
             dir: tempfile::tempdir()?,
@@ -123,6 +126,7 @@ impl Eco {
         eco.relay = format!("ws://{}", eco.port("relay", 8080).await?);
         eco.swaps = format!("http://{}", eco.port("swaps", 8340).await?);
         eco.bridge = format!("http://{}", eco.port("bridge", 8090).await?);
+        eco.bridge2 = format!("http://{}", eco.port("bridge2", 8090).await?);
         eco.gotify = format!("http://{}", eco.port("gotify", 80).await?);
         eco.p2p = eco.port("bitcoind", 18444).await?;
         for hub in ["hub1", "hub2"] {
@@ -470,6 +474,12 @@ impl Eco {
     /// The NWC bridge's URL, as published on this host.
     pub fn bridge(&self) -> &str {
         &self.bridge
+    }
+
+    /// The NWC bridge at hub 2 for its owner alone, whom its pairing code
+    /// registers, as published on this host: its Lightning Addresses' too.
+    pub fn bridge2(&self) -> &str {
+        &self.bridge2
     }
 
     pub async fn swaps_info(&self) -> anyhow::Result<swaps::Info> {
