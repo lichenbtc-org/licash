@@ -55,6 +55,10 @@ class BridgesTest {
             "0 notes worth 0 sat imported, 3 imported before, 1 of a hub you don't use left out",
             importedWords(ImportedNotes("ab", 0u, 0uL, 3u, 1u)),
         )
+        assertEquals(
+            "2 notes worth 50 sat imported, and 1 stuck payments worth 30 sat, claimable once expired",
+            importedWords(ImportedNotes("ab", 2u, 50uL, 0u, 0u, 1u, 30uL)),
+        )
     }
 
     @Test

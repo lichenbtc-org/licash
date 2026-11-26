@@ -137,6 +137,12 @@ pub struct ImportedNotes {
     pub known: u32,
     /// Of a keyset the wallet never held, left out.
     pub unknown: u32,
+    /// The refunds of the bridge's payments stuck, new, and what they are
+    /// worth in sat: claimed once expired on Bitcoin.
+    #[uniffi(default = 0)]
+    pub locks: u32,
+    #[uniffi(default = 0)]
+    pub locked: u64,
 }
 
 /// A bridge's export ([`Wallet::export_bridge`]): imported, and the
@@ -153,9 +159,15 @@ pub struct ImportSource {
     pub source: String,
     pub notes: u32,
     pub amount: u64,
-    /// Claimed by a recovery, and dropped from one for good.
+    /// Claimed by a recovery (notes and locks), and dropped from one for
+    /// good.
     pub claimed: u32,
     pub dropped: u32,
+    /// The refunds of its payments stuck, and what they are worth in sat.
+    #[uniffi(default = 0)]
+    pub locks: u32,
+    #[uniffi(default = 0)]
+    pub locked: u64,
 }
 
 #[uniffi::export]
@@ -337,6 +349,8 @@ impl Wallet {
                 amount: s.amount,
                 claimed: count(s.claimed),
                 dropped: count(s.void),
+                locks: count(s.locks),
+                locked: s.locked,
             })
             .collect())
     }
@@ -445,5 +459,7 @@ fn imported_of(imported: licash_wallet::Imported) -> ImportedNotes {
         amount: imported.amount,
         known: count(imported.known),
         unknown: count(imported.unknown),
+        locks: count(imported.locks),
+        locked: imported.locked,
     }
 }

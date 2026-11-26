@@ -113,9 +113,14 @@ internal fun appWords(app: BridgeApp): String {
 /** Notes imported, in words. */
 internal fun importedWords(imported: ImportedNotes): String {
     val said = "${imported.added} notes worth ${sat(imported.amount)} imported"
+    val locks = if (imported.locks > 0u) {
+        ", and ${imported.locks} stuck payments worth ${sat(imported.locked)}, claimable once expired"
+    } else {
+        ""
+    }
     val known = if (imported.known > 0u) ", ${imported.known} imported before" else ""
     val unknown = if (imported.unknown > 0u) ", ${imported.unknown} of a hub you don't use left out" else ""
-    return said + known + unknown
+    return said + locks + known + unknown
 }
 
 /**
@@ -457,7 +462,8 @@ private fun ImportedPage(engine: Engine) {
     }
     LaunchedEffect(Unit) { load() }
     sources.forEach { s ->
-        val sub = "${s.notes} notes, ${sat(s.amount)}" + if (s.claimed > 0u) ", ${s.claimed} claimed" else ""
+        val stuck = if (s.locks > 0u) ", ${s.locks} stuck payments, ${sat(s.locked)}" else ""
+        val sub = "${s.notes} notes, ${sat(s.amount)}" + stuck + if (s.claimed > 0u) ", ${s.claimed} claimed" else ""
         Entry(s.source.take(16) + "…", Modifier.testTag("imported"), sub = sub, onClick = { discarding = s })
         Divider()
     }

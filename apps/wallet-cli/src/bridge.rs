@@ -397,6 +397,8 @@ pub async fn run(wallet: &Wallet<Http>, command: BridgeCommand, json: bool) -> a
                         "source": s.source,
                         "notes": s.notes,
                         "amount": s.amount,
+                        "locks": s.locks,
+                        "locked": s.locked,
                         "claimed": s.claimed,
                         "void": s.void,
                     })
@@ -407,8 +409,9 @@ pub async fn run(wallet: &Wallet<Http>, command: BridgeCommand, json: bool) -> a
                 false => (sources.iter())
                     .map(|s| {
                         format!(
-                            "{}  {} notes, {} sat, {} claimed, {} dropped",
-                            s.source, s.notes, s.amount, s.claimed, s.void
+                            "{}  {} notes, {} sat, {} locks' refunds, {} sat, {} claimed, \
+                             {} dropped",
+                            s.source, s.notes, s.amount, s.locks, s.locked, s.claimed, s.void
                         )
                     })
                     .collect::<Vec<_>>()
@@ -421,7 +424,7 @@ pub async fn run(wallet: &Wallet<Http>, command: BridgeCommand, json: bool) -> a
             show(
                 json,
                 json!({ "discarded": gone }),
-                format!("{gone} notes imported forgotten: the bridge may be unfrozen"),
+                format!("{gone} notes and locks imported forgotten: the bridge may be unfrozen"),
             );
         }
         BridgeCommand::Remove { url } => wallet.remove_bridge(&url)?,
@@ -628,6 +631,8 @@ fn imported_json(imported: &licash_wallet::Imported) -> serde_json::Value {
         "source": imported.source,
         "added": imported.added,
         "amount": imported.amount,
+        "locks": imported.locks,
+        "locked": imported.locked,
         "known": imported.known,
         "unknown": imported.unknown,
     })
@@ -639,6 +644,12 @@ fn imported_text(imported: &licash_wallet::Imported) -> String {
          within what the wallet's own notes leave of its cap",
         imported.added, imported.amount
     );
+    if imported.locks > 0 {
+        text += &format!(
+            "; the refunds of {} of its payments stuck, worth {} sat, once expired on Bitcoin",
+            imported.locks, imported.locked
+        );
+    }
     if imported.known > 0 {
         text += &format!("; {} imported before", imported.known);
     }
