@@ -471,7 +471,9 @@ fn to_import(data: &Path) -> Result<(Vec<[u8; 32]>, Vec<Decided>)> {
         // hub decides them.
         let base = || -> Result<_> {
             let row = store.row(id)?.context("a contract of no row")?;
-            Ok(licash_contract::opening::Hub::peek(&row.state)?.base)
+            licash_contract::opening::Hub::peek(&row.state)
+                .map(|hub| hub.base)
+                .with_context(|| format!("contract {}'s state", hex::encode(id)))
         };
         let txid = |pin: &[u8; 32]| -> Result<_> {
             let request = pins
