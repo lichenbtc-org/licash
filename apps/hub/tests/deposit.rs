@@ -293,7 +293,7 @@ fn swap_record(net: &Net, hash: [u8; 32], state: &str, lock: Option<licash::spen
     licash_store::component(
         &mut db,
         "provider",
-        1,
+        2,
         "CREATE TABLE provider_swaps (hash BLOB PRIMARY KEY, state TEXT, lock BLOB) STRICT;
          CREATE TABLE provider_donations (hash BLOB PRIMARY KEY) STRICT;",
     )
