@@ -1015,7 +1015,8 @@ impl ReceiveStatus {
 /// now: the terms an opening binds are those of its quote then.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Contracts {
-    /// The most notes a contract protects, in sat: one of the [`sizes`].
+    /// The most notes a contract on the advertised terms protects, in sat.
+    /// See [`Self::range`] for other terms the hub may offer.
     pub cap: u32,
     /// What opening one costs its holder, in sat, from her deposit: her
     /// reserve, returned as it closes, and the hub's fee.
