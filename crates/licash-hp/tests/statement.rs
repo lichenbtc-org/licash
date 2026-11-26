@@ -861,6 +861,52 @@ fn evidence_that_needs_a_disclosure_proves_only_with_it() {
     );
 }
 
+/// A response the statement would refuse as conceded (`b′` not below her
+/// `b`, nor 0) is never borne out, though the claim is owed less: one of
+/// her `b` keeps the Hub its reserve, and one of bits above the graph's
+/// pays her nothing on chain. Her contest wins her claim.
+#[test]
+fn a_conceding_response_is_not_borne_out() {
+    use licash::request::Request;
+    use licash_hp::{bears_out, through_publication};
+    use licash_statement::Reject;
+
+    let (f, spent) = stale();
+    let x = exit(&f.base, f.b, &f.e, &f.bytes, 64);
+    let (_, read) = decide(&f.base, &keys(), &x, std::slice::from_ref(&spent)).unwrap();
+    let headers = through_publication(&contract(&f.base), &x, &read);
+    let request = Request {
+        amount: f.b,
+        claim_digest: f.e,
+    };
+    let bears = |b2| {
+        bears_out(
+            &f.base,
+            &request,
+            &f.bytes,
+            std::slice::from_ref(&spent),
+            headers,
+            b2,
+            None,
+        )
+    };
+    assert_eq!(bears(64), Ok(()));
+    assert_eq!(bears(f.b - 1), Ok(()));
+    for conceded in [f.b, f.b + 1, 1 << f.base.parts().graph.bits, u32::MAX] {
+        assert_eq!(
+            bears(conceded),
+            Err(Refusal::Exit(Reject::Conceded)),
+            "{conceded}"
+        );
+    }
+    // As the statement: it proves none of them.
+    let x = exit(&f.base, f.b, &f.e, &f.bytes, f.b);
+    assert_eq!(
+        check(&input(&f.base, x, vec![spent])),
+        Err(Refusal::Exit(Reject::Conceded))
+    );
+}
+
 /// What a holder makes of a response is the statement's own test: owed at
 /// most `b′`, and what the evidence uses disclosed, whole.
 #[test]

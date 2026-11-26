@@ -555,7 +555,11 @@ pub fn verdict(owed: &Owed, b2: u32, disclosed: Option<&[u8]>, lean: bool) -> Re
 /// what the evidence uses (`disclosed`, the bytes of its disclosure, if it
 /// made one). The statement is a deterministic function of these, so a
 /// holder for whom this holds may leave the response uncontested: nothing
-/// the Hub could prove would say otherwise.
+/// the Hub could prove would say otherwise. A response of `b2` not below
+/// her claim, and not 0, concedes it ([`Reject::Conceded`]): the statement
+/// proves nothing of it, and her contest wins her claim and the Hub's
+/// reserve, where the response left alone pays her the bits of `b2` alone
+/// (none above the graph's).
 pub fn bears_out(
     base: &Base,
     request: &Request,
@@ -565,6 +569,9 @@ pub fn bears_out(
     b2: u32,
     disclosed: Option<&[u8]>,
 ) -> Result<(), Refusal> {
+    if b2 != 0 && b2 >= request.amount {
+        return Err(Refusal::Exit(Reject::Conceded));
+    }
     let chain = chain(base, headers)?;
     let owed = recovery::owed(base, request, filed, evidence, &chain)
         .map_err(|e| Refusal::Evidence(e.to_string()))?;
