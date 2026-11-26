@@ -41,6 +41,7 @@ use std::collections::{hash_map::Entry, BTreeSet, HashMap};
 
 use licash::{
     address::Ephemeral,
+    authorization::SignedProposal,
     chain::{Activation, Checkpoint},
     claim::{ActivationRecord, Branch, Item, Source},
     crypto::{Point, ScalarBytes, Signature},
@@ -84,6 +85,143 @@ pub struct LockClaim {
     pub value: u64,
     /// Its activation, of a pay branch.
     pub activation: Option<(ActivationRecord, ActivationWitness)>,
+}
+
+/// What claims the refund of a lock, whichever wallet holds it: its signed
+/// body and inputs, its hub's certificate if it certified it, and, of each
+/// of its refund outputs to the wallet that made it, its position, its
+/// opening and its hold key. Never certified, a refund on its own inputs
+/// ([`Source::OwnInputs`]), each input's hold key too, in order.
+///
+/// Nothing in it spends: a bridge exports it with its notes
+/// ([`Wallet::export_notes`]), for the wallet keeping its account to claim
+/// it should the lock's hub stop answering.
+#[derive(Clone)]
+pub(crate) struct Refund {
+    pub signed: SignedProposal,
+    pub notes: Vec<Note>,
+    pub certificate: Option<Certificate>,
+    pub outputs: Vec<RefundOutput>,
+    pub inputs: Vec<ScalarBytes>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RefundOutput {
+    pub index: u32,
+    pub message: Message,
+    pub blinding: ScalarBytes,
+    pub hold_key: ScalarBytes,
+}
+
+impl Refund {
+    /// Its claim and the height at which it is owed, its expiry at depth:
+    /// none if it pays nothing.
+    pub(crate) fn claim(self, keyset: &Keyset) -> Result<Option<(LockClaim, u32)>, Error> {
+        if self.outputs.is_empty() {
+            return Ok(None);
+        }
+        let proposal = self.signed.proposal();
+        let lock = (proposal.lock()).ok_or_else(|| Error::Invalid("a lock of no terms".into()))?;
+        let terms = lock.terms();
+        let owed = (terms.expiry())
+            .checked_add(terms.depth())
+            .ok_or_else(|| Error::Invalid("a lock's expiry at depth overflows".into()))?;
+        let source = match self.certificate {
+            Some(certificate) => Source::Admitted(certificate),
+            None => {
+                let mut ys = self.signed.verify(keyset, &self.notes)?;
+                ys.sort_unstable();
+                Source::OwnInputs {
+                    id: proposal.id(),
+                    inputs: ys,
+                    terms: terms.clone(),
+                }
+            }
+        };
+        let (mut items, mut keys, mut value) = (Vec::new(), Vec::new(), 0u64);
+        for output in &self.outputs {
+            keys.push((output.message.clone(), output.hold_key));
+            items.push(Item::Pending {
+                message: output.message.clone(),
+                source: proposal.id(),
+                branch: Branch::Refund,
+                index: output.index,
+                blinding: output.blinding,
+                preimage: None,
+            });
+            value = value.saturating_add(output.message.denomination());
+        }
+        if matches!(source, Source::OwnInputs { .. }) {
+            keys.extend(
+                (self.notes.iter())
+                    .map(|n| n.message().clone())
+                    .zip(self.inputs),
+            );
+        }
+        let refund = LockClaim {
+            id: proposal.id(),
+            branch: Branch::Refund,
+            items,
+            source,
+            witness: SourceWitness::Signed {
+                signed: self.signed,
+                notes: self.notes,
+            },
+            keys,
+            value,
+            activation: None,
+        };
+        Ok(Some((refund, owed)))
+    }
+
+    /// Refused unless all of it is what it says, under `keyset`, which
+    /// another wallet exported: its body signed by its inputs' owners, its
+    /// certificate its hub's of it, each output opened as it claims it at a
+    /// distinct position of its refund, and each hold key its note's.
+    pub(crate) fn check(&self, keyset: &Keyset) -> Result<(), Error> {
+        let bad = |why: &str| Error::Invalid(format!("a lock's refund: {why}"));
+        let proposal = self.signed.proposal();
+        if proposal.keyset_id() != keyset.id() {
+            return Err(bad("of another keyset"));
+        }
+        self.signed.verify(keyset, &self.notes)?;
+        let lock = proposal.lock().ok_or_else(|| bad("of no terms"))?;
+        match &self.certificate {
+            Some(certificate) => {
+                certificate.verify_source(keyset, &self.signed, &self.notes)?;
+                if !self.inputs.is_empty() {
+                    return Err(bad("certified, its inputs' keys given"));
+                }
+            }
+            None if self.inputs.len() != self.notes.len() => {
+                return Err(bad("not a hold key of each input"));
+            }
+            None => {}
+        }
+        let holds = |key: &ScalarBytes, message: &Message| {
+            key.to_scalar()
+                .is_ok_and(|k| licash::crypto::x_only_pub(&k) == *message.hold())
+        };
+        if !(self.notes.iter().zip(&self.inputs)).all(|(n, k)| holds(k, n.message())) {
+            return Err(bad("an input's hold key not its note's"));
+        }
+        let mut last = None;
+        for output in &self.outputs {
+            if last.is_some_and(|l| l >= output.index) {
+                return Err(bad("its outputs not in order"));
+            }
+            last = Some(output.index);
+            let refund = (lock.refund().get(output.index as usize))
+                .ok_or_else(|| bad("an output it has not"))?;
+            if !refund.opened_by(&output.message, &output.blinding)? {
+                return Err(bad("an output not opened"));
+            }
+            if !holds(&output.hold_key, &output.message) {
+                return Err(bad("an output's hold key not its note's"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A lock paying the wallet whose preimage it revealed to its hub, which
@@ -469,7 +607,9 @@ impl<T: Transport> Wallet<T> {
     }
 
     /// The lock branches the recovery of contract `id` took
-    /// ([`Wallet::claim_with_locks`]), of the keyset of id `keyset`, by id.
+    /// ([`Wallet::claim_with_locks`]), and the refunds of locks imported
+    /// it took ([`Wallet::claim_imported_locks`]), of the keyset of id
+    /// `keyset`, by id.
     pub fn claimed_locks(&self, id: &[u8; 32], keyset: &[u8; 32]) -> Result<Vec<LockClaim>, Error> {
         let keyset = self.keyset_of(keyset)?;
         let (refunds, owed) = self.store.read(|c| {
@@ -514,6 +654,11 @@ impl<T: Transport> Wallet<T> {
                 locks.push(pay);
             }
         }
+        let root = self.keys.bridges;
+        let imported = self
+            .store
+            .read(|c| crate::imports::claimed_locks(c, &root, &keyset, id))?;
+        locks.extend(imported);
         locks.sort_by_key(|l| *l.id.as_bytes());
         Ok(locks)
     }
@@ -845,6 +990,23 @@ impl<T: Transport> Wallet<T> {
         request: &str,
         certificate: Option<&[u8]>,
     ) -> Result<Option<(LockClaim, u32)>, Error> {
+        match self.refund(c, keyset, id, request, certificate)? {
+            Some(refund) => refund.claim(keyset),
+            None => Ok(None),
+        }
+    }
+
+    /// What claims the refund of the lock `id` of `request`, certified by
+    /// `certificate`, under `keyset` ([`Refund`]), as [`Wallet::lock_refund`]
+    /// reads it: none if under another keyset.
+    pub(crate) fn refund(
+        &self,
+        c: &rusqlite::Connection,
+        keyset: &Keyset,
+        id: &[u8; 32],
+        request: &str,
+        certificate: Option<&[u8]>,
+    ) -> Result<Option<Refund>, Error> {
         let request: licash_api::Lock = serde_json::from_str(request).map_err(invalid)?;
         if request.keyset.0 != keyset.id() {
             return Ok(None);
@@ -855,55 +1017,35 @@ impl<T: Transport> Wallet<T> {
         if proposal.id().as_bytes() != id {
             return Err(Error::Invalid("a lock's request of another lock".into()));
         }
-        let (source, inputs) = match certificate {
-            Some(certificate) => (
-                Source::Admitted(Certificate::from_bytes(keyset, certificate)?),
-                vec![],
-            ),
-            None => {
-                let mut ys = signed.verify(keyset, &notes)?;
-                ys.sort_unstable();
-                let mut keys = Vec::with_capacity(notes.len());
-                for note in &notes {
-                    let y = note.message().identifier()?;
-                    let own: bool = c.query_row(
-                        "SELECT EXISTS (SELECT 1 FROM notes
-                         WHERE y = ?1 AND spent_by = ?2 AND gone_at IS NULL)",
-                        params![y.0, id],
-                        |r| r.get(0),
-                    )?;
-                    if !own {
-                        return Err(Error::Invalid(
-                            "an input of a lock never certified is no longer its own".into(),
-                        ));
-                    }
-                    let derivation = self.derivation(&held(c, keyset, &y.0)?)?;
-                    if derivation.message() != note.message() {
-                        return Err(Error::Invalid(
-                            "a lock's input not of this wallet's keys".into(),
-                        ));
-                    }
-                    keys.push((
-                        note.message().clone(),
-                        derivation.hold_key(self.owner.hold_root())?,
+        let certificate = certificate
+            .map(|c| Certificate::from_bytes(keyset, c))
+            .transpose()?;
+        let mut inputs = Vec::new();
+        if certificate.is_none() {
+            for note in &notes {
+                let y = note.message().identifier()?;
+                let own: bool = c.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM notes
+                     WHERE y = ?1 AND spent_by = ?2 AND gone_at IS NULL)",
+                    params![y.0, id],
+                    |r| r.get(0),
+                )?;
+                if !own {
+                    return Err(Error::Invalid(
+                        "an input of a lock never certified is no longer its own".into(),
                     ));
                 }
-                let lock =
-                    (proposal.lock()).ok_or_else(|| Error::Invalid("a lock of no terms".into()))?;
-                let source = Source::OwnInputs {
-                    id: proposal.id(),
-                    inputs: ys,
-                    terms: lock.terms().clone(),
-                };
-                (source, keys)
+                let derivation = self.derivation(&held(c, keyset, &y.0)?)?;
+                if derivation.message() != note.message() {
+                    return Err(Error::Invalid(
+                        "a lock's input not of this wallet's keys".into(),
+                    ));
+                }
+                inputs.push(derivation.hold_key(self.owner.hold_root())?);
             }
-        };
+        }
         let lock = (proposal.lock()).ok_or_else(|| Error::Invalid("a lock of no terms".into()))?;
-        let terms = lock.terms();
-        let owed = (terms.expiry())
-            .checked_add(terms.depth())
-            .ok_or_else(|| Error::Invalid("a lock's expiry at depth overflows".into()))?;
-        let (mut items, mut keys, mut value) = (Vec::new(), Vec::new(), 0u64);
+        let mut outputs = Vec::new();
         for (index, output) in lock.refund().iter().enumerate() {
             let derivation = self.owner.scan_key().derive(
                 &proposal.ephemeral(),
@@ -915,36 +1057,20 @@ impl<T: Transport> Wallet<T> {
             if Output::from_derivation(&derivation)? != *output {
                 continue;
             }
-            let message = derivation.message().clone();
-            keys.push((
-                message.clone(),
-                derivation.hold_key(self.owner.hold_root())?,
-            ));
-            items.push(Item::Pending {
-                message,
-                source: proposal.id(),
-                branch: Branch::Refund,
+            outputs.push(RefundOutput {
                 index: u32::try_from(index).map_err(invalid)?,
+                message: derivation.message().clone(),
                 blinding: *derivation.blinding(),
-                preimage: None,
+                hold_key: derivation.hold_key(self.owner.hold_root())?,
             });
-            value = value.saturating_add(output.denomination());
         }
-        if items.is_empty() {
-            return Ok(None);
-        }
-        keys.extend(inputs);
-        let refund = LockClaim {
-            id: proposal.id(),
-            branch: Branch::Refund,
-            items,
-            source,
-            witness: SourceWitness::Signed { signed, notes },
-            keys,
-            value,
-            activation: None,
-        };
-        Ok(Some((refund, owed)))
+        Ok(Some(Refund {
+            signed,
+            notes,
+            certificate,
+            outputs,
+            inputs,
+        }))
     }
 
     /// The notes the recovery of contract `id` took, of the keyset of id
@@ -1005,7 +1131,7 @@ impl<T: Transport> Wallet<T> {
             )? + t.execute(
                 "UPDATE owed_locks SET claimed_by = NULL WHERE claimed_by = ?1",
                 [id],
-            )?;
+            )? + crate::imports::release_locks(t, id)?;
             Ok((freed, locks))
         })?;
         tracing::info!(id = %hex::encode(id), freed, locks, "claimed notes given back");
@@ -1056,22 +1182,24 @@ impl<T: Transport> Wallet<T> {
 
     /// The wallet's keyset of id `id`.
     pub(crate) fn keyset_of(&self, id: &[u8; 32]) -> Result<Keyset, Error> {
-        let bytes: Option<Vec<u8>> = self.store.read(|c| {
-            Ok(
-                c.query_row("SELECT bytes FROM keysets WHERE id = ?1", [id], |r| {
-                    r.get(0)
-                })
-                .optional()?,
-            )
-        })?;
-        let bytes = bytes.ok_or_else(|| {
-            Error::Invalid(format!(
-                "keyset {}: not one of the wallet's",
-                hex::encode(id)
-            ))
-        })?;
-        Ok(Keyset::from_bytes(&bytes)?)
+        self.store.read(|c| keyset_in(c, id))
     }
+}
+
+/// The keyset of id `id` the wallet in `c` holds.
+pub(crate) fn keyset_in(c: &rusqlite::Connection, id: &[u8; 32]) -> Result<Keyset, Error> {
+    let bytes: Option<Vec<u8>> = c
+        .query_row("SELECT bytes FROM keysets WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    let bytes = bytes.ok_or_else(|| {
+        Error::Invalid(format!(
+            "keyset {}: not one of the wallet's",
+            hex::encode(id)
+        ))
+    })?;
+    Ok(Keyset::from_bytes(&bytes)?)
 }
 
 /// Whether the contract of an id claims a pay branch owed.

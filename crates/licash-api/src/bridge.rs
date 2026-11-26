@@ -312,12 +312,18 @@ pub struct Withdraw {
 }
 
 /// The notes of a frozen bridge, sealed to a wallet's key there
-/// ([`EXPORT`]): what they are worth, in sat.
+/// ([`EXPORT`]): what they are worth, in sat; and the locks of its
+/// payments under way whose refunds it seals with them, and what those
+/// are worth, none from a bridge sealing no lock.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Exported {
     pub export: Hex,
     pub notes: u64,
     pub amount: u64,
+    #[serde(default)]
+    pub locks: u64,
+    #[serde(default)]
+    pub locked: u64,
 }
 
 /// A payment out of an account, as it stands.
