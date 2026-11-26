@@ -162,11 +162,15 @@ struct Chain {
         requires = "contracts"
     )]
     contracts_payout_wallet: Option<String>,
-    /// Scale the prover's estimate of each proof by this as the hub admits
-    /// contracts: it opens one only if its prover could prove an exit of
-    /// every contract it holds at once, in an assert window. Above 1 for a
-    /// prover slower than its benchmark; below 1 admits more contracts than
-    /// it is sure to defend if their holders exit together.
+    /// Scale the prover's estimate of each proof by this, as the hub admits
+    /// contracts (it opens one only if its prover could prove an exit of
+    /// every contract it holds at once, in an assert window) and as it
+    /// responds to claims (only to those it can prove in time). Above 1 for
+    /// a prover slower than its benchmark; below 1 for a hub that proves
+    /// with machines it rents when it needs them (`LICASH_R0_WORKERS`),
+    /// which it is told to rent when proofs count on them: 0.25 for proofs
+    /// four times as fast with them. Nothing measures those machines: a
+    /// proof they do not make in time is a claim paid all it asks.
     #[arg(
         long = "contracts-proof-scale",
         value_name = "FACTOR",

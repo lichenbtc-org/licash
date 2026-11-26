@@ -151,6 +151,16 @@ impl Speed {
         })
     }
 
+    /// This speed with each proof taking `by` times as long: what the
+    /// operator says of its prover ([`Prover::scale`]).
+    fn scaled(&self, by: f64) -> Self {
+        Self {
+            segment: self.segment * by,
+            tail: self.tail * by,
+            ..self.clone()
+        }
+    }
+
     /// The seconds a proof of `cycles` takes, with the margin.
     pub fn seconds(&self, cycles: u64) -> f64 {
         let segments = cycles.div_ceil(self.segment_cycles) as f64;
@@ -317,6 +327,12 @@ struct State {
     installed: Option<Vec<[u8; 32]>>,
     /// After a failed batch of the header chain: when to try again.
     chain_retry: Option<Instant>,
+    /// What the operator scales each proof's estimate by
+    /// ([`Prover::scale`]): 1 unless told.
+    scale: Option<f64>,
+    /// Whether the operator was told that proofs committed to are made in
+    /// time only by the machines it counts on beside the hub's own.
+    renting: bool,
 }
 
 struct Inner {
@@ -443,9 +459,7 @@ impl Prover {
     /// benchmark's input, 15 headers) the prover makes in `blocks`: what
     /// bounds the exits it can contest at once. None until it is ready.
     pub fn defendable(&self, blocks: u32) -> Option<u64> {
-        let Some(Readiness::Ready(speed)) = &self.0.state().readiness else {
-            return None;
-        };
+        let speed = self.0.state().speed()?;
         let seconds = speed.seconds(cycles(HEADER_CYCLES, 15, 33_600));
         Some((f64::from(blocks) * self.0.spacing / seconds) as u64)
     }
@@ -454,13 +468,27 @@ impl Prover {
     /// take, and the seconds the prover has in `blocks`; why not if it
     /// isn't ready.
     pub fn room(&self, cycles: &[u64], blocks: u32) -> Result<(f64, f64), String> {
-        let speed = match &self.0.state().readiness {
-            Some(Readiness::Ready(speed)) => speed.clone(),
-            Some(Readiness::NotReady(why)) => return Err(why.clone()),
-            None => return Err("it is being probed".into()),
+        let s = self.0.state();
+        let speed = match (s.speed(), &s.readiness) {
+            (Some(speed), _) => speed,
+            (None, Some(Readiness::NotReady(why))) => return Err(why.clone()),
+            (None, _) => return Err("it is being probed".into()),
         };
+        drop(s);
         let need = cycles.iter().map(|c| speed.seconds(*c)).sum();
         Ok((need, f64::from(blocks) * self.0.spacing))
+    }
+
+    /// Plan with each proof taking `by` times what the prover's benchmark
+    /// says, from now on: as the hub admits openings ([`Prover::room`]),
+    /// responds to claims ([`Prover::admit`]) and orders its proofs. Above
+    /// 1 for a prover slower than its benchmark; below 1 for one that
+    /// proves with machines beside its own, rented when it needs them
+    /// (docs/hub.md), which no benchmark measures: its operator answers for
+    /// them, and is told when they are needed ([`Prover::polled`]). Set
+    /// once.
+    pub fn scale(&self, by: f64) {
+        self.0.state().scale.get_or_insert(by);
     }
 
     /// A prover of `speed`, ready, proving nothing, on a chain of a
@@ -598,10 +626,8 @@ impl Prover {
         job.frozen = frozen;
         job.proven = proven;
         job.seen = seen;
-        let fits = match &s.readiness {
-            Some(Readiness::Ready(speed)) if !proven => {
-                plan(&s.committed(speed), s.tip, self.0.spacing)[id]
-            }
+        let fits = match s.speed() {
+            Some(speed) if !proven => plan(&s.committed(&speed), s.tip, self.0.spacing)[id],
             _ => true,
         };
         drop(s);
@@ -643,12 +669,12 @@ impl Prover {
                 release,
             },
         );
-        let speed = match &s.readiness {
-            Some(Readiness::Ready(speed)) => speed.clone(),
-            Some(Readiness::NotReady(why)) => {
+        let speed = match (s.speed(), &s.readiness) {
+            (Some(speed), _) => speed,
+            (None, Some(Readiness::NotReady(why))) => {
                 return Admission::Withhold(format!("the prover is not ready: {why}"))
             }
-            _ => return Admission::Wait,
+            (None, _) => return Admission::Wait,
         };
         let lacking = s.installed.as_ref().is_some_and(|i| !i.contains(program));
         if lacking || s.uninstalled.contains(program) {
@@ -697,7 +723,10 @@ impl Prover {
     }
 
     /// A poll of every contract is over: forget the proofs and claims no
-    /// longer seen, and stop proving one of them.
+    /// longer seen, and stop proving one of them. The operator is told,
+    /// once, when the proofs committed to are made in time only at the
+    /// speed it scaled the prover to ([`Prover::scale`]): by the machines
+    /// it is to rent now.
     pub fn polled(&self) {
         let mut s = self.0.state();
         s.polls += 1;
@@ -710,10 +739,51 @@ impl Prover {
                 s.cancel = true;
             }
         }
+        let rent = s.to_rent(self.0.spacing);
+        let told = std::mem::replace(&mut s.renting, rent.is_some());
+        drop(s);
+        if let (Some(message), false) = (rent, told) {
+            self.0.alert(&message);
+        }
     }
 }
 
 impl State {
+    /// The speed the hub plans with, once its prover is ready: the one
+    /// measured, as its operator scales it ([`Prover::scale`]).
+    fn speed(&self) -> Option<Speed> {
+        match &self.readiness {
+            Some(Readiness::Ready(speed)) => Some(speed.scaled(self.scale.unwrap_or(1.0))),
+            _ => None,
+        }
+    }
+
+    /// What to tell the operator if, of the proofs committed to that the
+    /// plan makes in time, the hub's own prover alone would make some
+    /// late: they count on the machines its operator scaled it for.
+    fn to_rent(&self, spacing: f64) -> Option<String> {
+        let (Some(Readiness::Ready(own)), Some(planned)) = (&self.readiness, self.speed()) else {
+            return None;
+        };
+        let planned = plan(&self.committed(&planned), self.tip, spacing);
+        let alone = self.committed(own);
+        let fits = plan(&alone, self.tip, spacing);
+        let late = alone.iter().filter(|(id, _)| planned[id] && !fits[id]);
+        let (count, first) = late.fold((0, u32::MAX), |(count, first), (_, work)| {
+            (count + 1, first.min(work.deadline))
+        });
+        (count > 0).then(|| {
+            format!(
+                "{count} of the {} proofs the hub committed to are made in time only by the \
+                 machines it counts on beside its own prover (--contracts-proof-scale {}): rent \
+                 them now and name them in LICASH_R0_WORKERS (docs/hub.md); the first is due \
+                 by block {first}",
+                alone.len(),
+                self.scale.unwrap_or(1.0)
+            )
+        })
+    }
+
     /// The proofs committed to and not made, with their seconds left.
     fn committed(&self, speed: &Speed) -> Vec<([u8; 32], Work)> {
         self.jobs
@@ -903,15 +973,13 @@ impl Inner {
     /// The next proof to make: the first that fits the plan, else the
     /// earliest still live. None if there is none to make now.
     fn next(&self, s: &State) -> Option<([u8; 32], [u8; 32])> {
-        let Some(Readiness::Ready(speed)) = &s.readiness else {
-            return None;
-        };
+        let speed = s.speed()?;
         let now = Instant::now();
         let runnable = |j: &Job| {
             j.frozen && !j.proven && j.deadline >= s.tip && j.retry.is_none_or(|r| r <= now)
         };
         let jobs: Vec<_> = s
-            .committed(speed)
+            .committed(&speed)
             .into_iter()
             .filter(|(id, _)| runnable(&s.jobs[id]))
             .collect();
@@ -1354,6 +1422,78 @@ mod tests {
             p.admit(&[2; 32], &[0; 32], 5, 2_000_000, 111, 101, 100),
             Admission::Admit
         );
+    }
+
+    /// The prover above, whose operator counts on machines that make each
+    /// proof in half the time: it responds to three claims where alone it
+    /// would to two, and its operator is told, once, that one of the proofs
+    /// it committed to is in time only with them.
+    #[test]
+    fn a_scaled_prover_responds_for_the_machines_its_operator_counts_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let speed = Speed {
+            device: "cuda".into(),
+            segment_cycles: 1_000_000,
+            segment: 1_000.0,
+            tail: 0.0,
+        };
+        let p = ready(dir.path(), speed);
+        let told: Arc<Mutex<Vec<String>>> = Arc::default();
+        let kept = told.clone();
+        p.alert_with(Arc::new(move |m| kept.lock().unwrap().push(m.to_owned())));
+        assert_eq!(p.room(&[2_000_000], 11), Ok((2_600.0, 6_600.0)));
+        p.scale(0.5);
+        // Set once.
+        p.scale(4.0);
+        assert_eq!(p.room(&[2_000_000], 11), Ok((1_300.0, 6_600.0)));
+        let claims = [[1; 32], [2; 32], [3; 32]];
+        for id in &claims {
+            let _ = p.admit(id, &[0; 32], 10, 2_000_000, 110, 100, 100);
+        }
+        p.polled();
+        for id in &claims {
+            assert_eq!(
+                p.admit(id, &[0; 32], 10, 2_000_000, 110, 100, 100),
+                Admission::Admit
+            );
+        }
+        // Two of them alone need none of those machines.
+        for id in &claims[..2] {
+            assert!(p.commit(id, [0; 32], 110, 100, 2_000_000, true, false, 100));
+        }
+        p.polled();
+        assert!(told.lock().unwrap().is_empty());
+        assert!(p.commit(&claims[2], [0; 32], 110, 100, 2_000_000, true, false, 100));
+        p.polled();
+        p.polled();
+        {
+            let told = told.lock().unwrap();
+            assert_eq!(told.len(), 1, "{told:?}");
+            assert!(told[0].starts_with("1 of the 3 proofs"), "{}", told[0]);
+            assert!(
+                told[0].contains("--contracts-proof-scale 0.5"),
+                "{}",
+                told[0]
+            );
+            assert!(told[0].contains("due by block 110"), "{}", told[0]);
+        }
+        // Told again once it needs them anew.
+        p.commit(&claims[0], [0; 32], 110, 100, 2_000_000, true, true, 100);
+        p.polled();
+        assert_eq!(told.lock().unwrap().len(), 1);
+        p.commit(&[4; 32], [0; 32], 110, 100, 2_000_000, true, false, 100);
+        p.polled();
+        assert_eq!(told.lock().unwrap().len(), 2);
+        // More than even those machines make is withheld as ever.
+        for id in [[5; 32], [6; 32], [7; 32]] {
+            let _ = p.admit(&id, &[0; 32], 10, 2_000_000, 110, 100, 100);
+        }
+        p.polled();
+        let admitted = [[5; 32], [6; 32], [7; 32]]
+            .iter()
+            .filter(|id| p.admit(id, &[0; 32], 10, 2_000_000, 110, 100, 100) == Admission::Admit)
+            .count();
+        assert_eq!(admitted, 2);
     }
 
     /// Many holders close at once, all claiming more than they are owed:

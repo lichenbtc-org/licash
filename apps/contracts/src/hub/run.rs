@@ -435,7 +435,6 @@ impl Openings {
         let (need, have) = prover.room(&all, blocks).map_err(|why| {
             Refused::unavailable(format!("the hub's prover is not ready ({why}): later"))
         })?;
-        let need = need * self.proof_scale.get().copied().unwrap_or(1.0);
         if need > have {
             return Err(Refused::unavailable(format!(
                 "no room for another contract: the hub proves an exit of each of {} at once in \

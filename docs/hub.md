@@ -938,8 +938,10 @@ tail and openings, and not its age), and the one batch of its header chain
 a dispute may wait for: its holders may all exit at once. It checks this as a holder opens and again, holding its funding lock,
 as it funds F, and refuses an opening with 503 when there is no room, or
 while its prover is not ready. `--contracts-proof-scale` scales each
-proof's estimate (1 by default): above 1 for a prover slower than its
-benchmark, below 1 to admit more than it can surely defend. Long contracts
+proof's estimate (1 by default), for the contracts it opens and the claims
+it responds to alike: above 1 for a prover slower than its benchmark, below
+1 for a hub that proves with machines it rents when it needs them (below),
+or to admit more than it can surely defend. Long contracts
 take the most room, as a proof grows with the headers it checks, but those
 of a chained graph, which take no more than short ones. A prover not ready (none installed, no
 Groth16 setup, under 8.5 GB of memory, a failed benchmark) responds to no
@@ -1032,10 +1034,21 @@ NVIDIA driver. The variable is read as a proof starts: restart the hub to
 change it, and the proof under way carries on with the segments it kept. A
 machine that fails or stops answering costs the proof its job's time and no
 more, as the hub proves what is left; it learns the inputs of the disputes
-it proves (the notes and spends of a claim), and can forge nothing. The
-hub's plan does not count these machines yet: it responds to the claims its
-own prover's measured speed can prove in time, and admits contracts by it
-(`--contracts-proof-scale` below 1 admits more).
+it proves (the notes and spends of a claim), and can forge nothing.
+
+The hub does not measure those machines: its operator says what they are
+worth with `--contracts-proof-scale`, the time a proof takes with them over
+the time its own prover takes alone (0.25 for proofs four times as fast).
+The hub then opens contracts and responds to claims as a prover that fast
+would, and rents nothing while it is quiet. When the proofs it committed to
+are in time only at that speed, it alerts its operator, once, with how many
+and the block the first is due by: rent the machines then, name them in
+`LICASH_R0_WORKERS` and restart the hub. A response whose proof is not made
+in time pays the holder what the claim asks, as no response would have, and
+costs the hub its fees besides: scale by what can surely be rented within
+the assert window, and leave it at 1 (the hub's own prover alone) until
+that has been tried. The execution, the joins and the Groth16 wrap stay on
+the hub, a minute or two of each proof on a GPU that no machine shortens.
 
 The hub stops, with an error, when one of its loops stops: the chain's
 watch, the tweaks' index, the gateways, the contracts' responder and

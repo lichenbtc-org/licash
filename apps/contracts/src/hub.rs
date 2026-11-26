@@ -192,9 +192,6 @@ pub struct Openings {
     alert: std::sync::OnceLock<Arc<Alert>>,
     /// The claims given no response this round, for want of the prover.
     withheld: Mutex<Vec<String>>,
-    /// What the operator scales the prover's estimates by, as it admits
-    /// openings ([`Openings::scale_proofs`]): 1 unless told.
-    proof_scale: std::sync::OnceLock<f64>,
     /// Whether more contracts are open than its prover can contest the
     /// exits of at once, as last told.
     over_capacity: std::sync::atomic::AtomicBool,
@@ -454,7 +451,6 @@ impl Openings {
             chain_told: Mutex::new(chain_told),
             alert: std::sync::OnceLock::new(),
             withheld: Mutex::default(),
-            proof_scale: std::sync::OnceLock::new(),
             over_capacity: Default::default(),
             failing: Mutex::default(),
             unfunded_full: Default::default(),
@@ -565,13 +561,18 @@ impl Openings {
         Ok(())
     }
 
-    /// Scale the prover's estimate of each proof by `by` as openings are
-    /// admitted ([`Openings::open`]): above 1 for a prover slower than its
-    /// benchmark says, below 1 to admit more contracts than it can be
-    /// sure to defend at once. 1 unless told; set once.
+    /// Scale the prover's estimate of each proof by `by`
+    /// ([`prover::Prover::scale`]), as openings are admitted
+    /// ([`Openings::open`]) and as claims are responded to: above 1 for a
+    /// prover slower than its benchmark says, below 1 for one that proves
+    /// with machines its operator rents when it needs them, or to admit
+    /// more contracts than it can be sure to defend at once. 1 unless
+    /// told; set once.
     pub fn scale_proofs(&self, by: f64) -> Result<()> {
         ensure!(by.is_finite() && by > 0.0, "a proof scale of {by}: above 0");
-        let _ = self.proof_scale.set(by);
+        if let Some(prover) = &self.prover {
+            prover.scale(by);
+        }
         Ok(())
     }
 
@@ -1601,7 +1602,6 @@ mod tests {
             chain_told: Mutex::default(),
             alert: std::sync::OnceLock::new(),
             withheld: Mutex::default(),
-            proof_scale: std::sync::OnceLock::new(),
             over_capacity: Default::default(),
             failing: Mutex::default(),
             unfunded_full: Default::default(),
