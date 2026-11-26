@@ -213,6 +213,7 @@ mod tests {
             ("answered", false),
             ("unanswered", false),
             ("answered-funded", false),
+            ("answered-rest", false),
             ("worst", false),
             ("worst-alone", false),
             ("answered-chained", true),
@@ -225,6 +226,12 @@ mod tests {
         // What it proves and refuses, both: unanswered is refused.
         assert!(crate::hp::expected(&std::fs::read(path("unanswered")).unwrap()).is_err());
         assert!(crate::hp::expected(&std::fs::read(path("answered")).unwrap()).is_ok());
+        // A contract of a rest output, which the program before it refuses.
+        let rested = std::fs::read(path("answered-rest")).unwrap();
+        assert!(crate::hp::expected(&rested).is_ok());
+        let before = "1808247519df8436457abfb21a7a5173e0b9948db0b75ee3dce0e93bc9443658";
+        let before = probe::program(Some(before)).unwrap();
+        assert!(decides(&before, &rested, &[]).is_err());
     }
 
     /// An input of any Base, chained or not, is one the library reads

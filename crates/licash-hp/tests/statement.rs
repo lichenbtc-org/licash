@@ -219,9 +219,15 @@ fn stale_on(id: u32) -> (Filed, Evidence) {
 }
 /// [`stale_on`] of a contract whose checkpoint is `checkpoint`.
 fn stale_with(id: u32, checkpoint: Checkpoint) -> (Filed, Evidence) {
+    stale_of(id, checkpoint, |parts| parts)
+}
+/// [`stale_with`] of a Base of the parts `tweak` makes of its own.
+fn stale_of(id: u32, checkpoint: Checkpoint, tweak: impl Fn(Parts) -> Parts) -> (Filed, Evidence) {
     let issuer = IssuerKeys::random(3).unwrap();
     let keyset = issuer.keyset().unwrap();
     let base = base_with(keyset.clone(), 53, id, checkpoint);
+    let base = Base::new(tweak(base.parts().clone())).unwrap();
+    let keyset = base.parts().keyset.clone();
     let ds: Vec<_> = (0..32).map(|i| derive(SPEND, &hold(), 4, 23, i)).collect();
     let notes: Vec<_> = ds.iter().map(|d| mint(&issuer, &keyset, d)).collect();
     let owners: Vec<_> = (0..16).map(|i| owner(SPEND, 23, i)).collect();
@@ -438,8 +444,9 @@ fn cite(spent: Evidence) -> Evidence {
 
 /// The inputs r0/host measures the guest on (`licash-r0 hp-exec`),
 /// written to `LICASH_HP_INPUTS` if set: the 32-item claim the Hub
-/// answers with a 16-note spend, the same claim unanswered, and its like of
-/// notes she funded her part of the contract with.
+/// answers with a 16-note spend, the same claim unanswered, its like of
+/// notes she funded her part of the contract with, and its like of a
+/// contract whose cap is past its graph's bits, paid by a rest output.
 #[test]
 fn export_inputs() {
     let Ok(dir) = std::env::var("LICASH_HP_INPUTS") else {
@@ -459,10 +466,26 @@ fn export_inputs() {
         exit(&f.base, f.b, &f.e, &f.bytes, 64),
         vec![cite(spent)],
     );
+    let checkpoint = Checkpoint::genesis(ChainProfile::Core30DefaultRegtest).unwrap();
+    let (f, spent) = stale_of(graph(), checkpoint, |parts| Parts {
+        cap: 1_023 + 600,
+        graph: GraphTerms {
+            bits: 10,
+            ..parts.graph
+        },
+        ..parts
+    });
+    assert_eq!(licash_hp::payout(&f.base).rest, 600);
+    let rested = input(
+        &f.base,
+        exit(&f.base, f.b, &f.e, &f.bytes, 64),
+        vec![cite(spent)],
+    );
     let inputs = [
         ("answered", answered),
         ("unanswered", unanswered),
         ("answered-funded", funded),
+        ("answered-rest", rested),
     ];
     for (name, i) in inputs {
         let bytes = i.to_bytes();
