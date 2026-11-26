@@ -514,9 +514,11 @@ account does.
 Should the bridge's hub stop cooperating, `bridge export --yes` freezes an
 owner bridge for good and imports its notes; for an open bridge, its
 operator exports them to the wallet's key with `licash-bridge export`, and
-`bridge import FILE` imports them. Imported notes are never in the balance
+`bridge import FILE` imports them. The export holds the refunds of the
+bridge's payments stuck on the hub too, claimed once their locks expired
+at depth on Bitcoin. Imported notes and refunds are never in the balance
 nor spent: a recovery contract at their hub claims them only within the
-cap its own notes, locks and funding leave, dropping them if they would
+cap its own notes, locks and funding leave, leaving them out if they would
 make the claim unsound. `bridge imported` lists them, and `bridge discard
 SOURCE` forgets them (refused while a recovery claims them), for the
 operator to unfreeze the bridge.

@@ -401,7 +401,8 @@ under "More". Custodial: the bridge holds what the account does.
 Should the bridge's hub stop cooperating, "Freeze and export its notes"
 freezes an owner bridge for good and imports its notes; those an open
 bridge's operator exported to the app's key there are pasted under "Notes
-imported". They
+imported". The export holds the refunds of the bridge's payments stuck on
+the hub too, claimable once their locks expired on Bitcoin. They
 are never in the balance nor spent: a recovery contract at their hub
 claims them only within the cap the app's own notes, locks and funding
 leave. They can be discarded, unless a recovery claims them, for the

@@ -91,13 +91,23 @@ which claims them with its own:
    --out FILE` with KEY the operator wallet's key there (`licash-wallet
    bridge show` names it), then `licash-wallet bridge import FILE`.
 2. The export freezes the bridge first: it pays, receives and unlinks
-   nothing from then on, and refuses to export while a payment is under
-   way. Each note is sealed to the wallet's key with its hold key; the
-   export holds no seed.
-3. The wallet keeps the notes imported apart from its own: never in its
-   balance, never spent. A recovery claims them only within the cap its
-   own notes, locks and funding leave, and drops them if they would make
-   its claim unsound. `licash-wallet bridge imported` shows them.
+   nothing from then on, and refuses to export only while a payment is
+   being sent, before its lock is made. Each note is sealed to the
+   wallet's key with its hold key; the export holds no seed.
+3. A payment stuck on the hub, its lock made but never settled, is
+   exported too: the lock's signed body, its certificate if the hub
+   certified it, and the openings and hold keys of its refund to the
+   bridge. An export with such locks is of a newer format (2) than one of
+   notes alone (1): a wallet too old to read it refuses it whole, never
+   importing part of it. Payments into the bridge still under way are not
+   exported.
+4. The wallet keeps the notes and refunds imported apart from its own:
+   never in its balance, never spent. A recovery claims the notes only
+   within the cap its own notes, locks and funding leave, then each
+   refund whole, once its lock expired at depth on Bitcoin, if it still
+   fits. A claim that would not be owed whole is made again without the
+   refunds, then without the notes, which are dropped for good.
+   `licash-wallet bridge imported` shows them.
 
 Should the hub carry on after all, the wallet forgets them with
 `licash-wallet bridge discard SOURCE` (refused while a recovery claims
