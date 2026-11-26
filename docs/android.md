@@ -452,16 +452,15 @@ to her as notes at that hub once its funding is 3 blocks deep (or claimed by a
 recovery should the hub never issue it), the hub charging its interest on its
 own part only. No change comes back from the coin. The sheet shows first
 what the hub would hold protected once it opens (its cover bar, then in
-words), then the cover, chosen first: at first the smallest the smallest
-coin a contract takes whole fills, the hub funding the rest of it at its
-interest (among its sizes, `2^n - 1` sat, at a hub that lets the wallet
-choose, as hubs do by default; an older hub may bound it by the coin paying,
-as it announces). Under More, what it is for sizes it otherwise (Smallest,
-Pay, Both or Receive: room for what is put in and held at the hub, half
-again, or three times it, the hub funding more of it), the choice kept once
-tapped, and a slider chooses among every cover some coin opens when several
-do. The cover decides the coins that pay
-it whole, chips when several do, the smallest at first. Then its cost, the
+words), then the cover: at first of the smallest coin a contract takes
+whole, her part of it alone, the hub funding only what makes it a cap (the
+least, 131,071 sat, or under 512 sat more; a hub may bound the cap by the
+coin paying, as it announces). Under More, what it is for sizes it otherwise
+(Yours, Pay, Both or Receive: room for what is put in and held at the hub,
+half again, or three times it, the hub funding the rest at its interest),
+the choice kept once tapped, and a slider asks any cover from her part's to
+the largest the hub allows for the coin, in steps of 1,000 sat. Chips choose
+the coin paying it when several do, the smallest at first. Then its cost, the
 reserve, and "Into your balance", her part; why no coin pays any, each short
 of the price or beyond what the hub's largest contract takes; and one line
 of what it asks of her, opening the app now and then and before the day it

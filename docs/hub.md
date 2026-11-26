@@ -427,18 +427,19 @@ choose a contract's cap up to `--contracts-max-cap` (33,554,431 sat by
 default) and how long it lasts up to `--contracts-max-blocks` (a year of
 Bitcoin's blocks, 52,560, by default) (`/v1/contracts/quote?cap=SAT&blocks=N`);
 `--contracts-fixed-only` offers the fixed terms alone, at their price with no
-interest, as hubs did by default before. Its cap
-one of the sizes (`2^n - 1` sat, 131,071 to 2,147,483,647; the operator's
-largest rounded down to one) whatever the coin the wallet deposits (any
-coin paying the price, the hub funding the rest of the cap), at the reserve
+interest, as hubs did by default before. Its cap is any number of sat from
+131,071 to 2,147,483,647 (the operator's largest within them) whose payout
+pays it exactly, whatever the coin the wallet deposits (any coin paying the
+price, the hub funding the rest of the cap), at the reserve
 and opening fee plus
 `--contracts-rate` millionths of the part of the cap the hub funds a year
 (of its network's blocks, 52,560 or Mutinynet's 1,051,200; 200,000, 20% a
 year, by default: the hub's own bitcoin locked is what it charges for, not
 its reserve or fee). A hub with a range prices its fixed terms by that rate
-too. The app opens by default the smallest contract the deposit fills, the
-hub funding the rest of it, so a hub mostly lends room to receive, on
-average about a quarter over the deposit; a wallet opens unasked no contract
+too. The app and `licash-wallet` open by default a contract of the deposit
+alone, less its price, the hub funding only what makes it a cap (the least
+cap, or under 512 sat); a wallet asks for more room to receive, the hub
+lending it at its interest; a wallet opens unasked no contract
 whose fee and interest are more than half the coin paying it. A wallet funds part of the cap itself
 (`&funded=SAT`, every contract): its coin is spent whole in F, paying the
 price and, as that part, all the rest of it but less than dust (no change
@@ -465,8 +466,11 @@ what binds. A hub saying neither, as one of an earlier version, reads as
 having room; the app grays a recommended or announced hub that is full or
 funds none of its smallest cap, and `licash-wallet contract-terms` prints
 `room none` with why (`room` and `funds` with `--json`).
-The collateral of a contract is its cap exactly, every size of all ones in
-as many bits. A contract
+The collateral of a contract is its cap exactly: its graph's payout pays in
+one output each of `2^i` sat for its bits (17 to 31, the most whose outputs
+pay at most the cap together), and one output more of the rest, `cap - (2^bits
+- 1)`, none if the cap is `2^bits - 1` and 512 sat at least otherwise (the
+graph's least unit); a cap whose rest would be less is none. A contract
 opens on a block as deep in the hub's scan as its lock checkpoints, which
 it takes as one when the contract opens if newer, so that every lock
 named after it can be claimed in it: the hub offers no contract until its

@@ -324,15 +324,19 @@ it, such as `sqlite3 wallet.sqlite ".backup FILE"`, holds the wallet and its
 contracts as one); `contracts/` next to it holds what a forced close under way uses. `--blocks` sets the blocks to its close (by default the most the hub
 allows), `--max-price` the most to pay besides your part (by default no more
 than sane fees make it). At a hub that lets wallets choose (its info names a
-range), `--cap` with `--blocks` sets the least the contract protects, one of
-the hub's sizes (`2^n - 1` sat, 131,071 to 2,147,483,647, those the hub
-allows): the contract is the smallest of them at least that large that takes
-the coin, at the price the range gives.
+range), the contract is by default of your part alone, all of the coin but
+the price: its cap that part, or the least the hub offers (131,071 sat) if
+smaller, or up to 511 sat more, so its payout pays exactly the cap (the hub
+funds that much). `--inbound <sat>` asks the hub for that much more on top of
+your part, room to receive in, at its interest; `--cap` with `--blocks` sets
+the least the contract protects, any number of sat within the hub's range
+(rounded up by under 512 sat to one its payout pays exactly). Either way it
+is priced as the range gives.
 `contract-terms <hub> [--cap <sat>] [--blocks <n>] [--funded <sat>]` shows
 what a contract costs before opening it, itemized: the hub's opening fee, its
 yearly interest on its part and on yours, your reserve (returned as it
-closes, as notes) and your part for the `--funded` you name, with the sizes
-and durations the hub allows; `open-contract` prints the same, of the
+closes, as notes) and your part for the `--funded` you name, with the caps
+(`min_cap` and `max_cap` with `--json`) and durations the hub allows; `open-contract` prints the same, of the
 contract that opened. While it opens, on an interactive terminal and
 without `--json`, a line on stderr says how it goes each second: the
 wallet preparing a step, then, once its upload starts, the megabytes sent
