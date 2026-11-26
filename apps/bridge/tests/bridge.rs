@@ -1240,3 +1240,51 @@ async fn a_lightning_address_is_paid_through_the_provider_of_a_hub_without_a_gat
     net.pay_in(&hash).await;
     assert_eq!(balance(&net, &owner), 19_000);
 }
+
+/// Its Lightning Addresses are served within the most requests at once,
+/// as its management API is: requests whose bodies stall take every place,
+/// an address's pay request is then unavailable, its health still told,
+/// and served again once they are gone.
+#[tokio::test]
+async fn stalled_requests_hold_no_more_places_than_the_most_served_at_once() {
+    use axum::body::Bytes;
+    let net = Net::with(Config {
+        public_url: Some("https://pay.test/".into()),
+        ..Config::default()
+    })
+    .await;
+    let app = licash_bridge::router(net.bridge.clone());
+    let stalled: Vec<_> = (0..licash_bridge::MAX_SERVING)
+        .map(|_| {
+            let body =
+                Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
+            let request = Request::post(licash_api::bridge::REGISTER)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body)
+                .unwrap();
+            tokio::spawn(app.clone().oneshot(request))
+        })
+        .collect();
+    let pay_request = "/.well-known/lnurlp/alice";
+    let busy = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let busy = call(&app, pay_request, None).await;
+            if busy.status == 503 {
+                break busy;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("its pay request shed once every place is held");
+    let problem: licash_api::Problem = serde_json::from_slice(&busy.body).unwrap();
+    assert_eq!(problem.message, "the bridge is too busy now");
+    assert_eq!(call(&app, licash_serve::HEALTH, None).await.status, 200);
+    for stalled in &stalled {
+        stalled.abort();
+    }
+    for stalled in stalled {
+        let _ = stalled.await;
+    }
+    assert_eq!(call(&app, pay_request, None).await.status, 200);
+}

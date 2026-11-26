@@ -3406,6 +3406,7 @@ dependencies = [
  "axum",
  "bitcoin",
  "clap",
+ "futures-util",
  "hex",
  "http-body-util",
  "licash",

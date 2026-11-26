@@ -21,7 +21,7 @@ pub mod lnurl;
 pub mod nwc;
 mod store;
 
-pub use api::router;
+pub use api::{router, MAX_SERVING};
 
 use std::{
     collections::HashSet,

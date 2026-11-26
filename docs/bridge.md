@@ -41,6 +41,11 @@ accounts, connections, payments and invoices in one SQLite database.
 `status` shows the accounts, what they are owed, what the wallet holds,
 and whether it is short or frozen.
 
+It serves at most 1,024 connections and 256 requests at once, its
+Lightning Addresses' included, answering more as unavailable at once. It
+lets go of a client whose request head takes longer than 30 seconds, and
+refuses a request whose body is still arriving 60 seconds after its head.
+
 ### Owner and open bridges
 
 By default the bridge keeps one account, its owner's: the wallet that

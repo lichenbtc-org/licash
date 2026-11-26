@@ -36,6 +36,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 licash-hub.workspace = true
 licash-hub-service = { path = "../hub", features = ["fake"] }
 licash-swaps.workspace = true

@@ -26,6 +26,11 @@ use crate::{now, Bridge, Error};
 /// The most a request body may be.
 const MAX_BODY: usize = 64 * 1024;
 
+/// The most requests it serves at once, its Lightning Addresses' included:
+/// those past it are answered unavailable at once, rather than queued
+/// without bound.
+pub const MAX_SERVING: usize = 256;
+
 /// The most signatures of requests answered kept, for [`MAX_SKEW`] twice:
 /// more are refused until older ones are let go, never forgotten early,
 /// which would let them be replayed.
@@ -83,14 +88,17 @@ impl IntoResponse for Failure {
     }
 }
 
-/// The management API of `bridge`, and a health check at `/health`.
+/// The management API of `bridge`, its Lightning Addresses, and a health
+/// check at [`licash_serve::HEALTH`]: at most [`MAX_SERVING`] requests at
+/// once, each body still arriving [`licash_serve::BODY_TIME`] after its
+/// head refused.
 pub fn router<T: Transport + 'static>(bridge: Arc<Bridge<T>>) -> Router {
     let shared = Arc::new(Shared {
         bridge,
         seen: Mutex::new(Seen::default()),
     });
-    Router::new()
-        .route("/health", get(|| async { "ok" }))
+    let api = Router::new()
+        .route(licash_serve::HEALTH, get(|| async { "ok" }))
         .route(bridge::INFO, get(info::<T>))
         .route(bridge::REGISTER, post(register::<T>))
         .route(bridge::ACCOUNT, post(account::<T>))
@@ -102,7 +110,8 @@ pub fn router<T: Transport + 'static>(bridge: Arc<Bridge<T>>) -> Router {
         .route(bridge::EXPORT, post(export::<T>))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(shared.clone())
-        .merge(crate::lnurl::router(shared.bridge.clone()))
+        .merge(crate::lnurl::router(shared.bridge.clone()));
+    licash_serve::shed(api, MAX_SERVING, "the bridge is too busy now")
 }
 
 impl<T> Shared<T> {
