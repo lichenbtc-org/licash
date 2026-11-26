@@ -45,7 +45,7 @@ use licash_statement::{
     btc::{self, Header, OutPoint},
     checksum_digits,
     codec::{R, W},
-    script_digit, Checkpoint, Contract, Exit, Read, Reject, JOURNAL_LEN,
+    script_digit, Checkpoint, Contract, Exit, Payout, Read, Reject, JOURNAL_LEN,
 };
 use sha2::{Digest, Sha256};
 
@@ -95,6 +95,16 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
+/// How the payout of `base` counts a signed word: its bits, and the rest
+/// of a cap past them ([`licash::base::Parts::rest`]).
+pub fn payout(base: &Base) -> Payout {
+    let p = base.parts();
+    Payout {
+        bits: p.graph.bits.into(),
+        rest: p.rest().expect("a Base's rest is checked"),
+    }
+}
+
 /// The contract of `base` as its statement fixes it at opening.
 pub fn contract(base: &Base) -> Contract {
     let p = base.parts();
@@ -115,6 +125,7 @@ pub fn contract(base: &Base) -> Contract {
             hash: header.hash(),
         },
         work: u128::from(p.chain.work_depth).saturating_mul(btc::work(header.bits())),
+        payout: payout(base),
     }
 }
 
@@ -555,7 +566,9 @@ pub fn verdict(owed: &Owed, b2: u32, disclosed: Option<&[u8]>, lean: bool) -> Re
 /// what the evidence uses (`disclosed`, the bytes of its disclosure, if it
 /// made one). The statement is a deterministic function of these, so a
 /// holder for whom this holds may leave the response uncontested: nothing
-/// the Hub could prove would say otherwise. A response of `b2` not below
+/// the Hub could prove would say otherwise. `b2` and her request's amount
+/// are as the payout counts their words ([`payout`]). A response of `b2`
+/// not below
 /// her claim, and not 0, concedes it ([`Reject::Conceded`]): the statement
 /// proves nothing of it, and her contest wins her claim and the Hub's
 /// reserve, where the response left alone pays her the bits of `b2` alone

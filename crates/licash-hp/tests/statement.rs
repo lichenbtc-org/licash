@@ -593,6 +593,33 @@ fn the_contract_is_bases() {
     assert_ne!(contract(&b).journal(), c.journal());
 }
 
+/// The contract counts the words as its payout does: a cap past the
+/// graph's bits has a rest, whose bit counts it; a cap within them none.
+#[test]
+fn the_contract_counts_words_as_its_payout() {
+    use licash_hp::payout;
+    use licash_statement::Payout;
+
+    let issuer = IssuerKeys::random(3).unwrap();
+    let plain = base(issuer.keyset().unwrap(), 53);
+    assert_eq!(contract(&plain).payout, Payout { bits: 21, rest: 0 });
+    let mut parts = plain.parts().clone();
+    parts.graph.bits = 10;
+    parts.cap = 1_023 + 600;
+    let rested = Base::new(parts).unwrap();
+    assert_eq!(
+        payout(&rested),
+        Payout {
+            bits: 10,
+            rest: 600
+        }
+    );
+    assert_eq!(contract(&rested).payout, payout(&rested));
+    assert_eq!(payout(&rested).amount((1 << 10) | 23), 623);
+    // not in the journal, which D binds through Base
+    assert_ne!(contract(&rested).d, contract(&plain).d);
+}
+
 #[test]
 fn the_hub_proves_what_its_evidence_leaves_owed() {
     let (f, spent) = stale();

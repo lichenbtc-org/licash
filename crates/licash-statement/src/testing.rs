@@ -8,8 +8,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::btc::{self, sha256d, work, Header, OutPoint};
 use crate::{
-    checksum_digits, claim_script, Checkpoint, Contract, Exit, Hash, Request, Respond, SlotSpend,
-    SLOT_VOUT,
+    checksum_digits, claim_script, Checkpoint, Contract, Exit, Hash, Payout, Request, Respond,
+    SlotSpend, SLOT_VOUT,
 };
 
 fn varint(n: usize) -> Vec<u8> {
@@ -301,6 +301,7 @@ pub fn exit_publishing(
         deposit,
         checkpoint,
         work: 10 * work(0x207fffff),
+        payout: Payout::default(),
     };
     X {
         contract,

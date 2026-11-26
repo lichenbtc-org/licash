@@ -526,6 +526,33 @@ pub struct Contract {
     pub checkpoint: Checkpoint,
     /// The work `W` on top of the exit's last block.
     pub work: u128,
+    /// How its payout counts a signed word. Not in the journal: the L2
+    /// derives it from the terms `d` binds.
+    pub payout: Payout,
+}
+
+/// A payout's outputs, as they count a signed word (`lichen_contract`'s
+/// `Terms::amount`): bit `i` of the word `2^i` units, but with a rest
+/// (`rest > 0`) bit `bits` that rest's units, the output beyond the binary
+/// ones that makes the contract any size. A word with no rest is its
+/// number, as before there was one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Payout {
+    pub bits: u32,
+    pub rest: u32,
+}
+
+impl Payout {
+    /// What `word` counts, in units: the word, its bit `bits` counting the
+    /// rest instead of `2^bits` (below it). Any other bit counts as in a
+    /// number, so a word is never counted less than its outputs pay.
+    pub fn amount(&self, word: u32) -> u32 {
+        let k = 1u64 << self.bits;
+        match self.rest > 0 && u64::from(word) & k != 0 {
+            true => (u64::from(word) - k + u64::from(self.rest)) as u32,
+            false => word,
+        }
+    }
 }
 
 /// The journal's length: `c ‖ D ‖ H(O_D ‖ checkpoint ‖ W)`.
@@ -561,6 +588,8 @@ impl Contract {
         w.put(&self.checkpoint.height.to_be_bytes());
         w.put(&self.checkpoint.hash);
         w.put(&self.work.to_be_bytes());
+        w.put(&self.payout.bits.to_be_bytes());
+        w.put(&self.payout.rest.to_be_bytes());
     }
 
     pub fn read(r: &mut R) -> Result<Contract, Reject> {
@@ -573,6 +602,10 @@ impl Contract {
                 hash: r.take()?,
             },
             work: u128::from_be_bytes(r.take()?),
+            payout: Payout {
+                bits: u32::from_be_bytes(r.take()?),
+                rest: u32::from_be_bytes(r.take()?),
+            },
         })
     }
 }
@@ -632,15 +665,17 @@ pub struct Heights {
 /// What the exit shows: what the L2's grounds judge.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Read {
-    /// What she claims, and her claim's fingerprint `E`, as she signed
-    /// them in `request`.
+    /// What she claims (the word she signed in `request`, as the payout
+    /// counts it, [`Payout::amount`]), and her claim's fingerprint `E`, as
+    /// she signed it.
     pub b: u32,
     pub e: Hash,
     /// The bytes her publication carries: her claim, if she made one (the
     /// L2 checks they are one, and hash to `E`). Empty if the slot's spend
     /// carries none, or nulldata that isn't pushes only.
     pub claim: Vec<u8>,
-    /// What the hub's response says she is owed: below `b`, or 0.
+    /// What the hub's response says she is owed (the word it signed, as
+    /// the payout counts it): below `b`, or 0.
     pub b2: u32,
     /// The bytes the hub's disclosure carries, if it disclosed.
     pub disclosed: Option<Vec<u8>>,
@@ -715,6 +750,7 @@ pub fn read_on(contract: &Contract, exit: &Exit, blocks: &impl Blocks) -> Result
         .spending(&contract.deposit)
         .ok_or(Reject::Posted)?;
     let Requested { b, e } = requested(&witness).ok_or(Reject::Posted)?;
+    let b = contract.payout.amount(b);
     let request = exit.request.txid().ok_or(Reject::Posted)?;
     let claim = exit
         .publish
@@ -727,6 +763,7 @@ pub fn read_on(contract: &Contract, exit: &Exit, blocks: &impl Blocks) -> Result
         .respond
         .spending(&request)
         .and_then(|w| responded(&w))
+        .map(|word| contract.payout.amount(word))
         .ok_or(Reject::Responded)?;
     // b′ below her b (at b′ = b the hub would keep its reserve from an
     // honest claim), or 0 (a claim of nothing, which it may still prove
@@ -971,6 +1008,12 @@ mod tests {
         ] {
             assert_ne!(other.digest(), x.contract.digest());
         }
+        // the payout is not the journal's: the L2's terms in D bind it
+        let other = Contract {
+            payout: Payout { bits: 3, rest: 5 },
+            ..x.contract
+        };
+        assert_eq!(other.journal(), x.contract.journal());
     }
 
     #[test]
@@ -1106,6 +1149,33 @@ mod tests {
             3,
         );
         assert_eq!(read(&y.contract, &y.exit).map(|r| r.claim), Ok(vec![]));
+    }
+
+    /// With a rest, `b` and `b′` are the words as the payout counts them:
+    /// of 12 units (1, 2, 4 and a rest of 5), the word `0b1101` is 10.
+    #[test]
+    fn the_words_are_read_as_the_payout_counts_them() {
+        let payout = Payout { bits: 3, rest: 5 };
+        assert_eq!(
+            [0, 7, 0b1000, 0b1011, 0b1101, 0b1111, 16].map(|w| payout.amount(w)),
+            [0, 7, 5, 8, 10, 12, 16]
+        );
+        assert_eq!(Payout::default().amount(u32::MAX), u32::MAX);
+        let answered = |b: u32, b2: u32| {
+            let mut x = exit(b, [7; 32], b"", b2);
+            x.contract.payout = payout;
+            read(&x.contract, &x.exit).map(|r| (r.b, r.b2))
+        };
+        assert_eq!(answered(0b1101, 7), Ok((10, 7)));
+        assert_eq!(answered(0b1101, 0b1011), Ok((10, 8)));
+        assert_eq!(answered(0b1101, 0b1000), Ok((10, 5)));
+        // conceded as the payout counts it: 10, and 16
+        assert_eq!(answered(0b1101, 0b1101), Err(Reject::Conceded));
+        assert_eq!(answered(0b1101, 16), Err(Reject::Conceded));
+        // the rest alone is 5, below 7: no rest, 8, above
+        assert_eq!(answered(7, 0b1000), Ok((7, 5)));
+        let x = exit(7, [7; 32], b"", 0b1000);
+        assert_eq!(read(&x.contract, &x.exit), Err(Reject::Conceded));
     }
 
     #[test]
