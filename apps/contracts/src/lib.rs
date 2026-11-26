@@ -428,13 +428,13 @@ pub const SIGNET_OWN_CLAIMS: bool = true;
 /// envelopes, as [`SIGNET_OWN_CLAIMS`] says of its rule: set in the same
 /// change as the program that does. Hubs quote a graph of id
 /// [`licash::recovery::LEAF_FROM`] only when it is.
-pub const SIGNET_LEAF: bool = false;
+pub const SIGNET_LEAF: bool = true;
 
 /// Whether [`SIGNET`] owes nothing to a claim whose `E` she signed twice
 /// ([`licash::recovery::two_claims_void`]), as [`SIGNET_LEAF`] says of the
 /// envelopes: set in the same change as the program that does. Hubs quote
 /// a graph of id [`licash::recovery::PI1_ALONE_FROM`] only when it is.
-pub const SIGNET_TWO_CLAIMS: bool = false;
+pub const SIGNET_TWO_CLAIMS: bool = true;
 
 /// The chain program (`r0/chain-guest`) whose receipts [`SIGNET`]'s statement
 /// verifies: the image id kept in `r0/hp-guest/chain.id`, which a build of it

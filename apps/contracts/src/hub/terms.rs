@@ -583,8 +583,9 @@ mod tests {
     /// 3 000 sat, the default once, its bytes unchanged since). Regtest's
     /// mock decides what every graph does, so it quotes the last (16);
     /// signet's program reads the exit on the hub's header chain and owes a claim
-    /// of the same contract no evidence against another, and quotes 14 (its
-    /// hub cites spends by their signatures).
+    /// of the same contract no evidence against another, and quotes 16 (her
+    /// claim in a leaf's envelope, `assert` carrying π1 alone, a claim whose
+    /// `E` she signed twice owed nothing).
     #[test]
     fn the_fixed_quote_is_pinned() {
         let parts = Hub::peek(funded()).unwrap().base.parts().clone();
@@ -594,7 +595,7 @@ mod tests {
                 None,
                 [
                     "e79aeb4afefda90c089117e7b29e11efd4b5fb5032d8c939c199b299695aa34b",
-                    "5e6993fa884ffe4d0230862f1926f4133104dab7f2fdb51e8021c41d21199569",
+                    "a708a4d3a0baeac64f94b71e3e8e6df98b870ef47443b34569335a363bff6045",
                 ],
                 3_000,
             ),
@@ -602,7 +603,7 @@ mod tests {
                 Some(RANGE),
                 [
                     "e237ab9009a58222e8d43f9e14aea009f7b35fb7d8fc184b167490883a18396b",
-                    "9e15a5920dde659cb2e1ece1e93e72c92ddc100d8dbf3a3108b35c47880a2fd9",
+                    "c4da722293e71c10404e40aa33bad2ce6f4ba0572b84f60303843982f5695cfd",
                 ],
                 3_024,
             ),
@@ -625,7 +626,7 @@ mod tests {
                 .unwrap()
                 .with_opening_fee(3_000);
             let graph = at.quote(keyset.clone(), checkpoint.clone()).graph.id;
-            assert_eq!(graph, licash::recovery::SIGNED_FROM);
+            assert_eq!(graph, licash::recovery::PI1_ALONE_FROM);
             // Regtest quotes the graph its mock reads, leaf envelopes and
             // π1 alone, and the signets' or the one before told to.
             let regtest = Timing::of(ChainProfile::Core30DefaultRegtest, range).unwrap();
