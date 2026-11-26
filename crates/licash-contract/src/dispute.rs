@@ -540,7 +540,9 @@ pub fn add_fee(
 
 /// What a fee coin of a key is: of its fee script ([`fee_script`]), or of
 /// an envelope carrying bytes ([`envelope_tree`]), as the hub's disclosure
-/// under a leaf carrier pays with.
+/// under a leaf carrier pays with. Lent, never kept in bulk: its size is
+/// no cost.
+#[allow(clippy::large_enum_variant)]
 pub enum CoinTree {
     Fee,
     Envelope(TapTree),

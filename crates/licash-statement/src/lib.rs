@@ -1156,8 +1156,8 @@ mod tests {
             Some(&script[..])
         );
         assert_eq!(leaf_script(&[&sig]), None);
-        assert_eq!(leaf_script(&[&sig, &script, &vec![0xc2; 33]]), None);
-        assert_eq!(leaf_script(&[&sig, &script, &vec![0xc0; 34]]), None);
+        assert_eq!(leaf_script(&[&sig, &script, &[0xc2; 33]]), None);
+        assert_eq!(leaf_script(&[&sig, &script, &[0xc0; 34]]), None);
         // each input's envelope, in input order
         let (tx, _) = tx_spending_all(&[
             (

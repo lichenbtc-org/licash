@@ -1137,7 +1137,7 @@ fn exits_weighed(saved: &crate::testing::Opened, leaf: bool) {
             "publication of {name:>2} notes: {:>6} vB in {} txs, carrier {:>6} B",
             vsize(txs),
             txs.len(),
-            txs.iter().map(|t| carried(t)).max().unwrap()
+            txs.iter().map(&carried).max().unwrap()
         );
     }
     eprintln!(
