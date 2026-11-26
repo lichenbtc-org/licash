@@ -513,17 +513,43 @@ pub fn doubt_assertions(doubt: bool) {
 }
 
 #[cfg(feature = "faults")]
-static EQUIVOCATE: std::sync::Mutex<(Option<u32>, Option<Transaction>)> =
+static EQUIVOCATE: std::sync::Mutex<(Option<Other>, Option<Transaction>)> =
     std::sync::Mutex::new((None, None));
 
-/// Sign, with every request made from now on in this process, another of
-/// `b` and the same `E` (its txid the same), kept for
-/// [`take_equivocation`], and take either for hers once mined, as a
-/// dishonest holder would to mine one in place of the other in a
-/// reorganization: for tests of the hub's `equiv_b`. None, none.
+/// What her other request signs ([`equivocate`]).
 #[cfg(feature = "faults")]
-pub fn equivocate(b: Option<u32>) {
-    *EQUIVOCATE.lock().unwrap_or_else(|e| e.into_inner()) = (b, None);
+#[derive(Clone, Copy, Debug)]
+pub enum Other {
+    /// This `b`, and the same `E`.
+    B(u32),
+    /// The same `b`, and another `E` (her claim's digest, its last bit
+    /// flipped).
+    E,
+}
+
+#[cfg(feature = "faults")]
+impl Other {
+    /// The `b` and `E` it signs beside `request`.
+    fn of(self, request: &Request) -> (u32, [u8; 32]) {
+        match self {
+            Other::B(b) => (b, request.claim_digest),
+            Other::E => {
+                let mut e = request.claim_digest;
+                e[31] ^= 1;
+                (request.amount, e)
+            }
+        }
+    }
+}
+
+/// Sign, with every request made from now on in this process, another
+/// (`other`, its txid the same), kept for [`take_equivocation`], and take
+/// either for hers once mined, as a dishonest holder would to mine one in
+/// place of the other in a reorganization: for tests of the hub's
+/// `equiv_b` and of its statement's rule on two claims. None, none.
+#[cfg(feature = "faults")]
+pub fn equivocate(other: Option<Other>) {
+    *EQUIVOCATE.lock().unwrap_or_else(|e| e.into_inner()) = (other, None);
 }
 
 /// The other request last signed ([`equivocate`]), if any.
@@ -1509,7 +1535,7 @@ impl<'a, T: Transport, C: Chain> Run<'a, T, C> {
         // Equivocating, she takes either request for hers.
         #[cfg(feature = "faults")]
         if (EQUIVOCATE.lock().unwrap_or_else(|e| e.into_inner()).0)
-            .is_some_and(|b| mined == (b, r.claim_digest))
+            .is_some_and(|other| mined == other.of(&r))
         {
             return Ok(true);
         }
@@ -1579,8 +1605,9 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
         #[cfg(feature = "faults")]
         {
             let mut equivocate = EQUIVOCATE.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(b) = equivocate.0 {
-                equivocate.1 = Some(self.o.request(&self.keys, b, &request.claim_digest)?);
+            if let Some(other) = equivocate.0 {
+                let (b, e) = other.of(&request);
+                equivocate.1 = Some(self.o.request(&self.keys, b, &e)?);
             }
         }
         let filing = self.filing_of(state)?;

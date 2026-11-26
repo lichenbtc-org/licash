@@ -116,6 +116,15 @@ pub fn pair_on_chain(id: u32) -> bool {
     id < PI1_ALONE_FROM
 }
 
+/// Whether, in a contract of graph `id`, her claim is owed nothing should
+/// her request's one-time key on `E` sign two claims: another signature
+/// of hers on another `E` the Hub shows its statement, as a reorganization
+/// may mine one of her requests in place of the other, their txid the
+/// same ([`PI1_ALONE_FROM`] on; Lichen's `equiv_b` does as much of `b`).
+pub fn two_claims_void(id: u32) -> bool {
+    id >= PI1_ALONE_FROM
+}
+
 /// How a contract's filing is written, a function of its Base alone: the
 /// holder writes it, the Hub reads it and the statement decides on it all
 /// by [`Format::of`], so that a contract is decided by the codec it was

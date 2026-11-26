@@ -74,6 +74,7 @@ pub fn input_of(base: Base) -> HubInput {
         keys: RequestKeys::new(digits(4), digits(32)).expect("keys of their lengths"),
         invalid: 0,
         chain,
+        other_e: None,
     }
 }
 

@@ -95,6 +95,7 @@ fn stored_context(base: Option<&Base>, binding: bool, ctx: &Context) -> Context 
             chained: ctx.trust.chained,
             own_claims: ctx.trust.own_claims,
             leaf: ctx.trust.leaf,
+            two_claims: ctx.trust.two_claims,
         },
     }
 }

@@ -348,6 +348,19 @@ fn pad() -> usize {
 
 /// [`exit`] with her request's witness `witness`, on [`pad`] headers.
 fn signed_exit(base: &Base, witness: &[Vec<u8>], claim: &[u8], b2: u32) -> Exit {
+    carried_exit(base, witness, claim, b2, published)
+}
+
+/// [`signed_exit`], her publication made by `publish`: in nulldata
+/// ([`published`]) or in a leaf's envelope
+/// ([`licash_statement::testing::leaf_published`]).
+fn carried_exit(
+    base: &Base,
+    witness: &[Vec<u8>],
+    claim: &[u8],
+    b2: u32,
+    publish: fn(&Hash, &OutPoint, &[u8]) -> licash_statement::SlotSpend,
+) -> Exit {
     let c = contract(base);
     let padding = headers_on(&c.checkpoint.hash, pad());
     let tip = padding.last().map_or(c.checkpoint.hash, |h| sha256d(h));
@@ -356,7 +369,7 @@ fn signed_exit(base: &Base, witness: &[Vec<u8>], claim: &[u8], b2: u32) -> Exit 
         txid: request.txid().unwrap(),
         vout: SLOT_VOUT,
     };
-    let publish = published(&sha256d(&rh), &slot, claim);
+    let publish = publish(&sha256d(&rh), &slot, claim);
     let mut headers = padding;
     headers.extend([rh, publish.header]);
     headers.extend(headers_on(&sha256d(&publish.header), 6));
@@ -393,6 +406,7 @@ fn input(base: &Base, exit: Exit, evidence: Vec<Evidence>) -> HubInput {
         keys: keys(),
         invalid: 0,
         chain: None,
+        other_e: None,
     }
 }
 
@@ -1178,7 +1192,7 @@ mod chained {
             journal: &journal,
             tip: &tip,
         };
-        let proof = open_chain(proven, base, &keys(), &shown, evidence, &program()).unwrap();
+        let proof = open_chain(proven, base, &keys(), &shown, evidence, None, &program()).unwrap();
         let chained = Chained {
             proof: &proof,
             program: &program(),
@@ -1191,6 +1205,7 @@ mod chained {
             keys: keys(),
             invalid,
             chain: Some(proof),
+            other_e: None,
         };
         (input, lineage)
     }
@@ -1206,9 +1221,120 @@ mod chained {
             &input.exit,
             &input.evidence,
             None,
+            None,
             Some(chained),
             &mut |_| {},
         )
+    }
+
+    /// Of a contract whose claims are void signed twice, her signature on
+    /// another `E` under her request's one-time key (her other request, as
+    /// a reorganization may mine in place of the one the Hub answered, its
+    /// txid the same) owes her claim nothing: the statement holds of any
+    /// response, with no evidence. Not of one on her request's `E` however
+    /// written, nor of one under another key, nor beside evidence, nor in
+    /// a contract before; and an input of one of those carries no such
+    /// bytes.
+    #[test]
+    fn a_claim_whose_e_she_signed_twice_is_owed_nothing() {
+        use licash::recovery::{two_claims_void, PI1_ALONE_FROM};
+        use licash_statement::testing::leaf_published;
+
+        let id = PI1_ALONE_FROM;
+        assert!(two_claims_void(id) && !two_claims_void(id - 1));
+        let (f, spent) = stale_on(id);
+        let witness = signed_request(3, &f.e, f.b).1;
+        // A response of 1: her claim, owed 128 without evidence, 64 with.
+        let x = carried_exit(&f.base, &witness, &f.bytes, 1, leaf_published);
+        let (mut input, _) = on(&f.base, &x, &[], 9);
+        assert_eq!(licash_hp::check_on(&input, &program()), Err(Refusal::Owed));
+        let items = RequestKeys::e_items();
+        let other = signed_request(3, &[0x55; 32], f.b).1[..items].to_vec();
+        input.other_e = Some(other.clone());
+        let journal = contract(&f.base).journal();
+        assert_eq!(licash_hp::check_on(&input, &program()), Ok(journal));
+        let chained = Chained {
+            proof: input.chain.as_ref().unwrap(),
+            program: &program(),
+        };
+        let (owed, _) = decide_with(
+            &input.base,
+            &keys(),
+            &input.exit,
+            &[],
+            Some(0),
+            input.other_e.as_deref(),
+            Some(chained),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            (owed.owed, owed.disclosures),
+            (0, licash::disclosure::Disclosures::empty())
+        );
+        // It travels as bytes, decoded strictly.
+        let bytes = input.to_bytes();
+        let back = HubInput::from_bytes(&bytes).unwrap();
+        assert_eq!(back.other_e.as_ref(), Some(&other));
+        assert_eq!(licash_hp::check_on(&back, &program()), Ok(journal));
+        assert_eq!(
+            HubInput::from_bytes(&bytes[..bytes.len() - 1]).err(),
+            Some(Refusal::Input)
+        );
+        let none = HubInput {
+            other_e: None,
+            ..input.clone()
+        };
+        assert_eq!(
+            none.to_bytes().len(),
+            bytes.len() - other.iter().map(|i| 4 + i.len()).sum::<usize>()
+        );
+        assert!(HubInput::from_bytes(&none.to_bytes())
+            .unwrap()
+            .other_e
+            .is_none());
+        let refused = |other_e: Vec<Vec<u8>>| {
+            let input = HubInput {
+                other_e: Some(other_e),
+                ..input.clone()
+            };
+            licash_hp::check_on(&input, &program()).unwrap_err()
+        };
+        // Her request's own `E`, each digit of 15 written as 16 (as Bitcoin
+        // reads it, the same), is no second claim.
+        let again: Vec<Vec<u8>> = (witness[..items].iter())
+            .map(|i| if i == &[15] { vec![16] } else { i.clone() })
+            .collect();
+        assert_ne!(&again[..], &witness[..items]);
+        assert_eq!(refused(again), Refusal::Input);
+        assert_eq!(refused(witness[..items].to_vec()), Refusal::Input);
+        // Another key's, or a signature cut short, signs nothing of hers.
+        assert_eq!(
+            refused(signed_request(4, &[0x55; 32], f.b).1[..items].to_vec()),
+            Refusal::Unsigned
+        );
+        assert_eq!(refused(other[..items - 2].to_vec()), Refusal::Unsigned);
+        let mut longer = other.clone();
+        longer.extend([vec![1; 20], vec![]]);
+        assert_eq!(refused(longer), Refusal::Unsigned);
+        // Beside evidence, or something flagged: refused.
+        let (with, _) = on(&f.base, &x, std::slice::from_ref(&spent), 9);
+        let with = HubInput {
+            other_e: Some(other.clone()),
+            ..with
+        };
+        assert_eq!(licash_hp::check_on(&with, &program()), Err(Refusal::Input));
+        // A graph before: the input carries none, whatever it is given.
+        let (g, _) = stale_on(id - 1);
+        let w = signed_request(3, &g.e, g.b).1;
+        let y = carried_exit(&g.base, &w, &g.bytes, 1, leaf_published);
+        let (before, _) = on(&g.base, &y, &[], 9);
+        let given = HubInput {
+            other_e: Some(other),
+            ..before.clone()
+        };
+        assert_eq!(given.to_bytes(), before.to_bytes());
+        assert_eq!(licash_hp::check_on(&given, &program()), Err(Refusal::Input));
     }
 
     /// Her request is block 1, her publication 2, the response 9, and six
@@ -1305,6 +1431,7 @@ mod chained {
             keys: keys(),
             invalid: 0,
             chain: Some(proof),
+            other_e: None,
         };
         assert!(matches!(
             decided(&input),
@@ -1330,6 +1457,7 @@ mod chained {
         // headers instead of the chain
         let dense_input = HubInput {
             chain: None,
+            other_e: None,
             ..input.clone()
         };
         assert!(matches!(check(&dense_input), Err(Refusal::Chain(_))));
@@ -1345,6 +1473,7 @@ mod chained {
         let x = exit(&g.base, g.b, &g.e, &g.bytes, 64);
         let carried = HubInput {
             chain: input.chain.clone(),
+            other_e: None,
             ..self::super::input(&g.base, x, vec![spent])
         };
         assert!(matches!(
@@ -1374,6 +1503,7 @@ mod chained {
             left.openings.retain(|o| o.height != left_out);
             let input = HubInput {
                 chain: Some(left),
+                other_e: None,
                 ..input.clone()
             };
             let got = decided(&input).err();
@@ -1399,6 +1529,7 @@ mod chained {
         let refused = |proof: licash_hp::headers::ChainProof| {
             let input = HubInput {
                 chain: Some(proof),
+                other_e: None,
                 ..input.clone()
             };
             decided(&input).err()
@@ -1487,6 +1618,7 @@ mod chained {
         let input = HubInput {
             exit: shown,
             chain: Some(proof),
+            other_e: None,
             ..good.clone()
         };
         assert!(matches!(

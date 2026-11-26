@@ -426,9 +426,9 @@ impl Timing {
     fn graph_id(&self) -> u32 {
         match crate::trust(self.profile) {
             Ok(t) if t.chained.is_some() && t.own_claims && t.leaf && !self.nulldata => {
-                match self.pair {
-                    true => LEAF_FROM,
-                    false => PI1_ALONE_FROM,
+                match !self.pair && t.two_claims {
+                    true => PI1_ALONE_FROM,
+                    false => LEAF_FROM,
                 }
             }
             Ok(t) if t.chained.is_some() && t.own_claims => SIGNED_FROM,

@@ -71,6 +71,14 @@ pub struct Trust {
     /// carries them in: under one that doesn't, it would read no claim of
     /// hers. A program that does decides what [`Self::own_claims`] says too.
     pub leaf: bool,
+    /// Whether its statement owes her claim nothing by her signature on
+    /// another `E` under her request's one-time key
+    /// ([`licash::recovery::two_claims_void`]), which a contract of graph id
+    /// [`licash::recovery::PI1_ALONE_FROM`] on does: under one that doesn't,
+    /// it would refuse the hub's input of one, and the hub could not prove
+    /// what it answered her other request. A program that does reads the
+    /// leaf envelopes too.
+    pub two_claims: bool,
 }
 /// The chain program a mock statement reads the exit through: none runs,
 /// the hub makes each receipt's journal itself and a mock proof binds it.
@@ -88,6 +96,7 @@ impl Trust {
             chained: Some(MOCK_CHAIN),
             own_claims: true,
             leaf: true,
+            two_claims: true,
         }
     }
 }
@@ -753,6 +762,12 @@ impl Holder {
             !licash::recovery::leaf_carried(s.quote.graph.id) || ctx.trust.leaf,
             "a graph of id {} carries her claim in a leaf script's envelope, which the program \
              trusted doesn't read",
+            s.quote.graph.id
+        );
+        ensure!(
+            !licash::recovery::two_claims_void(s.quote.graph.id) || ctx.trust.two_claims,
+            "a graph of id {} owes nothing to a claim whose E she signed twice, which the \
+             program trusted doesn't decide",
             s.quote.graph.id
         );
         let g = &s.quote.graph;
@@ -1843,6 +1858,7 @@ mod tests {
                 chained: None,
                 own_claims: false,
                 leaf: false,
+                two_claims: false,
             },
         };
         // A program that decides the lean filing decides the compact too.
@@ -1915,6 +1931,27 @@ mod tests {
                 "graph {graph}, chain {chain:?}, own claims {own_claims}"
             );
         }
+        // A graph whose claims are void signed twice is opened only under
+        // a program that owes them nothing, whatever else it decides.
+        let mut refusal = |graph, two_claims| {
+            q.graph.id = graph;
+            let ctx = Context {
+                trust: Trust {
+                    leaf: true,
+                    two_claims,
+                    ..own(Some([7; 32]), true).trust
+                },
+                ..own(Some([7; 32]), true)
+            };
+            Holder::start(start(&q), &ctx)
+                .err()
+                .map(|e| e.to_string())
+                .filter(|e| e.contains("signed twice"))
+        };
+        let two = licash::recovery::PI1_ALONE_FROM;
+        assert!(refusal(two, false).is_some());
+        assert_eq!(refusal(two, true), None);
+        assert_eq!(refusal(two - 1, false), None);
     }
 
     #[test]
@@ -2741,6 +2778,7 @@ mod tests {
                 chained: None,
                 own_claims: false,
                 leaf: false,
+                two_claims: false,
             },
         };
         assert!(Holder::load(&a.to_bytes(), &[1; 32], &rotated).is_ok());
@@ -2763,6 +2801,7 @@ mod tests {
                     chained: None,
                     own_claims: false,
                     leaf: false,
+                    two_claims: false,
                 }
             }
         )

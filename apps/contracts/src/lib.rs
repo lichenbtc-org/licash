@@ -373,6 +373,7 @@ pub fn trust(profile: ChainProfile) -> Result<Trust> {
             chained: SIGNET_CHAINED.then_some(CHAIN),
             own_claims: SIGNET_OWN_CLAIMS,
             leaf: SIGNET_LEAF,
+            two_claims: SIGNET_TWO_CLAIMS,
         }),
         _ => bail!("contracts are not opened on {profile} yet"),
     }
@@ -425,6 +426,12 @@ pub const SIGNET_OWN_CLAIMS: bool = true;
 /// change as the program that does. Hubs quote a graph of id
 /// [`licash::recovery::LEAF_FROM`] only when it is.
 pub const SIGNET_LEAF: bool = false;
+
+/// Whether [`SIGNET`] owes nothing to a claim whose `E` she signed twice
+/// ([`licash::recovery::two_claims_void`]), as [`SIGNET_LEAF`] says of the
+/// envelopes: set in the same change as the program that does. Hubs quote
+/// a graph of id [`licash::recovery::PI1_ALONE_FROM`] only when it is.
+pub const SIGNET_TWO_CLAIMS: bool = false;
 
 /// The chain program (`r0/chain-guest`) whose receipts [`SIGNET`]'s statement
 /// verifies: the image id kept in `r0/hp-guest/chain.id`, which a build of it

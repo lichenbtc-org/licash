@@ -764,9 +764,13 @@ transaction claiming the same `b` with the same `E`, however its witness
 writes them: a request mined again after a reorg, its digits written
 otherwise or her signatures made again, is answered as pinned. One mined
 again claiming another `b` or `E`, its txid the same (she signed two), is
-answered no more, and the operator is told: her payout of another `b` the
+signed nothing more, and the operator is told: her payout of another `b` the
 hub takes whole by `equiv_b` with her two signatures, before her outputs'
-wait ends; of another `E` alone, her timeout pays her. On mainnet the hub
+wait ends. Of the same `b` and another `E`, a contract of graph id 16 on has
+the hub post its signed response again, which reads the txid alone: its
+statement owes a claim nothing whose `E` her one-time key signed twice, the
+other signature shown in its input with no evidence. Before graph 16, of
+another `E` alone, it responds no more, and her timeout pays her. On mainnet the hub
 decides on a request 6 blocks deep for that. So the hub signs none where it can tell one was:
 the openings keep each answer before it is signed, and one kept with nothing
 pinned for it, as when the pins' rows were lost, is not decided anew. Nor is

@@ -5009,8 +5009,8 @@ async fn a_hub_answers_her_request_mined_again_written_otherwise_after_a_reorg()
 struct Equivocating;
 
 impl Equivocating {
-    fn of(b: u32) -> Self {
-        licash_contracts::holder::recovery::equivocate(Some(b));
+    fn of(other: licash_contracts::holder::recovery::Other) -> Self {
+        licash_contracts::holder::recovery::equivocate(Some(other));
         Self
     }
 }
@@ -5034,7 +5034,7 @@ async fn a_hub_takes_her_payout_by_equiv_b_after_a_reorg_mines_her_other_request
     use licash_contracts::holder::recovery::{self, Stage};
     use serde_json::{json, Value};
 
-    let _equivocating = Equivocating::of(65_536);
+    let _equivocating = Equivocating::of(recovery::Other::B(65_536));
     let s = stale_claim([31; 32]).await?;
     let told = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let alerts = told.clone();
@@ -5145,6 +5145,128 @@ async fn a_hub_takes_her_payout_by_equiv_b_after_a_reorg_mines_her_other_request
         return Ok(());
     }
     anyhow::bail!("never swept: {timeout:?}")
+}
+
+/// Her request, in a block, answered: the hub's response in the mempool,
+/// where no miner takes it. Then a reorg mines her other request in its
+/// place, the same txid and `b` signing another `E`. The hub signs nothing
+/// for it but posts its response again, which reads the txid alone; mined,
+/// her contest (shown no evidence) is met by the hub's assertion, its
+/// statement holding by her two signatures on `E`: her claim owed nothing,
+/// with no evidence. She is paid what the response says, not what she
+/// claims.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_hub_proves_its_response_by_her_two_signatures_on_e_after_a_reorg_mines_her_other_request(
+) -> Result<()> {
+    use licash_contracts::holder::recovery::{self, Stage};
+    use serde_json::{json, Value};
+
+    let _equivocating = Equivocating::of(recovery::Other::E);
+    let s = stale_claim([33; 32]).await?;
+    s.openings.refuse_evidence();
+    // A coin for her contest's fee.
+    let to = s.wallet.fallback_address()?.script_pubkey();
+    s.rt.fund(&to, Amount::from_sat(100_000))?;
+    s.rt.mine(1)?;
+    scan(&s.wallet, &s.chain).await?;
+    let told = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let alerts = told.clone();
+    s.openings.alert_with(Arc::new(move |message: &str| {
+        alerts.lock().unwrap().push(message.to_owned())
+    }));
+    let count = |of: &str| {
+        let told = told.lock().unwrap();
+        told.iter().filter(|m| m.contains(of)).count()
+    };
+    let db = s.mine.join("wallet.sqlite");
+    let advance = || recovery::advance(&s.wallet, &s.chain, &db, s.rate);
+    let node = rpc_of(&s.rt, None)?;
+    let mut request = None;
+    let mut response = None;
+    for _ in 0..200 {
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        let r = advance().await?[0].clone();
+        ensure!(!matches!(r.stage, Stage::Lost | Stage::Done), "{r:?}");
+        if let Some(txid) = r.request.filter(|_| r.response.is_none()) {
+            let main = bitcoin::OutPoint { txid, vout: 0 };
+            if let Some(x) = spending_in_mempool(&s.rt, main)? {
+                if s.rt.confirmations(&txid)?.is_some() {
+                    let _: Value = node
+                        .rpc(
+                            "prioritisetransaction",
+                            json!([x.compute_txid().to_string(), 0, -100_000_000]),
+                        )
+                        .await?;
+                    response = Some(x.compute_txid());
+                    request = Some(txid);
+                    break;
+                }
+            }
+        }
+        s.rt.mine(1)?;
+    }
+    let txid = request.context("the hub never responded")?;
+    let x = response.context("no response")?;
+    let other = recovery::take_equivocation().context("no other request")?;
+    ensure!(other.compute_txid() == txid, "the same transaction");
+    ensure!(other.compute_wtxid() != s.rt.get_tx(&txid)?.compute_wtxid());
+
+    let at = s.rt.confirmations(&txid)?.context("unconfirmed")?;
+    let hash: Value = node.rpc("getblockhash", json!([at])).await?;
+    let _: Option<Value> = node.rpc_optional("invalidateblock", json!([hash])).await?;
+    s.rt.mine_with(std::slice::from_ref(&other))?;
+    ensure!(
+        s.rt.get_tx(&txid)?.compute_wtxid() == other.compute_wtxid(),
+        "her other request mined"
+    );
+    // Out of the mempool by the reorg, its fee as good as none: now as
+    // any, for the hub to post again.
+    ensure!(!s.rt.mempool()?.contains(&x));
+    let _: Value = node
+        .rpc(
+            "prioritisetransaction",
+            json!([x.to_string(), 0, 100_000_000]),
+        )
+        .await?;
+
+    // The hub posts its response again, told once; then miners take it.
+    for _ in 0..20 {
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        if count("another E") > 0 {
+            break;
+        }
+        s.rt.mine(1)?;
+    }
+    ensure!(count("another E") == 1, "{:?}", told.lock().unwrap());
+    ensure!(s.rt.mempool()?.contains(&x), "not posted again");
+
+    let done = played(&s, |_| true).await?;
+    ensure!(
+        done.request == Some(txid) && done.response == Some(x),
+        "{done:?}"
+    );
+    ensure!(done.corrected == Some(98_304), "{done:?}");
+    // Contested and proven, and paid what the response says.
+    ensure!(
+        done.assertion.is_some() && done.challenge.is_none(),
+        "{done:?}"
+    );
+    ensure!(done.payout.is_some() && done.timeout.is_none(), "{done:?}");
+    let received = done.received.context("nothing received")?;
+    ensure!(
+        received < 131_071,
+        "{received} of a claim of 131071: {done:?}"
+    );
+    let told = told.lock().unwrap();
+    ensure!(
+        told.iter()
+            .all(|m| !m.contains("another b or E") && !m.contains("does not hold")),
+        "{told:?}"
+    );
+    Ok(())
 }
 
 /// The transaction of `rt`'s `harness` wallet (the hub's) that funded

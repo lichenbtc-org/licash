@@ -905,16 +905,51 @@ impl Openings {
         let pins = Responses::open(&self.data)?;
         // Her request in a block is not the one the hub answered, its txid
         // the same (a reorganization mined her other): it signs nothing
-        // for it, nor posts its response again, which reads the txid alone
-        // but would commit it to a proof of the other's `E`. Her payout of
-        // another `b` it takes by `equiv_b`.
-        if pins.other_request(id, r)?.is_some() {
+        // for it. Her payout of another `b` it takes by `equiv_b`. Of the
+        // same `b` and another `E`, a contract whose claims are void signed
+        // twice has its response posted again, which reads the txid alone:
+        // its statement holds of it by her other signature on `E`. Of
+        // another, it posts none, which would commit it to a proof of the
+        // other's `E`.
+        if let Some(pinned) = pins.other_request(id, r)? {
+            let response = match self.only_e_differs(o, &pinned, r)? {
+                true => pins.response(id)?,
+                false => None,
+            };
+            if let Some(response) = response {
+                if self.once(id, "another E") {
+                    self.alert(&format!(
+                        "contract {}: her request was mined again signing another E than the \
+                         one the hub answered (a reorganization). It posts its response \
+                         again, and proves her claim owed nothing by her two signatures \
+                         on E.",
+                        crate::hex_id(id)
+                    ));
+                }
+                let b_prime = graph::responded(&o.base, &response)?;
+                let window = (r_at, respond_deadline(o, r_at));
+                let unit = Amount::from_sat(o.base.parts().graph.unit_sats);
+                let stake = unit * u64::from(b.saturating_sub(b_prime));
+                self.post_link(
+                    id,
+                    hub,
+                    "respond",
+                    &response,
+                    &r.output[0],
+                    window,
+                    stake,
+                    tip,
+                )
+                .await?;
+                return Ok(Played::Posted("respond"));
+            }
             if self.once(id, "another request") {
                 self.alert(&format!(
                     "contract {}: her request was mined again signing another b or E than \
                      the one the hub answered (a reorganization). It responds no more: \
                      her payout of another b it takes by equiv_b; of another E alone, \
-                     her timeout pays her what she claims.",
+                     her timeout pays her what she claims, and should its response be \
+                     mined, her contest her claim and the hub's reserve.",
                     crate::hex_id(id)
                 ));
             }
@@ -1756,7 +1791,14 @@ impl Openings {
             .spend(slot, &r.output[slot.vout as usize], r_at, tip)
             .await?
             .context("responded with no publication")?;
-        let evidence = pinned_evidence(o, pinned)?;
+        // Her other signature on `E`, if a reorganization mined her request
+        // signing another `E` than the one the hub answered: her claim owed
+        // nothing by it, with no evidence and no disclosure.
+        let other_e = self.other_e(id, o, r)?;
+        let evidence = match other_e {
+            Some(_) => Vec::new(),
+            None => pinned_evidence(o, pinned)?,
+        };
         let disclosures = recovery::disclosures(&evidence).map_err(|e| anyhow!("{e}"))?;
         let disclosure = if disclosures == Disclosures::empty() {
             None
@@ -1807,6 +1849,7 @@ impl Openings {
                     (&p_block, &p.compute_txid()),
                     (&x_block, &x.compute_txid()),
                     disclosure_block,
+                    other_e,
                     (last, tip),
                 )
                 .await;
@@ -1822,8 +1865,12 @@ impl Openings {
             disclosure_block,
         )?;
         // The items of her filing it proves invalid, which it finds itself.
-        let invalid =
-            licash_hp::flagged(&o.base, &keys, &exit, &evidence).map_err(|e| anyhow!("{e}"))?;
+        let invalid = match other_e {
+            Some(_) => 0,
+            None => {
+                licash_hp::flagged(&o.base, &keys, &exit, &evidence).map_err(|e| anyhow!("{e}"))?
+            }
+        };
         let input = licash_hp::HubInput {
             base: o.base.clone(),
             exit,
@@ -1831,6 +1878,7 @@ impl Openings {
             keys,
             invalid,
             chain: None,
+            other_e,
         };
         match licash_hp::check(&input) {
             Ok(j) if j == graph::journal(&o.base) => Ok(Ok((input, None))),
@@ -1855,6 +1903,7 @@ impl Openings {
         publish: (&Block, &bitcoin::Txid),
         respond: (&Block, &bitcoin::Txid),
         disclosure: Option<(&Block, &bitcoin::Txid)>,
+        other_e: Option<Vec<Vec<u8>>>,
         (last, tip): (u32, u32),
     ) -> Result<std::result::Result<(licash_hp::HubInput, Option<std::path::PathBuf>), Played>>
     {
@@ -1897,7 +1946,15 @@ impl Openings {
                     journal: &receipt.journal,
                     tip: &receipt.tip,
                 };
-                licash_hp::open_chain(proven, &o.base, &keys, &exit, &evidence, &program)
+                licash_hp::open_chain(
+                    proven,
+                    &o.base,
+                    &keys,
+                    &exit,
+                    &evidence,
+                    other_e.as_deref(),
+                    &program,
+                )
             })
             .context("the hub's header chain is gone")?
             .map_err(|e| anyhow!("the chain's openings: {e}"))?;
@@ -1906,8 +1963,11 @@ impl Openings {
             program: &program,
         };
         // The items of her filing it proves invalid, which it finds itself.
-        let invalid = licash_hp::flagged_on(&o.base, &keys, &exit, &evidence, chained)
-            .map_err(|e| anyhow!("{e}"))?;
+        let invalid = match other_e {
+            Some(_) => 0,
+            None => licash_hp::flagged_on(&o.base, &keys, &exit, &evidence, chained)
+                .map_err(|e| anyhow!("{e}"))?,
+        };
         let input = licash_hp::HubInput {
             base: o.base.clone(),
             exit,
@@ -1915,6 +1975,7 @@ impl Openings {
             keys,
             invalid,
             chain: Some(proof),
+            other_e,
         };
         match licash_hp::check_on(&input, &program) {
             Ok(j) if j == graph::journal(&o.base) => Ok(Ok((input, Some(receipt.file)))),
@@ -2660,6 +2721,58 @@ impl Openings {
             return Ok(Played::Posted("sweep"));
         }
         Ok(Played::Idle)
+    }
+
+    /// Whether `pinned`, the request the hub answered, is `r` by its txid
+    /// and signs its `b` but another `E`, in a contract whose claims are
+    /// void signed twice ([`recovery::two_claims_void`]).
+    fn only_e_differs(
+        &self,
+        o: &HubOpening,
+        pinned: &Transaction,
+        r: &Transaction,
+    ) -> Result<bool> {
+        if !recovery::two_claims_void(o.base.parts().graph.id)
+            || pinned.compute_txid() != r.compute_txid()
+        {
+            return Ok(false);
+        }
+        let ((b1, e1), (b2, e2)) = (
+            HubProves::requested_word(pinned)?,
+            HubProves::requested_word(r)?,
+        );
+        Ok(b1 == b2 && e1 != e2)
+    }
+
+    /// Her other signature on `E`, as her request's witness carries it
+    /// (bottom first, [`licash_hp::HubInput::other_e`]), if the request the
+    /// hub pinned for opening `id` is `r` by its txid but signs another
+    /// `E`, in a contract whose claims are void signed twice. None
+    /// otherwise.
+    fn other_e(
+        &self,
+        id: &[u8; 32],
+        o: &HubOpening,
+        r: &Transaction,
+    ) -> Result<Option<Vec<Vec<u8>>>> {
+        let Some(pinned) = Responses::open(&self.data)?.other_request(id, r)? else {
+            return Ok(None);
+        };
+        if !recovery::two_claims_void(o.base.parts().graph.id)
+            || pinned.compute_txid() != r.compute_txid()
+            || HubProves::requested_word(&pinned)?.1 == HubProves::requested_word(r)?.1
+        {
+            return Ok(None);
+        }
+        let witness = &pinned.input[0].witness;
+        let items = licash_hp::RequestKeys::e_items();
+        ensure!(
+            witness.len() > items,
+            "her pinned request's witness is short"
+        );
+        Ok(Some(
+            witness.iter().take(items).map(<[u8]>::to_vec).collect(),
+        ))
     }
 
     /// Her other signature on `b`'s one-time key, as the payout's leaves

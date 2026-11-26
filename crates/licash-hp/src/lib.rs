@@ -218,31 +218,48 @@ impl RequestKeys {
             && signs(&witness[..e_items], &self.e, 32)
             && signs(&witness[e_items..], &self.b, 4)
     }
+
+    /// The items of a signature on `E` (bottom first, as in her request's
+    /// witness): `2 * 67`.
+    pub fn e_items() -> usize {
+        2 * digits(32)
+    }
+
+    /// The message digits `items`, exactly a signature on `E`'s worth
+    /// ([`Self::e_items`]), sign under the key on `E`, each read as the
+    /// script reads it: none if they sign none.
+    fn e_signed(&self, items: &[&[u8]]) -> Option<Vec<u32>> {
+        (items.len() == Self::e_items())
+            .then(|| signed_digits(items, &self.e, 32))
+            .flatten()
+    }
 }
 
 /// Whether `items` (bottom first: `hash_0, digit_0, hash_1, …`) are a
 /// Winternitz signature on `bytes` bytes under the chain ends `keys`.
 fn signs(items: &[&[u8]], keys: &[[u8; 20]], bytes: usize) -> bool {
+    signed_digits(items, keys, bytes).is_some()
+}
+
+/// The message digits of `items` if they are a signature as [`signs`]
+/// takes one, each as the script reads it ([`script_digit`]).
+fn signed_digits(items: &[&[u8]], keys: &[[u8; 20]], bytes: usize) -> Option<Vec<u32>> {
     let mut read = Vec::with_capacity(keys.len());
     for (i, end) in keys.iter().enumerate() {
-        let (Some(item), Some(digit)) = (items.get(2 * i), items.get(2 * i + 1)) else {
-            return false;
-        };
-        let Some(digit) = script_digit(digit) else {
-            return false;
-        };
+        let (item, digit) = (items.get(2 * i)?, items.get(2 * i + 1)?);
+        let digit = script_digit(digit)?;
         let mut h = item.to_vec();
         for _ in digit..15 {
             h = hash160::Hash::hash(&h).to_byte_array().to_vec();
         }
         if h != end {
-            return false;
+            return None;
         }
         read.push(u32::from(digit));
     }
     let (message, checksum) = read.split_at(2 * bytes);
     let sum: u32 = message.iter().map(|d| 15 - d).sum();
-    checksum.iter().fold(0, |value, d| value * 16 + d) == sum
+    (checksum.iter().fold(0, |value, d| value * 16 + d) == sum).then(|| message.to_vec())
 }
 
 /// The statement's input: Base, the exit as the Hub shows it, its
@@ -262,6 +279,13 @@ pub struct HubInput {
     /// after the chain's tip; of another, none and the exit's headers are
     /// every one from the checkpoint.
     pub chain: Option<ChainProof>,
+    /// Of a contract whose claims are void signed twice
+    /// ([`recovery::two_claims_void`]), her other signature on another `E`,
+    /// if the Hub holds one: the items of her other request's witness
+    /// signing it ([`RequestKeys::e_items`], bottom first). With it, no
+    /// evidence and nothing flagged; the claim is owed nothing. Of another
+    /// contract, none, and nothing of it in its bytes.
+    pub other_e: Option<Vec<Vec<u8>>>,
 }
 
 impl HubInput {
@@ -276,6 +300,17 @@ impl HubInput {
         }
         if let Some(chain) = &self.chain {
             chain.write(&mut w);
+        }
+        if recovery::two_claims_void(self.base.parts().graph.id) {
+            match &self.other_e {
+                None => w.put(&[0]),
+                Some(items) => {
+                    w.put(&[1]);
+                    for item in items {
+                        w.bytes(item);
+                    }
+                }
+            }
         }
         w.0
     }
@@ -303,6 +338,25 @@ impl HubInput {
             true => Some(ChainProof::read(&mut r)?),
             false => None,
         };
+        let other_e = match recovery::two_claims_void(p.graph.id) {
+            true => match r.take::<1>().map_err(|_| Refusal::Input)? {
+                [0] => None,
+                [1] => Some(
+                    (0..RequestKeys::e_items())
+                        .map(|_| {
+                            // A hash of 20 bytes, a digit of 1 at most.
+                            let item = r.bytes().map_err(|_| Refusal::Input)?;
+                            match item.len() <= 20 {
+                                true => Ok(item),
+                                false => Err(Refusal::Input),
+                            }
+                        })
+                        .collect::<Result<_, _>>()?,
+                ),
+                _ => return Err(Refusal::Input),
+            },
+            false => None,
+        };
         r.end().map_err(|_| Refusal::Input)?;
         Ok(Self {
             base,
@@ -311,6 +365,7 @@ impl HubInput {
             keys,
             invalid,
             chain,
+            other_e,
         })
     }
 }
@@ -332,7 +387,7 @@ pub fn decide(
     exit: &Exit,
     evidence: &[Evidence],
 ) -> Result<(Owed, Read), Refusal> {
-    decide_with(base, keys, exit, evidence, None, None, &mut |_| {})
+    decide_with(base, keys, exit, evidence, None, None, None, &mut |_| {})
 }
 
 /// The items of her filing the statement must flag as invalid, to prove the
@@ -362,7 +417,16 @@ pub fn flagged_on(
     evidence: &[Evidence],
     chained: Chained,
 ) -> Result<u32, Refusal> {
-    let decided = decide_with(base, keys, exit, evidence, None, Some(chained), &mut |_| {})?;
+    let decided = decide_with(
+        base,
+        keys,
+        exit,
+        evidence,
+        None,
+        None,
+        Some(chained),
+        &mut |_| {},
+    )?;
     Ok(decided.0.invalid)
 }
 
@@ -372,13 +436,16 @@ pub fn flagged_on(
 /// of the claim reads. Which those are only the
 /// judgment knows: it is run, and the blocks it finds it was not shown are
 /// opened and it is run again, until it asks for none. `exit`'s headers are
-/// those after the chain's tip.
+/// those after the chain's tip. With her other signature on `E`,
+/// `other_e` ([`HubInput::other_e`]), the claim is not judged: the exit's
+/// blocks alone are opened.
 pub fn open_chain(
     proven: headers::Proven,
     base: &Base,
     keys: &RequestKeys,
     exit: &Exit,
     evidence: &[Evidence],
+    other_e: Option<&[Vec<u8>]>,
     program: &Program,
 ) -> Result<ChainProof, Refusal> {
     let headers::Proven {
@@ -413,7 +480,16 @@ pub fn open_chain(
             proof: &proof,
             program,
         };
-        match decide_with(base, keys, exit, evidence, None, Some(chained), &mut |_| {}) {
+        match decide_with(
+            base,
+            keys,
+            exit,
+            evidence,
+            None,
+            other_e,
+            Some(chained),
+            &mut |_| {},
+        ) {
             Err(Refusal::Openings(more)) => {
                 let before = heights.len();
                 heights.extend(more);
@@ -436,12 +512,19 @@ pub fn open_chain(
 /// input does not open leaves the Hub unable to prove ([`Refusal::Openings`]),
 /// and never leaves the claim owed nothing, which the Hub could otherwise
 /// choose by leaving it out.
+///
+/// Of a contract whose claims are void signed twice
+/// ([`recovery::two_claims_void`]), `other_e`, her signature on another `E`
+/// than her request's ([`HubInput::other_e`]), owes the claim nothing, its
+/// filing unread: with no evidence and nothing flagged, and none other.
+#[allow(clippy::too_many_arguments)]
 pub fn decide_with(
     base: &Base,
     keys: &RequestKeys,
     exit: &Exit,
     evidence: &[Evidence],
     invalid: Option<u32>,
+    other_e: Option<&[Vec<u8>]>,
     chained: Option<Chained>,
     mark: &mut dyn FnMut(&'static str),
 ) -> Result<(Owed, Read), Refusal> {
@@ -483,6 +566,28 @@ pub fn decide_with(
         return Err(Refusal::Unsigned);
     }
     mark("her request's one-time signatures");
+    if let Some(other) = other_e {
+        let two = recovery::two_claims_void(base.parts().graph.id)
+            && evidence.is_empty()
+            && invalid.unwrap_or(0) == 0;
+        let other: Vec<&[u8]> = other.iter().map(Vec::as_slice).collect();
+        let items = RequestKeys::e_items();
+        let (Some(theirs), Some(hers)) = (keys.e_signed(&other), keys.e_signed(&witness[..items]))
+        else {
+            return Err(Refusal::Unsigned);
+        };
+        if !two || theirs == hers {
+            return Err(Refusal::Input);
+        }
+        let owed = Owed {
+            owed: 0,
+            mask: 0,
+            invalid: 0,
+            disclosures: Disclosures::empty(),
+            ineligible: Some("her one-time key on E signed two claims".into()),
+        };
+        return Ok((owed, read));
+    }
     let terms = &base.parts().chain;
     let chain = match &view {
         None => chain(base, through_publication(&contract, exit, &read))?,
@@ -553,6 +658,7 @@ pub fn check_with(
         &input.exit,
         &input.evidence,
         Some(input.invalid),
+        input.other_e.as_deref(),
         chained,
         mark,
     )?;
