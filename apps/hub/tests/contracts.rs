@@ -569,7 +569,7 @@ async fn a_wallet_quoted_before_the_hub_surcharged_opens_on_a_quote_asked_again(
     };
     let first = holder::open(&wallet, &chain, &mine.join("wallet.sqlite"), &url, ask).await?;
     ensure!(
-        first.phase == Phase::Funded && first.price == 23_000,
+        first.phase == Phase::Funded && first.price == 28_000,
         "{first:?}"
     );
 
@@ -594,14 +594,14 @@ async fn a_wallet_quoted_before_the_hub_surcharged_opens_on_a_quote_asked_again(
 }
 
 /// The opening fee of every hub here, before its surcharge: the fee these
-/// tests' coins are sized by, a fixed contract's price 23 000 sat, the
+/// tests' coins are sized by, a fixed contract's price 28 000 sat, the
 /// default once. What a hub charges by default is pinned by its terms' own
 /// tests.
 const OPENING_FEE: u64 = 3_000;
 
 /// A coin an opening spends whole, no change coming back: a fixed contract's
-/// price, 23 000 sat, and what is left of it hers to fund, in notes.
-const COIN: u64 = 24_000;
+/// price, 28 000 sat, and what is left of it hers to fund, in notes.
+const COIN: u64 = 29_000;
 
 fn ask() -> Ask {
     Ask {
@@ -634,7 +634,7 @@ async fn a_wallet_opens_contracts_at_a_hub_and_sees_them_confirm() -> Result<()>
     )?;
     let info = wallet.add_hub(&url).await?;
     let offered = info.contracts.context("no contracts in the hub's info")?;
-    ensure!(offered.mock && offered.cap == 131_071 && offered.price == 23_000);
+    ensure!(offered.mock && offered.cap == 131_071 && offered.price == 28_000);
     // With none open and its wallet funded, its info says it has room
     // for one: what a wallet chooses a hub by before paying a deposit.
     ensure!(
@@ -671,7 +671,7 @@ async fn a_wallet_opens_contracts_at_a_hub_and_sees_them_confirm() -> Result<()>
     let tip = rt.height()?;
     let first = holder::open(&wallet, &chain, &mine.join("wallet.sqlite"), &url, ask()).await?;
     ensure!(first.phase == Phase::Funded, "{first:?}");
-    ensure!(first.mock && first.cap == 131_071 && first.price == 23_000);
+    ensure!(first.mock && first.cap == 131_071 && first.price == 28_000);
     ensure!(first.value == COIN && first.abandoned.is_none());
     ensure!((first.close_height, first.assert_height) == (tip + 300, tip + 134));
     let f = first.funding.context("no F")?;
@@ -834,11 +834,11 @@ async fn a_wallet_opens_a_contract_of_terms_it_chose_on_a_small_coin() -> Result
     ensure!((chosen.min_blocks, chosen.max_blocks, chosen.per_coin) == (200, 5_000, u32::MAX));
     // Its fixed terms priced by the same formula: 1% a year of their cap.
     let fixed_price = chosen.price(131_071, 1_000, 0);
-    ensure!(fixed_price == 23_000 + 24, "{fixed_price}");
+    ensure!(fixed_price == 28_000 + 24, "{fixed_price}");
     ensure!(offered.cap == 131_071 && offered.price == fixed_price && offered.blocks == 1_000);
     // 2^21 - 1 sat over 2 000 blocks: 1% a year of it over the fixed fee.
     let price = chosen.price(2_097_151, 2_000, 0);
-    ensure!(price == 23_000 + 798, "{price}");
+    ensure!(price == 28_000 + 798, "{price}");
 
     // Asked of terms she chose: those exactly, a graph as wide as them.
     let offer = holder::offer(&wallet, &url, Some((2_097_151, 2_000)), 0).await?;
@@ -1359,7 +1359,7 @@ async fn a_holder_claims_the_notes_she_funded_that_a_silent_hub_never_issued() -
     )?;
     wallet.add_hub(&url).await?;
     wallet.watch_silent(None, rt.height()?)?;
-    // The price of a hub's one contract, 23 000 sat, and 3 000 hers.
+    // The price of a hub's one contract, 28 000 sat, and 3 000 hers.
     let to = wallet.fallback_address()?.script_pubkey();
     rt.fund(&to, Amount::from_sat(26_000))?;
     rt.mine(1)?;
@@ -5532,7 +5532,10 @@ async fn disclosed_uncontested(nulldata: bool, apart: bool) -> Result<()> {
     );
     let enveloped = (disclosure.input.get(1))
         .and_then(|i| i.witness.nth(1))
-        .is_some_and(|script| script.len() > 100 && script.last() == Some(&0x68));
+        .is_some_and(|script| {
+            // `<key> OP_CHECKSIG OP_FALSE OP_IF <pushes> OP_ENDIF`.
+            script.get(33..36) == Some(&[0xac, 0x00, 0x63][..]) && script.last() == Some(&0x68)
+        });
     ensure!(enveloped != nulldata, "{disclosure:?}");
     eprintln!(
         "{}: P {} vB (fee {}), disclosure {} vB (fee {})",
