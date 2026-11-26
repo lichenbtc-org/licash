@@ -148,7 +148,8 @@ pub async fn open_anyway<T: Transport, C: Chain>(
 
 /// One opening as [`open_once`], or, refused as the hub quotes otherwise
 /// now (its fee surcharged since, say), given up and made once more on a
-/// quote asked anew: within her ceilings still.
+/// quote asked anew: within her ceilings still. Turned away busy at its
+/// start, made anew a while later, as [`driver::Busy`] waits.
 async fn open_at<T: Transport, C: Chain>(
     wallet: &Wallet<T>,
     chain: &C,
@@ -158,13 +159,23 @@ async fn open_at<T: Transport, C: Chain>(
     sane: bool,
     resumes: u32,
 ) -> Result<Contract> {
-    let opened = open_once(wallet, chain, wallet_file, hub, ask, sane, resumes).await;
-    match opened {
-        Err(e) if e.downcast_ref::<driver::Requote>().is_some() => {
-            tracing::info!(%hub, "its quote refused as the hub's no longer: asked again: {e:#}");
-            open_once(wallet, chain, wallet_file, hub, ask, sane, resumes).await
+    let (mut requoted, mut busy, mut again) = (false, driver::Busy::default(), 0);
+    loop {
+        match open_once(wallet, chain, wallet_file, hub, ask, sane, resumes).await {
+            Err(e) if !requoted && e.downcast_ref::<driver::Requote>().is_some() => {
+                tracing::info!(%hub, "its quote refused as the hub's no longer: asked again: {e:#}");
+                requoted = true;
+            }
+            Err(e)
+                if e.downcast_ref::<driver::Later>().is_some()
+                    && again < driver::OPENS_AGAIN
+                    && busy.wait().await =>
+            {
+                again += 1;
+                tracing::info!(%hub, again, "turned away busy: opening again: {e:#}");
+            }
+            opened => return opened,
         }
-        opened => opened,
     }
 }
 
@@ -341,6 +352,7 @@ async fn open_once<T: Transport, C: Chain>(
         id,
         holder: Some(holder),
         quote: Some(offer.quote),
+        took_f: Default::default(),
     };
     let driven = driver.drive(outs).await;
     let driven = driver.carry_on(driven, resumes).await;
@@ -410,6 +422,11 @@ pub async fn resume<T: Transport, C: Chain>(
         if overdue(contract.phase, contract.created_at, now) {
             tracing::warn!(id = %crate::hex_id(&id), "an opening not opened in a day: given up");
             store.abandon(&id, "not opened in a day")?;
+            // Reserved if she signed her deposit into F, a step unstored:
+            // her signature never left.
+            if let Some(f) = contract.funding {
+                let _ = wallet.abandon_silent(&f);
+            }
             continue;
         }
         let (state, _) = store.state(&id)?;
@@ -436,11 +453,21 @@ pub async fn resume<T: Transport, C: Chain>(
             id,
             holder: Some(holder),
             quote: None,
+            took_f: Default::default(),
         };
-        let resumed = driver.resume().await;
+        // Her coin taken back from F, which she signed first: nothing more
+        // to tell its hub.
+        let resumed = match canceled(wallet, driver.holder()) {
+            Some(_) => Ok(()),
+            None => driver.resume().await,
+        };
         if let Err(e) = driver.settle(resumed) {
             tracing::warn!(id = %crate::hex_id(&id), "resuming an opening: {e:#}");
-            continue;
+            // Her deposit signed into F: watched all the same, and her
+            // coin taken back if the hub never answers F whole.
+            if driver.holder().phase() < Phase::Funded {
+                continue;
+            }
         }
         if let Err(e) = refresh(&driver, chain).await {
             tracing::warn!(id = %crate::hex_id(&id), "watching F: {e:#}");
@@ -925,8 +952,15 @@ pub async fn offer<T: Transport>(
     if !asked.is_empty() {
         url.push_str(&format!("?{}", asked.join("&")));
     }
-    let response = wallet.transport().request(&url, None).await;
-    let response = response.map_err(|e| anyhow!("{hub}: {e}"))?;
+    // Turned away busy, asked again a while: see [`driver::Busy`].
+    let mut busy = driver::Busy::default();
+    let response = loop {
+        let response = wallet.transport().request(&url, None).await;
+        let response = response.map_err(|e| anyhow!("{hub}: {e}"))?;
+        if response.status != 503 || !busy.wait().await {
+            break response;
+        }
+    };
     ensure!(
         response.status == 200,
         "{hub} offers no contracts{}: status {}: {}",
@@ -1042,9 +1076,16 @@ fn smallest(coins: Vec<SilentCoin>, least: u64) -> Option<SilentCoin> {
         .min_by_key(|c| c.value)
 }
 
+/// How many blocks after she signed her deposit into F first, F in none
+/// and in no mempool her chain sees, she takes her coin back
+/// ([`refresh`]): the hub, which alone holds F whole, withholds it, or
+/// never heard.
+pub const F_UNSEEN: u32 = 6;
+
 /// Watch the F of the opening `driver` drives, once she signed it: its
 /// fate stored, her coin freed if F can never confirm, or once it lapsed
-/// unconfirmed.
+/// unconfirmed; or spent back to her, if she signed first and F is seen
+/// nowhere [`F_UNSEEN`] blocks on.
 async fn refresh<T: Transport, C: Chain>(driver: &Driver<'_, T, C>, chain: &C) -> Result<()> {
     let holder = driver.holder();
     if holder.phase() != Phase::Funded {
@@ -1068,6 +1109,8 @@ async fn refresh<T: Transport, C: Chain>(driver: &Driver<'_, T, C>, chain: &C) -
         // Freed already, or spent: nothing to free.
         let _ = driver.wallet.abandon_silent(&txid);
         tracing::warn!(id = %crate::hex_id(&driver.id), %txid, ?fate, "F will not confirm: her coin freed");
+    } else if fate == Fate::Open && cancel(driver, chain, holder, tip, block.is_some()).await? {
+        // Canceled: F confirms no more, but a block taking it before.
     } else if fate == Fate::Open {
         // Her coin kept for F: a wallet rewinding past it, as a reorg
         // makes it, forgets what reserved it. Refused once a block
@@ -1077,6 +1120,101 @@ async fn refresh<T: Transport, C: Chain>(driver: &Driver<'_, T, C>, chain: &C) -
         }
     }
     Ok(())
+}
+
+/// Whether she canceled F, which she signed first: her deposit spent by
+/// her wallet otherwise, with the height of the block it is spent in, if
+/// any.
+fn canceled<T: Transport>(wallet: &Wallet<T>, holder: &Holder) -> Option<Option<u32>> {
+    let f = holder.funding()?;
+    holder.signed_at()?;
+    let deposit = f.tx.input[f.deposit].previous_output;
+    match wallet.silent_spender(&deposit) {
+        Ok(Some((by, at))) if by != f.tx.compute_txid() => Some(at),
+        _ => None,
+    }
+}
+
+/// Her coin spent back to her wallet, the cancel broadcast, if she signed
+/// her deposit into F first and F is in no block (`in_block`, however
+/// shallow) nor in a mempool her chain sees, [`F_UNSEEN`] blocks after she
+/// signed: whether she canceled, now or before. F answered whole is handed
+/// to the network first, and canceled only if refused (signed otherwise
+/// by the hub, say): she never checks its signatures. The cancel pays at
+/// most F's rate, so that it never takes the place of an F a mempool
+/// holds, which may confirm still: it is left waiting there. One her
+/// wallet cannot make (her coin no longer kept for F) is left undone.
+async fn cancel<T: Transport, C: Chain>(
+    driver: &Driver<'_, T, C>,
+    chain: &C,
+    holder: &Holder,
+    tip: u32,
+    in_block: bool,
+) -> Result<bool> {
+    let (Some(f), Some(at)) = (holder.funding(), holder.signed_at()) else {
+        return Ok(false);
+    };
+    let txid = f.tx.compute_txid();
+    let id = crate::hex_id(&driver.id);
+    match canceled(driver.wallet, holder) {
+        // In a block: nothing more to do.
+        Some(Some(_)) => return Ok(true),
+        // Broadcast again below.
+        Some(None) => {}
+        None => {
+            if in_block || tip < at.saturating_add(F_UNSEEN) {
+                return Ok(false);
+            }
+            match chain.in_mempool(&txid).await {
+                Ok(Some(true)) => return Ok(false),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(%id, %txid, "is F in a mempool: {e}");
+                    return Ok(false);
+                }
+            }
+            // F whole, taken from her this time already, or now: it may
+            // confirm still.
+            if holder.wholly_funded() {
+                if driver.took_f.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Ok(false);
+                }
+                match chain.broadcast(f.tx).await {
+                    Ok(()) => {
+                        tracing::warn!(%id, %txid, "F seen nowhere since she signed it: broadcast again");
+                        return Ok(false);
+                    }
+                    Err(e) => tracing::warn!(%id, %txid, "F answered whole, refused: {e}"),
+                }
+            }
+        }
+    }
+    let paid = (f.prevouts.iter().map(|o| o.value.to_sat()).sum::<u64>())
+        .saturating_sub(f.tx.output.iter().map(|o| o.value.to_sat()).sum());
+    // F's rate as she holds it, the hub's inputs unsigned: more than it
+    // pays, yet her cancel, smaller, pays less than F in all, as one
+    // taking its place must not.
+    let most =
+        bitcoin::FeeRate::from_sat_per_kwu((paid * 1_000 / f.tx.weight().to_wu().max(1)).max(250));
+    let rate = match chain.fee_rate(6).await {
+        Ok(Some(rate)) => rate.min(most),
+        _ => most,
+    };
+    let tx = match driver.wallet.cancel_signed(f.tx, f.deposit, rate) {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::debug!(%id, %txid, "her coin not canceled: {e}");
+            return Ok(false);
+        }
+    };
+    let by = tx.compute_txid();
+    match chain.broadcast(&tx).await {
+        Ok(()) => {
+            tracing::warn!(%id, %txid, cancel = %by, "F seen nowhere since she signed it: her coin spent back")
+        }
+        Err(e) => tracing::warn!(%id, %txid, cancel = %by, "broadcasting her cancel of F: {e}"),
+    }
+    Ok(true)
 }
 
 fn found(store: &Store, id: &[u8; 32]) -> Result<Contract> {

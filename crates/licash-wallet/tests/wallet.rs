@@ -167,6 +167,41 @@ async fn a_payment_cut_off_at_any_step_finishes_on_resume() {
     }
 }
 
+/// As [`a_payment_cut_off_at_any_step_finishes_on_resume`], the hub
+/// stopped and started again on its files between the step cut off and
+/// her resumption: what it committed before it stopped holds, and the
+/// payment is made once.
+#[tokio::test]
+async fn a_payment_cut_off_at_any_step_finishes_after_the_hub_restarts() {
+    for (path, fault) in [
+        (OFFER, Fault::Lost),
+        (OFFER, Fault::Dropped),
+        (RELEASE, Fault::Lost),
+        (RELEASE, Fault::Dropped),
+    ] {
+        let net = network();
+        let (alice, bob) = (party(&net, 1).await, party(&net, 2).await);
+        alice.receive(&net.pay(HUB, &alice.address(), 64)).unwrap();
+        net.fail(path, fault);
+        let id = match alice.send(HUB, &bob.address(), 10).await {
+            Err(Error::Pending { id, .. }) => id,
+            other => panic!("{path} {fault:?}: {other:?}"),
+        };
+        net.restart(HUB);
+
+        let resumed = alice.resume().await.unwrap();
+        assert_eq!(resumed.paid.len(), 1, "{path} {fault:?}: {resumed:?}");
+        assert_eq!(resumed.paid[0].id, id);
+        assert_eq!(bob.receive(&resumed.paid[0].payment).unwrap().amount, 10);
+        assert_eq!(available(&alice), (52, 0), "{path} {fault:?}");
+        assert!(alice.resume().await.unwrap().paid.is_empty());
+        // Bob's notes spend at the hub restarted, as any.
+        let carol = party(&net, 3).await;
+        let paid = bob.send(HUB, &carol.address(), 4).await.unwrap();
+        assert_eq!(carol.receive(&paid.payment).unwrap().amount, 4);
+    }
+}
+
 #[tokio::test]
 async fn a_wallet_reopened_resumes_where_it_stopped() {
     let net = network();

@@ -1425,6 +1425,98 @@ impl<T: Transport> Wallet<T> {
         Ok(signed)
     }
 
+    /// Cancel the wallet's input `index` of `tx`, another party's
+    /// transaction it signed ([`Wallet::sign_input`]), which it cannot
+    /// broadcast: the coin spent whole back to the wallet's change address
+    /// at `rate`, signed and recorded as its spend in the place of `tx`, for
+    /// the application to broadcast. Asked again, the cancel made before.
+    /// Refused unless the coin is the wallet's, reserved for `tx` or so
+    /// canceled, and in no block spent; or if what is left is dust.
+    pub fn cancel_signed(
+        &self,
+        tx: &Transaction,
+        index: usize,
+        rate: FeeRate,
+    ) -> Result<Transaction, Error> {
+        let Some(input) = tx.input.get(index) else {
+            return Err(Error::Invalid(format!("no input {index}")));
+        };
+        let outpoint = input.previous_output;
+        let txid = tx.compute_txid();
+        let keys = &self.keys.silent;
+        let cancel = self.store.write(|t| {
+            let Some((held, spent_by)) = coin(t, &outpoint)? else {
+                return Err(Error::Invalid(format!(
+                    "coin {outpoint}: not the wallet's, or spent"
+                )));
+            };
+            match spent_by {
+                Some(by) if by == txid => {}
+                Some(by) => {
+                    let made: Option<Vec<u8>> = t
+                        .query_row(
+                            "SELECT tx FROM silent_spends WHERE txid = ?1",
+                            [by.to_byte_array()],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    let made = made
+                        .map(|m| bitcoin::consensus::deserialize::<Transaction>(&m))
+                        .transpose()
+                        .map_err(invalid)?;
+                    return match made {
+                        Some(m) if m.input.len() == 1 && m.input[0].previous_output == outpoint => {
+                            Ok(m)
+                        }
+                        _ => Err(Error::NoteTaken),
+                    };
+                }
+                None => {
+                    return Err(Error::Invalid(format!(
+                        "coin {outpoint}: signed into no transaction {txid}"
+                    )))
+                }
+            }
+            let secret = keys.spend_secret(&held.found).map_err(invalid)?;
+            let change = keys.scanner([]).labeled(CHANGE);
+            let script = silent::outputs(&[(secret, true)], &[outpoint], &[change])
+                .map_err(invalid)?
+                .into_iter()
+                .map(p2tr)
+                .next()
+                .expect("the change's output");
+            let mut output = TxOut {
+                value: Amount::ZERO,
+                script_pubkey: script,
+            };
+            let fee = fee(1, std::slice::from_ref(&output), rate);
+            let dust = output.script_pubkey.minimal_non_dust().to_sat();
+            output.value = Amount::from_sat(
+                held.value
+                    .checked_sub(fee)
+                    .filter(|back| *back >= dust)
+                    .ok_or(Error::Insufficient {
+                        needed: fee.saturating_add(dust),
+                        available: held.value,
+                    })?,
+            );
+            let cancel = sign(&[held], &[secret], vec![output])?;
+            let new = cancel.compute_txid().to_byte_array();
+            t.execute(
+                "INSERT INTO silent_spends (txid, tx, created_at) VALUES (?1, ?2, ?3)",
+                params![new, bitcoin::consensus::serialize(&cancel), now()],
+            )?;
+            t.execute(
+                "UPDATE silent_coins SET spent_by = ?3
+                 WHERE txid = ?1 AND vout = ?2 AND spent_height IS NULL",
+                params![outpoint.txid.to_byte_array(), outpoint.vout, new],
+            )?;
+            Ok(cancel)
+        })?;
+        tracing::info!(%txid, cancel = %cancel.compute_txid(), %outpoint, "silent payment coin signed for another's transaction canceled");
+        Ok(cancel)
+    }
+
     /// Set the wallet's coin at `outpoint` aside under `marker`, a txid of
     /// no transaction, as [`Wallet::sign_input`] sets one aside for a
     /// transaction to come: no spend or deposit takes it until

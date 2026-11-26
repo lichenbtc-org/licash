@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use bitcoin::{OutPoint, TxOut};
 use licash::base::Base;
-use licash_contract::opening::{Context, Hub, Input, Out, Quote};
+use licash_contract::opening::{Context, Hub, HubPhase, Input, Out, Quote};
 use licash_contract::wire::{self, Envelope, Kind, Writer};
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
@@ -142,6 +142,22 @@ impl Openings {
         }
         let patient = envelope.kind == Kind::Instance;
         self.take(id, message, Start::Stored, patient).await
+    }
+
+    /// Refused, as stepping it would refuse it, unless opening `id` waits
+    /// for her kept instances, or took them already (one sent again): told
+    /// before an upload's body, 25 MB, is read.
+    pub fn awaits_instances(&self, id: &[u8; 32]) -> Result<(), Refused> {
+        let row = self.store().row(id).map_err(Refused::unavailable)?;
+        let row = row.ok_or_else(not_found)?;
+        if row.abandoned {
+            return Err(Refused::bad("an opening given up"));
+        }
+        let peek = Hub::peek(&row.state).map_err(Refused::unavailable)?;
+        match peek.phase {
+            HubPhase::Chosen | HubPhase::Offered => Ok(()),
+            phase => Err(Refused::bad(format!("no instance awaited at {phase:?}"))),
+        }
     }
 
     /// Refused unless `quote` is the hub's: its terms surcharged at one of
@@ -345,6 +361,15 @@ impl Openings {
                         .filter(|(i, _)| !inputs.contains(i))
                         .map(|(_, (input, coin))| (input.previous_output, coin.clone()))
                         .collect();
+                    // Her deposit, which she signed into F, is still hers
+                    // to spend as the hub signs: else F never confirms,
+                    // and the hub's coins wait on it.
+                    for (deposit, _) in &theirs {
+                        let unspent = self.unspent(*deposit, true).await;
+                        if !unspent.map_err(Refused::unavailable)? {
+                            return Err(Refused::bad("her deposit is spent"));
+                        }
+                    }
                     // No contract is signed that its witnesses would not keep
                     // the answers of.
                     let witnesses = self.witnesses().map_err(Refused::unavailable)?;
@@ -354,11 +379,19 @@ impl Openings {
                         .map_err(Refused::unavailable)?;
                     let signed = self.sign(&funding, &theirs).await;
                     let signed = signed.map_err(Refused::unavailable)?;
+                    let tip = ctx.tip;
                     let (next, more) =
                         stepped(&self.heavy, hub, Input::Signed(signed), ctx).await?;
                     hub = next;
                     let more = self.keep(&id, more)?;
                     self.save(&id, &hub, &last)?;
+                    // Counted signed and unfunded now, as admission counts
+                    // it ([`MAX_UNFUNDED`]), not at the responder's next pass:
+                    // till then, past its signatures, no longer under way,
+                    // it was counted in neither.
+                    self.store()
+                        .unfunded(&id, tip)
+                        .map_err(Refused::unavailable)?;
                     tracing::info!(id = %crate::hex_id(&id), "F signed");
                     queue.extend(more);
                 }
@@ -511,9 +544,34 @@ async fn heavy<T: Send + 'static>(
     done.await.map_err(Refused::unavailable)
 }
 
+/// The fewest bytes left free on the hub's disk for it to take a new
+/// opening: each keeps the instances she uploaded, 25 MB each on signet,
+/// for as long as its contract lives.
+pub(super) const MIN_FREE: u64 = 5 << 30;
+
+/// The least share of its disk left free, in percent, for the hub to take
+/// a new opening.
+pub(super) const MIN_FREE_PERCENT: u64 = 5;
+
+/// Whether `free` bytes of a disk of `total` leave room for a new opening:
+/// at least [`MIN_FREE`] and [`MIN_FREE_PERCENT`] of it.
+pub(super) fn roomy(free: u64, total: u64) -> bool {
+    free >= MIN_FREE && u128::from(free) * 100 >= u128::from(total) * u128::from(MIN_FREE_PERCENT)
+}
+
 /// Refused if `store` holds as many openings under way as the hub takes,
-/// or signed and not funded.
+/// or signed and not funded, or if its disk is nearly full.
 pub(super) fn admits(store: &Store) -> Result<(), Refused> {
+    if let Some((free, total)) = store.room().map_err(Refused::unavailable)? {
+        if !roomy(free, total) {
+            tracing::error!(
+                free,
+                total,
+                "the hub's disk is nearly full: no new contract opened"
+            );
+            return Err(Refused::unavailable("the hub's disk is nearly full: later"));
+        }
+    }
     if store.under_way().map_err(Refused::unavailable)? >= MAX_UNDER_WAY {
         return Err(Refused::unavailable("too many openings under way: later"));
     }
@@ -531,6 +589,29 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn a_new_opening_needs_both_bytes_and_a_share_of_the_disk_free() {
+        let gib = 1u64 << 30;
+        // A small disk: its bytes count.
+        assert!(roomy(MIN_FREE, 20 * gib));
+        assert!(!roomy(MIN_FREE - 1, 20 * gib));
+        // A large one: its share does.
+        assert!(roomy(50 * gib, 1_000 * gib));
+        assert!(!roomy(50 * gib - 1, 1_000 * gib));
+        assert!(!roomy(0, 0));
+    }
+
+    #[test]
+    fn a_store_on_disk_tells_its_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&crate::testing::hub_data(dir.path())).unwrap();
+        let room = store.room().unwrap();
+        #[cfg(unix)]
+        assert!(room.is_some_and(|(free, total)| free > 0 && free <= total));
+        #[cfg(not(unix))]
+        assert_eq!(room, None);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn heavy_work_runs_one_at_a_time_even_once_no_one_waits_for_it() {

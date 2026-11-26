@@ -21,11 +21,58 @@ const RETRY: Duration = Duration::from_secs(2);
 /// How many times to ask a working hub again before trying later.
 const PATIENCE: u32 = 900;
 
+/// How long a holder turned away busy (503) keeps asking again: a hub
+/// answers so, before it keeps anything, when its requests of the kind
+/// are all taken or it has as many openings as it admits, and either is
+/// over within minutes (a block confirming the openings it signed).
+const BUSY_PATIENCE: Duration = Duration::from_secs(180);
+
+/// The longest wait between two asks of a hub turned busy.
+const BUSY_MOST: Duration = Duration::from_secs(30);
+
+/// A hub's 503s to one request: asked again after a wait doubling from
+/// [`RETRY`] to [`BUSY_MOST`], up to [`BUSY_PATIENCE`] since the first.
+#[derive(Default)]
+pub(super) struct Busy {
+    since: Option<tokio::time::Instant>,
+    times: u32,
+}
+
+impl Busy {
+    /// Waited before asking again, unless patience ran out: then false.
+    pub(super) async fn wait(&mut self) -> bool {
+        let since = *self.since.get_or_insert_with(tokio::time::Instant::now);
+        let wait = busy_wait(self.times, jitter());
+        if since.elapsed() + wait > BUSY_PATIENCE {
+            return false;
+        }
+        self.times += 1;
+        tokio::time::sleep(wait).await;
+        true
+    }
+}
+
+/// The wait before the `n`th ask again of a hub turned busy, of a jitter
+/// `j` in [0, 1): half the doubled wait, and up to half again, so that
+/// holders turned away at once come back apart.
+fn busy_wait(n: u32, j: f64) -> Duration {
+    let doubled = RETRY.saturating_mul(1 << n.min(8)).min(BUSY_MOST);
+    doubled.mul_f64(0.5 + j / 2.0)
+}
+
+/// A number in [0, 1), of the process's random hashing keys.
+fn jitter() -> f64 {
+    use std::hash::BuildHasher;
+    let hashed = std::collections::hash_map::RandomState::new().hash_one(Instant::now());
+    (hashed >> 11) as f64 / (1u64 << 53) as f64
+}
+
 /// How many times a step that never reached the hub, or whose answer
 /// never came back, is sent again at once: a circuit over Tor drops now
 /// and then, and the hub takes a step it has again as it took it. Not an
-/// instance's upload, 25 MB on signet: left to the opening's resumption,
-/// which sends none the hub answered.
+/// instance's upload, 25 MB on signet: sent again only as one cut short
+/// ([`cut_short`]), as one turned away busy ([`Busy`]), else left to the
+/// opening's resumption, which sends none the hub answered.
 const RECONNECTS: u32 = 3;
 
 /// How many instances are uploaded beside each other, each on a circuit
@@ -140,6 +187,17 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
+/// A step taken but not stored: nothing it says leaves, and the opening
+/// goes no further this time, carried on from what is stored.
+#[derive(Debug)]
+pub(super) struct Unsaved;
+
+impl std::fmt::Display for Unsaved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an opening's step not stored")
+    }
+}
+
 /// A [`Refusal`] of a quote the hub no longer makes (409): its fee rose
 /// as its contracts filled up, or the quote's block is too old. Asked
 /// again, it quotes anew.
@@ -149,6 +207,35 @@ pub(super) struct Requote;
 impl std::fmt::Display for Requote {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("the hub quotes otherwise now")
+    }
+}
+
+/// The hub turned an opening away busy (503) at its start, its deposit
+/// for her reserve given up with it: the opening goes no further, and is
+/// made anew a while later, of a quote and deposit asked again.
+#[derive(Debug)]
+pub(super) struct Later;
+
+/// How many times an opening turned away busy at its start ([`Later`]) is
+/// made anew: each asks the hub for another deposit for her reserve, of
+/// which a coin has only [`licash_wallet::CLOSE_ATTEMPTS`] at a hub, and
+/// most of those are left for her later openings and a restored wallet.
+/// The hub refuses its quote while it admits no opening, so one turned
+/// away at its start lost a race for the last place, or the hub is amiss.
+pub(super) const OPENS_AGAIN: u8 = 2;
+const _: () = assert!(OPENS_AGAIN < licash_wallet::CLOSE_ATTEMPTS / 2);
+
+/// Whether the transport's error `e` is of a request whose body was cut
+/// short, its connection closed while it was being written: the hub took
+/// none of it. As the hub closes one it turns away busy (503) before it
+/// reads the body, which a body as large as an instance learns of so.
+fn cut_short(e: &str) -> bool {
+    e.contains("error writing a body")
+}
+
+impl std::fmt::Display for Later {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the hub is busy: to open again later")
     }
 }
 
@@ -164,6 +251,8 @@ pub(super) struct Driver<'a, T, C> {
     pub holder: Option<Holder>,
     /// The quote she opens on, sent with her Open the first time.
     pub quote: Option<Quote>,
+    /// Whether her chain took F whole from her this time.
+    pub took_f: std::sync::atomic::AtomicBool,
 }
 
 impl<T: Transport, C: Chain> Driver<'_, T, C> {
@@ -267,7 +356,7 @@ impl<T: Transport, C: Chain> Driver<'_, T, C> {
         Ok(())
     }
 
-    /// `driven`, or, where it failed short of F but for a refusal (an
+    /// `driven`, or, where it failed short of F whole but for a refusal (an
     /// instance's upload dropped over Tor, say), the opening resumed up to
     /// `tries` times, sending none the hub answered.
     pub async fn carry_on(&mut self, mut driven: Result<()>, tries: u32) -> Result<()> {
@@ -275,7 +364,8 @@ impl<T: Transport, C: Chain> Driver<'_, T, C> {
             match &driven {
                 Err(e)
                     if e.downcast_ref::<Refusal>().is_none()
-                        && self.holder().phase() < Phase::Funded =>
+                        && e.downcast_ref::<Unsaved>().is_none()
+                        && !self.holder().wholly_funded() =>
                 {
                     let id = crate::hex_id(&self.id);
                     tracing::warn!(%id, n, "carrying an opening on: {e:#}");
@@ -297,9 +387,11 @@ impl<T: Transport, C: Chain> Driver<'_, T, C> {
         let holder = self.holder();
         if e.downcast_ref::<Refusal>().is_some() && holder.abandonable() {
             self.store.abandon(&self.id, &format!("{e:#}"))?;
-            if holder.phase() == Phase::Signing {
+            if matches!(holder.phase(), Phase::Consented | Phase::Signing) {
                 if let Some(f) = holder.funding() {
-                    // Not reserved unless she signed before stopping.
+                    // Not reserved unless she signed before stopping: at
+                    // Consented, her signature never left, the step it
+                    // made unstored.
                     let _ = self.wallet.abandon_silent(&f.tx.compute_txid());
                 }
             }
@@ -334,7 +426,20 @@ impl<T: Transport, C: Chain> Driver<'_, T, C> {
         let holder = self.holder();
         let funding = holder.funding().map(|f| f.tx.compute_txid());
         let state = holder.to_bytes();
-        self.store.save(&self.id, holder.phase(), funding, &state)?;
+        if let Err(e) = self.store.save(&self.id, holder.phase(), funding, &state) {
+            // Her signature, say, never sent unless stored: her machine as
+            // stored again, if it can be read.
+            let stored = self.store.state(&self.id).and_then(|(state, _)| {
+                Holder::load(&state, &self.wallet.contract_secrets().seed, &ctx)
+            });
+            match stored {
+                Ok(stored) => self.holder = Some(stored),
+                Err(e) => {
+                    tracing::warn!(id = %crate::hex_id(&self.id), "reloading an opening: {e:#}")
+                }
+            }
+            return Err(e.context(Unsaved));
+        }
         // Where an opening's time goes, step by step.
         let (id, phase) = (crate::hex_id(&self.id), holder.phase());
         tracing::info!(%id, ?phase, took = ?started.elapsed(), "an opening's step taken");
@@ -349,7 +454,11 @@ impl<T: Transport, C: Chain> Driver<'_, T, C> {
         };
         let txid = f.tx.compute_txid();
         match self.chain.broadcast(f.tx).await {
-            Ok(()) => tracing::info!(%id, %txid, "F broadcast"),
+            Ok(()) => {
+                self.took_f
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!(%id, %txid, "F broadcast")
+            }
             Err(e) => tracing::warn!(%id, %txid, "broadcasting F: {e}"),
         }
     }
@@ -415,7 +524,7 @@ impl<T: Transport, C: Chain> Driver<'_, T, C> {
                     open: message,
                 };
                 let url = format!("{}{OPEN}", self.hub);
-                return self.ask(url, opening.encode()).await;
+                return self.ask(url, opening.encode(), true).await;
             }
         }
         self.send(message).await
@@ -430,16 +539,18 @@ impl<T: Transport, C: Chain> Driver<'_, T, C> {
             STEP
         };
         let path = route.replace("{id}", &crate::hex_id(&self.id));
-        self.ask(format!("{}{path}", self.hub), message).await
+        self.ask(format!("{}{path}", self.hub), message, false)
+            .await
     }
 
-    /// POST `body` to `url`: the hub's answer, asked again while it works.
-    async fn ask(&self, url: String, body: Vec<u8>) -> Result<Vec<Frame>> {
+    /// POST `body` to `url`: the hub's answer, asked again while it works,
+    /// and while it is busy unless `start`, the opening's first message:
+    /// turned away then, it keeps nothing of it ([`Later`]).
+    async fn ask(&self, url: String, body: Vec<u8>, start: bool) -> Result<Vec<Frame>> {
         let started = Instant::now();
-        let mut dropped = match Kind::peek(&body) {
-            Some(Kind::Instance) => RECONNECTS,
-            _ => 0,
-        };
+        let instance = Kind::peek(&body) == Some(Kind::Instance);
+        let mut dropped = if instance { RECONNECTS } else { 0 };
+        let mut busy = Busy::default();
         for _ in 0..PATIENCE {
             let request = Some(body.clone());
             let response = match self.wallet.transport().request(&url, request).await {
@@ -449,6 +560,14 @@ impl<T: Transport, C: Chain> Driver<'_, T, C> {
                     let id = crate::hex_id(&self.id);
                     tracing::warn!(%id, dropped, "asking the hub again: {e}");
                     tokio::time::sleep(RETRY * dropped).await;
+                    continue;
+                }
+                // An instance's upload cut short, which the hub took none
+                // of: sent again, a while later, as any turned away busy.
+                // Not one whose answer alone was lost: left to resumption.
+                Err(e) if instance && cut_short(&e) && busy.wait().await => {
+                    let id = crate::hex_id(&self.id);
+                    tracing::info!(%id, "an instance's upload cut short, sent again: {e}");
                     continue;
                 }
                 Err(e) => bail!("{}: {e}", self.hub),
@@ -461,6 +580,11 @@ impl<T: Transport, C: Chain> Driver<'_, T, C> {
                     return Frame::decode_all(&response.body).context("the hub's answer");
                 }
                 202 => tokio::time::sleep(RETRY).await,
+                503 if start => {
+                    let refused = failed(&self.hub, 400, &response.body);
+                    return Err(refused.context(Later));
+                }
+                503 if busy.wait().await => {}
                 status => return Err(failed(&self.hub, status, &response.body)),
             }
         }
@@ -499,6 +623,49 @@ mod tests {
         let down = failed("hub", 503, b"later");
         assert!(down.downcast_ref::<Refusal>().is_none());
         assert!(down.downcast_ref::<Requote>().is_none());
+    }
+
+    /// Turned away busy, a holder waits half to all of a wait doubling
+    /// from two seconds to thirty, and asks again within three minutes.
+    #[test]
+    fn a_holder_turned_away_busy_comes_back_later_and_apart() {
+        let s = Duration::from_secs;
+        assert_eq!(busy_wait(0, 0.0), s(1));
+        assert_eq!(busy_wait(0, 0.999_999), s(2) - Duration::from_micros(1));
+        assert_eq!(busy_wait(2, 0.0), s(4));
+        assert_eq!(busy_wait(4, 0.0), s(15));
+        assert_eq!(busy_wait(40, 0.0), s(15));
+        assert!(busy_wait(40, 0.999) <= BUSY_MOST);
+        let j = jitter();
+        assert!((0.0..1.0).contains(&j));
+    }
+
+    /// Only a body cut short as it was written, as the hub closes one it
+    /// turns away unread: not one whose answer was lost after it was sent.
+    #[test]
+    fn an_upload_is_cut_short_only_as_its_body_was_written() {
+        let pipe = "error sending request: client error (SendRequest): \
+                    error writing a body to connection: Broken pipe (os error 32)";
+        assert!(cut_short(pipe));
+        assert!(!cut_short("no answer over Tor in 120 s"));
+        assert!(!cut_short("error sending request: operation timed out"));
+        assert!(!cut_short(
+            "error sending request: client error (Connect): Connection refused"
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_holder_turned_away_busy_gives_up_after_three_minutes() {
+        let start = tokio::time::Instant::now();
+        let mut busy = Busy::default();
+        let mut asked = 0;
+        while busy.wait().await {
+            asked += 1;
+        }
+        let waited = start.elapsed();
+        assert!(waited <= BUSY_PATIENCE, "{waited:?}");
+        assert!(waited >= BUSY_PATIENCE - BUSY_MOST, "{waited:?}");
+        assert!((6..=20).contains(&asked), "{asked}");
     }
 
     #[test]

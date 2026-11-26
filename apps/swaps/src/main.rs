@@ -1213,9 +1213,7 @@ async fn serve(
             }
         }
     };
-    axum::serve(listener, router)
-        .with_graceful_shutdown(stop)
-        .await?;
+    licash_tor::listen(listener, router, stop).await;
     if let Some(announcing) = announcing {
         announcing.abort();
     }

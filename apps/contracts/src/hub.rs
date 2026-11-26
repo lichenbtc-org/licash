@@ -18,9 +18,10 @@ mod responses;
 mod run;
 mod store;
 pub mod terms;
+mod vigil;
 mod witness;
 
-pub use witness::Witnesses;
+pub use witness::{superseded, Leadership, Witnesses, INSTANCE_FILE, SUPERSEDED_FILE};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -110,6 +111,34 @@ const REQUEST_TIME: Duration = Duration::from_secs(300);
 /// MB over Tor from a phone, at 15 KB/s at worst.
 const INSTANCE_TIME: Duration = Duration::from_secs(30 * 60);
 
+/// The most bytes of a request about a contract opened (a fold, her
+/// evidence, a proof): a nonce, a signature, a claim's filing, whose
+/// publication a contract bounds (64 kB of the hub's terms), with room to
+/// spare. One larger is refused unread past it.
+const SMALL_BODY: usize = 256 << 10;
+
+/// The most bytes of an opening's first request: her Open (some hundred
+/// bytes) and the quote it takes (some tens of thousands).
+const OPEN_BODY: usize = 1 << 20;
+
+/// The most bytes of an opening's next message: her commitment and her
+/// openings grow with its instances, each about 2.3 MB at the 78 of the
+/// hub's terms and some 4 MB at [`licash_contract::MAX_INSTANCES`].
+/// Her instances, larger, are uploaded apart ([`INSTANCE`]).
+const STEP_BODY: usize = 16 << 20;
+
+/// How long a small request's body ([`SMALL_BODY`]) may take to arrive.
+const SMALL_BODY_TIME: Duration = Duration::from_secs(30);
+
+/// How many small requests' bodies a route reads at once: before one of
+/// its few places to be answered is taken, so that clients stalling their
+/// bodies keep none of those.
+const SMALL_READING: usize = 32;
+
+/// How long a small request whose body arrived waits for a place to be
+/// answered in.
+const SMALL_WAIT: Duration = Duration::from_secs(5);
+
 /// A hub's openings, with its node, whose wallet funds and signs F.
 pub struct Openings {
     data: PathBuf,
@@ -180,6 +209,8 @@ pub struct Openings {
     load_told: std::sync::atomic::AtomicU32,
     /// Each contract's fold offered, until its holder signs or asks again.
     folds: Mutex<HashMap<[u8; 32], dispute::PendingFold>>,
+    /// The responder's health, told the operator as it changes.
+    vigil: Mutex<vigil::Vigil>,
     /// What the node's wallet last said it holds, in sat: the most it
     /// funds an F with ([`terms::fundable`]). None until it says.
     funds: Mutex<Option<u64>>,
@@ -430,6 +461,7 @@ impl Openings {
             max_live: std::sync::atomic::AtomicUsize::new(MAX_LIVE),
             load_told: Default::default(),
             folds: Mutex::default(),
+            vigil: Mutex::new(vigil::Vigil::new(profile)),
             funds: Mutex::new(None),
             witnesses: std::sync::OnceLock::new(),
         });
@@ -452,6 +484,33 @@ impl Openings {
         self.witnesses
             .set(witnesses)
             .map_err(|_| anyhow::anyhow!("the hub's witnesses are set already"))
+    }
+
+    /// Which copy of the hub leads, as its witnesses say now
+    /// ([`Witnesses::leadership`]).
+    pub async fn leadership(&self) -> Result<Leadership> {
+        self.witnesses()?.leadership(&self.data).await
+    }
+
+    /// Take the contracts over for this copy of the hub
+    /// ([`Witnesses::take_over`]): the epoch taken.
+    pub async fn take_over(&self) -> Result<u64> {
+        self.witnesses()?.take_over(&self.data).await
+    }
+
+    /// Until another copy of the hub takes the contracts over, as its
+    /// witnesses say, asked every `every`: then the epoch it took. Not
+    /// known (a witness unreachable), it goes on as it led, as signing
+    /// stops anyway.
+    pub async fn lead_until_superseded(self: Arc<Self>, every: Duration) -> u64 {
+        loop {
+            match self.leadership().await {
+                Ok(Leadership::Superseded(epoch)) => return epoch,
+                Ok(_) => {}
+                Err(e) => tracing::warn!("which copy of the hub leads: {e:#}"),
+            }
+            tokio::time::sleep(every).await;
+        }
     }
 
     fn witnesses(&self) -> Result<&Witnesses> {
@@ -638,6 +697,7 @@ impl Openings {
     /// kept as one once a contract opens on it, else at its tip: its
     /// quote of `cap` sat over `blocks` she chose, if within its terms,
     /// else its fixed one; `funded` sat of it hers, the rest the hub's.
+    /// Unavailable while it admits no new opening.
     pub async fn offer(&self, chosen: Option<(u32, u32)>, funded: u32) -> Result<Offer, Refused> {
         let (cap, blocks) = chosen.unwrap_or((terms::CAP, self.timing().lock()));
         self.timing().allows(cap, blocks).map_err(Refused::bad)?;
@@ -652,6 +712,10 @@ impl Openings {
                 "the hub's wallet funds {most} sat of a contract at most now"
             )));
         }
+        // Unavailable now if an opening on it would be (503): she waits
+        // before asking for a deposit for her reserve, of which a coin has
+        // only so many attempts ([`licash_wallet::CLOSE_ATTEMPTS`]).
+        run::admits(&self.store())?;
         let tip = self.source.tip().await.map_err(Refused::unavailable)?;
         let height = self.opening_height(tip.height)?;
         let checkpoint = self.source.checkpoint(height).await;
@@ -1011,11 +1075,27 @@ impl Openings {
         Ok(round)
     }
 
-    /// Play the exits every `every` while the hub runs: never returns.
+    /// Play the exits every `every` while the hub runs: never returns. The
+    /// operator is told if the node's chain stalls, or rounds fail, for long
+    /// ([`vigil::Vigil`]).
     pub async fn respond_every(self: Arc<Self>, every: Duration) {
         loop {
-            if let Err(e) = self.answer_requests().await {
-                tracing::error!("automatic contract responder: {e:#}");
+            let failed = match self.answer_requests().await {
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::error!("automatic contract responder: {e:#}");
+                    Some(format!("{e:#}"))
+                }
+            };
+            let tip = self.source.tip().await.ok().map(|tip| tip.hash);
+            let now = tokio::time::Instant::now();
+            let told = (self.vigil.lock().unwrap_or_else(PoisonError::into_inner)).round(
+                now,
+                tip,
+                failed.as_deref(),
+            );
+            for message in told {
+                self.alert(&message);
             }
             tokio::time::sleep(every).await;
         }
@@ -1046,29 +1126,42 @@ pub fn router(openings: Arc<Openings>) -> Router {
     // last until the response body is dropped, not merely constructed.
     let budget = |count, time| {
         let limit = Arc::new(tokio::sync::Semaphore::new(count));
-        middleware::from_fn_with_state((limit, time), admit)
+        middleware::from_fn_with_state((limit, time, time), admit)
+    };
+    // Small: each body bounded and read first, within its time.
+    let small = |count| {
+        let reading = Arc::new(tokio::sync::Semaphore::new(SMALL_READING));
+        let limit = Arc::new(tokio::sync::Semaphore::new(count));
+        let admitted = middleware::from_fn_with_state((reading, limit), admit_small);
+        (DefaultBodyLimit::max(SMALL_BODY), admitted)
     };
     Router::new()
         .route(QUOTE, get(quote).layer(budget(2, REQUEST_TIME)))
-        .route(OPEN, post(open).layer(budget(2, REQUEST_TIME)))
-        .route(STEP, post(step).layer(budget(2, REQUEST_TIME)))
+        .route(
+            OPEN,
+            post(open).layer((budget(2, REQUEST_TIME), DefaultBodyLimit::max(OPEN_BODY))),
+        )
+        .route(
+            STEP,
+            post(step).layer((budget(2, REQUEST_TIME), DefaultBodyLimit::max(STEP_BODY))),
+        )
         // A holder uploads three at a time: two holders at once.
         .route(INSTANCE, post(instance).layer(budget(6, INSTANCE_TIME)))
-        .route(FOLD, post(offer_fold).layer(budget(2, REQUEST_TIME)))
-        .route(
-            FOLD_CLAIM,
-            post(offer_fold_claim).layer(budget(2, REQUEST_TIME)),
-        )
-        .route(FOLD_SIGN, post(sign_fold).layer(budget(2, REQUEST_TIME)))
-        .route(EVIDENCE, post(show_evidence).layer(budget(2, REQUEST_TIME)))
-        .route(PROOF, post(show_proof).layer(budget(2, REQUEST_TIME)))
+        .route(FOLD, post(offer_fold).layer(small(2)))
+        .route(FOLD_CLAIM, post(offer_fold_claim).layer(small(2)))
+        .route(FOLD_SIGN, post(sign_fold).layer(small(2)))
+        .route(EVIDENCE, post(show_evidence).layer(small(2)))
+        .route(PROOF, post(show_proof).layer(small(2)))
+        // Its body unread.
         .route(FUNDED, post(funded).layer(budget(2, REQUEST_TIME)))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(openings)
 }
 
+/// A request admitted if `limit` has a place free, held until its answer
+/// is sent, and answered within `time`, its body read within `body_time`.
 async fn admit(
-    State((limit, time)): State<(Arc<tokio::sync::Semaphore>, Duration)>,
+    State((limit, time, body_time)): State<(Arc<tokio::sync::Semaphore>, Duration, Duration)>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -1079,6 +1172,7 @@ async fn admit(
         )
             .into_response();
     };
+    let request = within(request, body_time);
     let response = match tokio::time::timeout(time, next.run(request)).await {
         Ok(response) => response,
         Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
@@ -1088,6 +1182,69 @@ async fn admit(
             let _held = &permit;
             chunk
         }))
+    })
+}
+
+/// A small request: its body read whole (at most [`SMALL_BODY`], within
+/// [`SMALL_BODY_TIME`]) if `reading` has a place free, then answered once
+/// `limit` has one ([`SMALL_WAIT`]), held until its answer is sent.
+async fn admit_small(
+    State((reading, limit)): State<(Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>)>,
+    request: Request,
+    next: Next,
+) -> Response {
+    use axum::extract::FromRequest as _;
+    let busy = || {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many contract requests: retry later",
+        )
+            .into_response()
+    };
+    let Ok(read) = reading.try_acquire_owned() else {
+        return busy();
+    };
+    let (parts, body) = within(request, SMALL_BODY_TIME).into_parts();
+    let body = match Bytes::from_request(Request::from_parts(parts.clone(), body), &()).await {
+        Ok(body) => body,
+        Err(e) => return e.into_response(),
+    };
+    drop(read);
+    let Ok(Ok(permit)) = tokio::time::timeout(SMALL_WAIT, limit.acquire_owned()).await else {
+        return busy();
+    };
+    let request = Request::from_parts(parts, Body::from(body));
+    let response = match tokio::time::timeout(REQUEST_TIME, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
+    };
+    response.map(|body| {
+        Body::from_stream(body.into_data_stream().map(move |chunk| {
+            let _held = &permit;
+            chunk
+        }))
+    })
+}
+
+/// `request`, its body failing if still arriving `time` from now.
+fn within(request: Request, time: Duration) -> Request {
+    let until = tokio::time::Instant::now() + time;
+    request.map(|body| {
+        let data = body.into_data_stream();
+        Body::from_stream(futures_util::stream::unfold(
+            Some(data),
+            move |data| async move {
+                let mut data = data?;
+                match tokio::time::timeout_at(until, data.next()).await {
+                    Ok(Some(chunk)) => Some((chunk, Some(data))),
+                    Ok(None) => None,
+                    Err(_) => {
+                        let late = axum::Error::new("the request's body came too slowly");
+                        Some((Err(late), None))
+                    }
+                }
+            },
+        ))
     })
 }
 
@@ -1148,12 +1305,23 @@ async fn step(
     openings.step(id, body.to_vec()).await
 }
 
+/// An instance's upload, its body read only once the opening is known to
+/// await one.
 async fn instance(
     State(openings): State<Arc<Openings>>,
     UrlPath(id): UrlPath<String>,
-    body: Bytes,
+    request: Request,
 ) -> Result<Answer, Refused> {
+    use axum::extract::FromRequest as _;
     let id = crate::parse_id(&id).map_err(Refused::bad)?;
+    openings.awaits_instances(&id)?;
+    // Under the route's body limit, as an extracted body.
+    let body = Bytes::from_request(request, &())
+        .await
+        .map_err(|e| Refused {
+            status: e.status(),
+            reason: e.body_text(),
+        })?;
     if licash_contract::wire::Kind::peek(&body) != Some(licash_contract::wire::Kind::Instance) {
         return Err(Refused::bad(
             "an instance upload requires an Instance envelope",
@@ -1229,7 +1397,7 @@ mod tests {
         let app = Router::new()
             .route("/", post(|_: Bytes| async { "ok" }))
             .layer(middleware::from_fn_with_state(
-                (limit.clone(), REQUEST_TIME),
+                (limit.clone(), REQUEST_TIME, REQUEST_TIME),
                 admit,
             ));
         let response = app
@@ -1263,6 +1431,123 @@ mod tests {
 
     fn funded() -> &'static [u8] {
         &crate::testing::opened().hub
+    }
+
+    /// A body that never arrives, counting how often it was asked for.
+    fn stalled(polled: Arc<std::sync::atomic::AtomicUsize>) -> Body {
+        Body::from_stream(futures_util::stream::poll_fn(move |_| {
+            polled.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::task::Poll::<Option<Result<Bytes, std::io::Error>>>::Pending
+        }))
+    }
+
+    #[tokio::test]
+    async fn an_instance_is_read_only_for_an_opening_awaiting_one() {
+        use axum::http::Request as HttpRequest;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let openings = Arc::new(test_openings(dir.path()));
+        let funded_id = [3; 32];
+        openings
+            .store()
+            .insert(&funded_id, 0, true, &deposit(0), &[0; 32], funded())
+            .unwrap();
+        let app = router(openings);
+        let url = |id: &[u8; 32]| INSTANCE.replace("{id}", &crate::hex_id(id));
+        // Of an opening unknown, or one past its instances: refused as a
+        // step would refuse it, before its body is read.
+        for (id, status) in [
+            ([4; 32], StatusCode::NOT_FOUND),
+            (funded_id, StatusCode::BAD_REQUEST),
+        ] {
+            let polled = Arc::new(AtomicUsize::new(0));
+            let request = HttpRequest::post(url(&id))
+                .body(stalled(polled.clone()))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), status);
+            assert_eq!(polled.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_openings_messages_are_bounded_by_what_they_can_hold() {
+        use axum::http::Request as HttpRequest;
+
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(Arc::new(test_openings(dir.path())));
+        let id = crate::hex_id(&[3; 32]);
+        for (route, most) in [(OPEN, OPEN_BODY), (STEP, STEP_BODY)] {
+            let url = route.replace("{id}", &id);
+            let request = HttpRequest::post(&url)
+                .body(Body::from(vec![0; most + 1]))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{route}");
+            let request = HttpRequest::post(&url)
+                .body(Body::from(vec![0; most]))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{route}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_small_request_is_bounded_and_its_body_read_in_time() {
+        use axum::http::Request as HttpRequest;
+        use std::sync::atomic::AtomicUsize;
+
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(Arc::new(test_openings(dir.path())));
+        let id = crate::hex_id(&[3; 32]);
+        for route in [FOLD, FOLD_CLAIM, FOLD_SIGN, EVIDENCE, PROOF] {
+            let url = route.replace("{id}", &id);
+            // Larger than any: refused unread past its limit.
+            let large = HttpRequest::post(&url)
+                .body(Body::from(vec![0; SMALL_BODY + 1]))
+                .unwrap();
+            let response = app.clone().oneshot(large).await.unwrap();
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{route}");
+            drop(response);
+            let busy = |app: Router| {
+                let url = url.clone();
+                async move {
+                    let request = HttpRequest::post(&url).body(Body::empty()).unwrap();
+                    let response = app.oneshot(request).await.unwrap();
+                    let body = axum::body::to_bytes(response.into_body(), 1 << 16).await;
+                    String::from_utf8_lossy(&body.unwrap()).contains("too many contract requests")
+                }
+            };
+            // Stalled bodies keep no place to be answered in: another is
+            // answered while all but one of the places to read are taken.
+            let started = tokio::time::Instant::now();
+            let stall = || {
+                let request = HttpRequest::post(&url)
+                    .body(stalled(Arc::new(AtomicUsize::new(0))))
+                    .unwrap();
+                tokio::spawn(app.clone().oneshot(request))
+            };
+            let mut stalls: Vec<_> = (1..SMALL_READING).map(|_| stall()).collect();
+            tokio::task::yield_now().await;
+            assert!(!busy(app.clone()).await, "{route}");
+            // With every place to read taken, none is read...
+            stalls.push(stall());
+            tokio::task::yield_now().await;
+            assert!(busy(app.clone()).await, "{route}");
+            // ... until the stalled are refused once their time is up.
+            for response in futures_util::future::join_all(stalls).await {
+                let response = response.unwrap().unwrap();
+                assert!(
+                    response.status().is_client_error(),
+                    "{route}: {}",
+                    response.status()
+                );
+            }
+            assert!(started.elapsed() >= SMALL_BODY_TIME);
+            assert!(started.elapsed() < REQUEST_TIME);
+            assert!(!busy(app.clone()).await, "{route}");
+        }
     }
 
     fn deposit(vout: u32) -> bitcoin::OutPoint {
@@ -1308,6 +1593,7 @@ mod tests {
             max_live: std::sync::atomic::AtomicUsize::new(MAX_LIVE),
             load_told: Default::default(),
             folds: Mutex::default(),
+            vigil: Mutex::new(vigil::Vigil::new(profile)),
             funds: Mutex::new(None),
             witnesses: std::sync::OnceLock::from(Witnesses::none()),
         }
@@ -1647,9 +1933,11 @@ mod tests {
     }
 
     /// The openings under way, or signed and not funded, are counted at
-    /// the store: one started meanwhile counts against the next.
-    #[test]
-    fn openings_are_admitted_only_below_both_caps() {
+    /// the store: one started meanwhile counts against the next. Its quote
+    /// refused alike, before any node RPC, so that she asks no deposit for
+    /// an opening it would refuse.
+    #[tokio::test]
+    async fn openings_are_admitted_only_below_both_caps() {
         let dir = tempfile::tempdir().unwrap();
         let openings = test_openings(dir.path());
         for n in 0..MAX_UNDER_WAY as u8 {
@@ -1664,6 +1952,11 @@ mod tests {
         assert!(why.contains("under way"), "{why}");
         // Said in its info, for a wallet to choose another hub by.
         assert!(openings.advertise().full);
+        let Err(quoted) = openings.offer(None, 0).await else {
+            panic!("quoted with no room");
+        };
+        assert_eq!(quoted.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(quoted.reason.contains("under way"), "{}", quoted.reason);
     }
 
     #[test]

@@ -16,6 +16,20 @@ use licash_wallet::{Response, Transport};
 #[cfg(feature = "tor")]
 const ONION_OPEN: Duration = Duration::from_secs(30);
 
+tokio::task_local! {
+    /// The clients `X-Forwarded-For` names, of requests made for them.
+    static FORWARDED_FOR: String;
+}
+
+/// `f`, its direct requests (never over Tor) naming `chain` in their
+/// `X-Forwarded-For`: those a service makes for its own clients, as a
+/// proxy of theirs, for a hub trusting it as one to count each by their
+/// own address. `chain` is the addresses, comma separated, the last of
+/// them the client's TCP peer.
+pub async fn forwarding_for<F: std::future::Future>(chain: String, f: F) -> F::Output {
+    FORWARDED_FOR.scope(chain, f).await
+}
+
 /// How long an onion service whose stream did not open is passed over.
 const ONION_RESTS: Duration = Duration::from_secs(10 * 60);
 
@@ -331,6 +345,23 @@ impl Transport for Http {
     }
 }
 
+/// What went wrong of a request, with why, which reqwest tells apart: a
+/// timeout, a connection refused or reset ("error sending request" alone
+/// says none of it). Without its URL, which the caller names.
+fn failed(e: reqwest::Error) -> String {
+    let e = e.without_url();
+    let mut said = e.to_string();
+    let mut source = std::error::Error::source(&e);
+    while let Some(why) = source {
+        let told = why.to_string();
+        if !said.contains(&told) {
+            said = format!("{said}: {told}");
+        }
+        source = why.source();
+    }
+    said
+}
+
 impl Http {
     /// `body` POSTed to `url`, or a GET: an answer of at most `max` bytes,
     /// in `timeout` if given rather than the client's own. Over Tor on
@@ -392,17 +423,14 @@ impl Http {
             request = request.timeout(timeout);
         }
         let direct = async move {
-            let mut response = request
-                .send()
-                .await
-                .map_err(|e| e.without_url().to_string())?;
+            // Read as it is sent, in the task it is sent from.
+            if let Ok(chain) = FORWARDED_FOR.try_with(String::clone) {
+                request = request.header("x-forwarded-for", chain);
+            }
+            let mut response = request.send().await.map_err(failed)?;
             let status = response.status().as_u16();
             let mut body = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|e| e.without_url().to_string())?
-            {
+            while let Some(chunk) = response.chunk().await.map_err(failed)? {
                 if body.len() + chunk.len() > max {
                     return Err(format!("an answer over {max} bytes"));
                 }
@@ -419,6 +447,47 @@ impl Http {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The headers of the requests to a server answering each empty.
+    async fn headers_seen(count: usize) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let seen = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for _ in 0..count {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0];
+                while !head.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).await.unwrap();
+                    head.push(byte[0]);
+                }
+                seen.push(String::from_utf8(head).unwrap().to_lowercase());
+                let answer = b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                stream.write_all(answer).await.unwrap();
+            }
+            seen
+        });
+        (url, seen)
+    }
+
+    #[tokio::test]
+    async fn a_request_made_for_a_client_names_it_and_no_other_does() {
+        let (url, seen) = headers_seen(2).await;
+        let http = Http::new(None).unwrap();
+        let chain = "203.0.113.7, 198.51.100.2".to_owned();
+        let asked = forwarding_for(chain, http.request(&url, None)).await;
+        assert_eq!(asked.unwrap().status, 200);
+        assert_eq!(http.request(&url, None).await.unwrap().status, 200);
+        let seen = seen.await.unwrap();
+        assert!(
+            seen[0].contains("x-forwarded-for: 203.0.113.7, 198.51.100.2\r\n"),
+            "{}",
+            seen[0]
+        );
+        assert!(!seen[1].contains("x-forwarded-for"), "{}", seen[1]);
+    }
 
     fn v3() -> String {
         format!("{}.onion", "a2".repeat(28))

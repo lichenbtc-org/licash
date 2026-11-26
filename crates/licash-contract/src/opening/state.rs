@@ -8,7 +8,12 @@ use crate::wire::{Reader, Writer};
 use lichen_btc::bitcoin::hashes::sha256;
 
 const MAGIC: [u8; 4] = *b"LCOS";
-pub const FORMAT: u16 = 5;
+/// 6: her consent carries her deposit's signature, which she gives first
+/// (wire version 3), and her F may be signed by her alone. 5, before, is
+/// read still: a contract's snapshot is stored once and never written
+/// again.
+pub const FORMAT: u16 = 6;
+const LEGACY: u16 = 5;
 
 #[derive(Clone, Debug)]
 pub struct Peek {
@@ -31,7 +36,8 @@ fn finish(mut w: Writer) -> Vec<u8> {
     w.bytes(&digest);
     w.0
 }
-fn read(bytes: &[u8], side: u8) -> Result<(Reader<'_>, u8)> {
+/// A snapshot's body after its header, its phase, and its format.
+fn read(bytes: &[u8], side: u8) -> Result<(Reader<'_>, u8, u16)> {
     ensure!(bytes.len() >= 41, "state cut short");
     let (body, digest) = bytes.split_at(bytes.len() - 32);
     ensure!(
@@ -40,11 +46,22 @@ fn read(bytes: &[u8], side: u8) -> Result<(Reader<'_>, u8)> {
     );
     let mut r = Reader(body);
     ensure!(r.array::<4>()? == MAGIC, "not opening state");
-    ensure!(r.u16()? == FORMAT, "unsupported opening state format");
+    let format = r.u16()?;
+    ensure!(
+        matches!(format, FORMAT | LEGACY),
+        "unsupported opening state format"
+    );
     ensure!(r.u8()? == DERIVATION, "another key derivation");
     ensure!(r.u8()? == side, "another opening side");
     let phase = r.u8()?;
-    Ok((r, phase))
+    Ok((r, phase, format))
+}
+/// Her consent's decoder, as `format` wrote it.
+fn consent(format: u16) -> fn(&[u8]) -> Result<wire::Consent> {
+    match format {
+        LEGACY => wire::Consent::decode_legacy,
+        _ => wire::Consent::decode,
+    }
 }
 fn put<T>(w: &mut Writer, value: Option<&T>, encode: impl FnOnce(&T) -> Vec<u8>) {
     w.u8(value.is_some() as u8);
@@ -98,10 +115,13 @@ impl Holder {
         put(&mut w, self.consent.as_ref(), wire::Consent::encode);
         put(&mut w, self.signed.as_ref(), serialize);
         put(&mut w, self.funded.as_ref(), serialize);
+        put(&mut w, self.signed_at.as_ref(), |h| {
+            h.to_be_bytes().to_vec()
+        });
         finish(w)
     }
     pub fn load(bytes: &[u8], seed: &[u8; 32], ctx: &Context) -> Result<Self> {
-        let (mut r, phase) = read(bytes, 0)?;
+        let (mut r, phase, format) = read(bytes, 0)?;
         let phase = *Phase::ALL
             .get(phase as usize)
             .context("unknown holder phase")?;
@@ -114,9 +134,17 @@ impl Holder {
         let hmsg = r.hashes()?;
         let kept = get(&mut r, |b| Ok(wire::Choose::decode(b)?.kept))?;
         let offer = get(&mut r, wire::Offer::decode)?;
-        let consent = get(&mut r, wire::Consent::decode)?;
+        let consent = get(&mut r, consent(format))?;
         let signed = get(&mut r, tx)?;
         let funded = get(&mut r, tx)?;
+        let signed_at = match format {
+            LEGACY => None,
+            _ => get(&mut r, |b| {
+                Ok(u32::from_be_bytes(
+                    b.try_into().context("a height is 4 bytes")?,
+                ))
+            })?,
+        };
         r.end()?;
         let h = Self {
             id,
@@ -132,6 +160,7 @@ impl Holder {
             consent,
             signed,
             funded,
+            signed_at,
         };
         same_kind(h.open.mock, ctx)?;
         ensure!(
@@ -153,8 +182,10 @@ impl Holder {
                 && h.kept.is_some() == (phase >= Phase::Chosen)
                 && h.offer.is_some() == (phase >= Phase::Consented)
                 && h.consent.is_some() == (phase >= Phase::Consented)
-                && h.signed.is_some() == (phase >= Phase::Signing)
-                && h.funded.is_some() == (phase >= Phase::Funded),
+                // Signed by the hub first only under version 2.
+                && (h.signed.is_none() || phase >= Phase::Signing)
+                && h.funded.is_some() == (phase >= Phase::Funded)
+                && (h.signed_at.is_none() || phase >= Phase::Funded),
             "holder sections mismatch"
         );
         let ctx = stored_context(h.base(), phase >= Phase::Funded, ctx);
@@ -227,8 +258,18 @@ impl Holder {
         }
         if let Some(funded) = &h.funded {
             let o = h.offer.as_ref().unwrap();
-            whole(&o.funding, funded)?;
-            check_key_spend(funded, at(funded, h.deposit()), &o.prevouts)?;
+            let mine = at(funded, h.deposit());
+            // Whole, or her deposit's signature alone, as she signed first.
+            match wholly_signed(funded) {
+                true => whole(&o.funding, funded)?,
+                false => {
+                    ensure!(h.signed_at.is_some(), "her F signed first, at no height");
+                    let deposit = &h.consent.as_ref().unwrap().deposit;
+                    let alone = with_deposit(&o.funding, deposit, mine, &o.prevouts)?;
+                    ensure!(alone == *funded, "stored F signed otherwise");
+                }
+            }
+            check_key_spend(funded, mine, &o.prevouts)?;
         }
         Ok(h)
     }
@@ -273,7 +314,7 @@ impl Hub {
         finish(w)
     }
     pub fn load(bytes: &[u8], ctx: &Context) -> Result<Self> {
-        let (mut r, phase) = read(bytes, 1)?;
+        let (mut r, phase, format) = read(bytes, 1)?;
         let phase = *HubPhase::ALL
             .get(phase as usize)
             .context("unknown hub phase")?;
@@ -310,7 +351,7 @@ impl Hub {
             Ok((tx, prevouts))
         })?;
         h.offer = get(&mut r, wire::Offer::decode)?;
-        h.consent = get(&mut r, wire::Consent::decode)?;
+        h.consent = get(&mut r, consent(format))?;
         h.signed = get(&mut r, tx)?;
         h.funded = get(&mut r, tx)?;
         r.end()?;
@@ -434,6 +475,10 @@ impl Hub {
                     &c.sigs,
                     |_| false,
                 )?;
+                if !c.deposit.is_empty() {
+                    let mine = at(f, h.open.as_ref().unwrap().deposit);
+                    with_deposit(f, &c.deposit, mine, prevouts)?;
+                }
             }
         }
         if let Some(s) = &h.signed {
@@ -462,7 +507,7 @@ impl Hub {
     }
     /// Cheap, untrusted metadata for routing only. Never authorizes funding.
     pub fn peek(bytes: &[u8]) -> Result<Peek> {
-        let (mut r, phase) = read(bytes, 1)?;
+        let (mut r, phase, format) = read(bytes, 1)?;
         let phase = *HubPhase::ALL
             .get(phase as usize)
             .context("unknown hub phase")?;
@@ -488,7 +533,7 @@ impl Hub {
             Ok(tx)
         })?;
         get(&mut r, wire::Offer::decode)?;
-        get(&mut r, wire::Consent::decode)?;
+        get(&mut r, consent(format))?;
         let signed = get(&mut r, tx)?;
         let funded = get(&mut r, tx)?;
         r.end()?;
@@ -498,5 +543,157 @@ impl Hub {
             base,
             funding: funded.or(signed).or(funds),
         })
+    }
+}
+
+/// Snapshots written by FORMAT 5, the format of every opening stored
+/// before her deposit was signed first: of the unit opening's hub and
+/// holder ([`super::tests`]), captured as that format wrote them. Each is
+/// read as it was then: live contracts are never written again.
+#[cfg(test)]
+mod format5 {
+    use super::*;
+
+    const HOLDER_CONSENTED: &[u8] = include_bytes!("../../tests/data/format5/holder-consented.bin");
+    const HOLDER_SIGNING: &[u8] = include_bytes!("../../tests/data/format5/holder-signing.bin");
+    const HOLDER_FUNDED: &[u8] = include_bytes!("../../tests/data/format5/holder-funded.bin");
+    const HUB_CONSENTED: &[u8] = include_bytes!("../../tests/data/format5/hub-consented.bin");
+    const HUB_SIGNED: &[u8] = include_bytes!("../../tests/data/format5/hub-signed.bin");
+    const HUB_FUNDED: &[u8] = include_bytes!("../../tests/data/format5/hub-funded.bin");
+
+    fn ctx() -> Context {
+        Context {
+            tip: 1,
+            trust: Trust::mock(),
+        }
+    }
+
+    fn holder(bytes: &[u8]) -> Holder {
+        Holder::load(bytes, &[1; 32], &ctx()).unwrap()
+    }
+
+    #[test]
+    fn a_funded_contract_is_read_and_played_by_either_side() {
+        let a = holder(HOLDER_FUNDED);
+        assert_eq!(a.phase(), Phase::Funded);
+        assert!(a.wholly_funded() && a.signed_at().is_none());
+        let h = Hub::load(HUB_FUNDED, &ctx()).unwrap();
+        assert_eq!(h.phase(), HubPhase::Funded);
+        assert_eq!(Hub::peek(HUB_FUNDED).unwrap().phase, HubPhase::Funded);
+        let (ao, ho) = (a.signed().unwrap(), h.signed().unwrap());
+        assert_eq!(ao.funding, ho.funding);
+        assert!(ho.default_close().is_ok());
+        assert!(!a.abandonable() && !h.abandonable());
+    }
+
+    /// The hub signed F: it is irrevocable, and her app finishes it,
+    /// signing her deposit and broadcasting F herself.
+    #[test]
+    fn an_opening_the_hub_signed_finishes_as_it_began() {
+        let h = Hub::load(HUB_SIGNED, &ctx()).unwrap();
+        assert_eq!(h.phase(), HubPhase::Signed);
+        assert!(!h.abandonable());
+        let a = holder(HOLDER_SIGNING);
+        assert_eq!(a.phase(), Phase::Signing);
+        let sign = a.pending().unwrap();
+        assert!(
+            matches!(&sign[..], [Out::Sign { inputs, .. }] if inputs.len() == 1),
+            "{sign:?}"
+        );
+    }
+
+    #[test]
+    fn an_opening_short_of_signatures_is_read() {
+        assert_eq!(holder(HOLDER_CONSENTED).phase(), Phase::Consented);
+        let h = Hub::load(HUB_CONSENTED, &ctx()).unwrap();
+        assert_eq!(h.phase(), HubPhase::Consented);
+    }
+
+    fn sent(out: &[Out], kind: Kind) -> Input {
+        let bytes = out
+            .iter()
+            .find_map(|o| match o {
+                Out::Send(b) if Kind::peek(b) == Some(kind) => Some(b.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no {kind:?} in {out:?}"));
+        Input::Message(bytes)
+    }
+
+    /// Her app, upgraded at Consented, signs her deposit first, as now:
+    /// her consent so signed is all it sends.
+    fn sign_first(a: &mut Holder) -> Vec<Out> {
+        let key = HolderKeys::derive(&[1; 32], &a.id()).party.funding;
+        let Ok(
+            [Out::Sign {
+                mut funding,
+                prevouts,
+                ..
+            }],
+        ) = <[Out; 1]>::try_from(a.pending().unwrap())
+        else {
+            panic!("not signing");
+        };
+        super::super::tests::sign_deposit(&mut funding, 0, &prevouts, &key);
+        let out = a.step(Input::Signed(funding), &ctx()).unwrap();
+        assert_eq!(a.phase(), Phase::Funded);
+        assert!(!a.wholly_funded());
+        out
+    }
+
+    /// A hub that consented under format 5 holds no signature of her
+    /// deposit: it signs nothing until she sends her consent again, signed.
+    #[test]
+    fn a_hub_consented_before_signs_only_once_her_deposit_is() {
+        let mut h = Hub::load(HUB_CONSENTED, &ctx()).unwrap();
+        assert!(h.pending().unwrap().is_empty());
+        let mut a = holder(HOLDER_CONSENTED);
+        let consent = sign_first(&mut a);
+        let sign = h.step(sent(&consent, Kind::Consent), &ctx()).unwrap();
+        assert!(matches!(&sign[..], [Out::Sign { inputs, .. }] if inputs == &[1]));
+        let h = Hub::load(&h.to_bytes(), &ctx()).unwrap();
+        assert_eq!(h.pending().unwrap().len(), 1);
+    }
+
+    /// The hub signed first under format 5 while her app had not yet heard
+    /// it: upgraded, she signs first, and the two meet on the whole F.
+    #[test]
+    fn a_hub_that_signed_first_meets_her_signing_first() {
+        let mut h = Hub::load(HUB_SIGNED, &ctx()).unwrap();
+        let mut a = holder(HOLDER_CONSENTED);
+        let consent = sign_first(&mut a);
+        let signed = h.step(sent(&consent, Kind::Consent), &ctx()).unwrap();
+        a.step(sent(&signed, Kind::Signed), &ctx()).unwrap();
+        assert!(a.wholly_funded());
+        let a = holder(&a.to_bytes());
+        h.step(sent(&a.pending().unwrap(), Kind::Funded), &ctx())
+            .unwrap();
+        assert_eq!(h.phase(), HubPhase::Funded);
+        assert_eq!(a.signed().unwrap().funding, h.signed().unwrap().funding);
+    }
+
+    /// Both sides at signing under format 5 finish the old way: her
+    /// deposit signed into the hub's F, which she sends it whole.
+    #[test]
+    fn an_opening_signed_by_the_hub_first_is_finished_by_her() {
+        let mut h = Hub::load(HUB_SIGNED, &ctx()).unwrap();
+        let mut a = holder(HOLDER_SIGNING);
+        let key = HolderKeys::derive(&[1; 32], &a.id()).party.funding;
+        let Ok(
+            [Out::Sign {
+                mut funding,
+                prevouts,
+                ..
+            }],
+        ) = <[Out; 1]>::try_from(a.pending().unwrap())
+        else {
+            panic!("not signing");
+        };
+        super::super::tests::sign_deposit(&mut funding, 0, &prevouts, &key);
+        let funded = a.step(Input::Signed(funding), &ctx()).unwrap();
+        assert!(a.wholly_funded());
+        h.step(sent(&funded, Kind::Funded), &ctx()).unwrap();
+        assert_eq!(h.phase(), HubPhase::Funded);
+        assert_eq!(a.signed().unwrap().funding, h.signed().unwrap().funding);
     }
 }

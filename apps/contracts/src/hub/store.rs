@@ -651,6 +651,20 @@ impl Store {
         Ok(())
     }
 
+    /// The bytes free to the hub, and in all, on the filesystem of its
+    /// data, where its openings' instances are kept; none known but on
+    /// Unix.
+    pub fn room(&self) -> Result<Option<(u64, u64)>> {
+        #[cfg(unix)]
+        {
+            let fs = rustix::fs::statvfs(&self.2)?;
+            let free = fs.f_bavail.saturating_mul(fs.f_frsize);
+            Ok(Some((free, fs.f_blocks.saturating_mul(fs.f_frsize))))
+        }
+        #[cfg(not(unix))]
+        Ok(None)
+    }
+
     /// How many openings are under way: not given up, the hub's
     /// signatures not given.
     pub fn under_way(&self) -> Result<usize> {

@@ -76,6 +76,14 @@ fn show(dir: &std::path::Path, store: &Store) -> Result<()> {
     println!("hub_key  {}", hex::encode(status.hub_key));
     println!("sequence {}", status.sequence);
     println!("sealed   {}", status.seal.is_some());
+    match &status.leader {
+        Some(leader) => println!(
+            "epoch    {} (instance {})",
+            leader.epoch,
+            hex::encode(&leader.entry.body)
+        ),
+        None => println!("epoch    0 (never taken over)"),
+    }
     println!("pin      {}", hex::encode(server::pin_of(&cert)));
     Ok(())
 }

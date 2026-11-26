@@ -656,6 +656,18 @@ pub(crate) fn incoming(c: &Connection, id: i64) -> Result<u64, Error> {
     Ok(incoming as u64)
 }
 
+/// How many invoices of account `id`'s address, or its top-ups (of no
+/// connection), are pending and unexpired at `now`.
+pub(crate) fn unpaid_addressed(c: &Connection, id: i64, now: i64) -> Result<u32, Error> {
+    let count: i64 = c.query_row(
+        "SELECT COUNT(*) FROM bridge_invoices
+         WHERE account = ?1 AND connection IS NULL AND state = 'pending' AND expires_at > ?2",
+        params![id, now],
+        |r| r.get(0),
+    )?;
+    Ok(count as u32)
+}
+
 pub(crate) fn insert_receipt(tx: &Transaction<'_>, receipt: &Receipt) -> Result<(), Error> {
     tx.execute(
         "INSERT INTO bridge_invoices (hash, account, connection, invoice, amount, credits,

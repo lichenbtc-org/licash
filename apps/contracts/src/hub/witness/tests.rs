@@ -522,3 +522,148 @@ async fn an_import_sealed_in_part_is_run_again() {
         Some(Decision::Burnt)
     );
 }
+
+/// A copy of the hub taking the contracts over supersedes the others: they
+/// open nothing, their enrollment refused, and answer the contracts open
+/// as ever, each decision as first kept. The superseded copy may take them
+/// back the same way.
+#[tokio::test]
+async fn a_copy_superseded_opens_nothing_and_answers_as_ever() {
+    let (a, b) = (witness().await, witness().await);
+    let master = hub_dir();
+    let witnesses = set(&[&a, &b]);
+    assert_eq!(
+        witnesses.leadership(master.path()).await.unwrap(),
+        Leadership::Unfenced
+    );
+    witnesses
+        .enroll(master.path(), &ID, || Ok(true))
+        .await
+        .unwrap();
+    // Restored elsewhere, from a copy that holds no instance id.
+    let replica = restored(master.path());
+    let replicas = set(&[&a, &b]);
+    assert_eq!(replicas.take_over(replica.path()).await.unwrap(), 1);
+    assert!(replica.path().join(INSTANCE_FILE).is_file());
+    assert_eq!(
+        replicas.leadership(replica.path()).await.unwrap(),
+        Leadership::Leads(1)
+    );
+    assert_eq!(
+        witnesses.leadership(master.path()).await.unwrap(),
+        Leadership::Superseded(1)
+    );
+    // Kept, for a start its witnesses cannot be asked at.
+    assert_eq!(superseded(master.path()).unwrap(), Some(1));
+    assert_eq!(superseded(replica.path()).unwrap(), None);
+    let refused = witnesses
+        .enroll(master.path(), &[2; 32], || Ok(false))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("took the contracts over"),
+        "{refused:#}"
+    );
+    // Even unchecked by the hub: its witnesses refuse it.
+    let mut stale = licash_witness::signed(&SECRET, &SET, &[2; 32], slot::ENROLL, vec![]).unwrap();
+    stale.epoch = 0;
+    let refused = a.client().write(&stale).await.unwrap_err();
+    assert!(format!("{refused:#}").contains("superseded"), "{refused:#}");
+    replicas
+        .enroll(replica.path(), &[2; 32], || Ok(false))
+        .await
+        .unwrap();
+    // Both answer the contract open: one decision, the first.
+    let first = witnesses
+        .authorize(master.path(), &ID, slot::RESPOND, &respond(40))
+        .await
+        .unwrap();
+    let theirs = replicas
+        .authorize(replica.path(), &ID, slot::RESPOND, &respond(60))
+        .await
+        .unwrap();
+    assert_eq!((first, theirs), (respond(40), respond(40)));
+    // Taken back: the next epoch.
+    assert_eq!(witnesses.take_over(master.path()).await.unwrap(), 2);
+    assert_eq!(
+        witnesses.leadership(master.path()).await.unwrap(),
+        Leadership::Leads(2)
+    );
+    assert_eq!(
+        replicas.leadership(replica.path()).await.unwrap(),
+        Leadership::Superseded(2)
+    );
+    assert_eq!(superseded(master.path()).unwrap(), None);
+    assert_eq!(superseded(replica.path()).unwrap(), Some(2));
+}
+
+/// A takeover that reached only its first witness (and stopped there)
+/// fences the other copies all the same, as that witness enrolls nothing
+/// for them; taken again by the same copy, it is finished, never the next
+/// epoch's, so that the copy never supersedes itself. One that cannot
+/// reach every witness at first takes nothing, nor does one of a hub
+/// bound to no set.
+#[tokio::test]
+async fn a_takeover_half_written_fences_all_the_same_and_is_taken_again() {
+    let (a, b) = (witness().await, witness().await);
+    let master = hub_dir();
+    let masters = set(&[&a, &b]);
+    masters
+        .enroll(master.path(), &ID, || Ok(true))
+        .await
+        .unwrap();
+    let replica = restored(master.path());
+    let unbound = hub_dir();
+    assert!(masters.take_over(unbound.path()).await.is_err());
+    assert!(!unbound.path().join(INSTANCE_FILE).exists());
+    let gone = Client::new("https://127.0.0.1:1", [0xff; 32]).unwrap();
+    let unreachable = Witnesses::of(SET, vec![a.client(), gone], SECRET).unwrap();
+    assert!(unreachable.take_over(replica.path()).await.is_err());
+    assert_eq!(
+        masters.leadership(master.path()).await.unwrap(),
+        Leadership::Unfenced
+    );
+    // Stopped after its first witness: kept there alone.
+    keep_instance(replica.path(), &[9; 32]).unwrap();
+    let mut leader =
+        licash_witness::signed(&SECRET, &SET, &leader_id(1), slot::LEADER, vec![9; 32]).unwrap();
+    leader.epoch = 1;
+    let first = if a.pin < b.pin { &a } else { &b };
+    first.client().write(&leader).await.unwrap();
+    assert_eq!(
+        masters.leadership(master.path()).await.unwrap(),
+        Leadership::Superseded(1)
+    );
+    assert!(masters
+        .enroll(master.path(), &[2; 32], || Ok(false))
+        .await
+        .is_err());
+    let replicas = set(&[&a, &b]);
+    assert_eq!(
+        replicas.leadership(replica.path()).await.unwrap(),
+        Leadership::Leads(1)
+    );
+    assert_eq!(replicas.take_over(replica.path()).await.unwrap(), 1);
+    let other = if a.pin < b.pin { &b } else { &a };
+    let kept = other.client().status().await.unwrap().leader.unwrap();
+    assert_eq!((kept.epoch, kept.entry.body), (1, vec![9; 32]));
+    assert_eq!(
+        replicas.leadership(replica.path()).await.unwrap(),
+        Leadership::Leads(1)
+    );
+    // Another copy's takeover is the next epoch's.
+    assert_eq!(masters.take_over(master.path()).await.unwrap(), 2);
+}
+
+/// Without witnesses no copy is fenced, and none can take over.
+#[tokio::test]
+async fn without_witnesses_every_copy_leads_and_none_takes_over() {
+    let hub = hub_dir();
+    let none = Witnesses::none();
+    assert_eq!(
+        none.leadership(hub.path()).await.unwrap(),
+        Leadership::Unfenced
+    );
+    assert!(none.take_over(hub.path()).await.is_err());
+    assert!(!hub.path().join(INSTANCE_FILE).exists());
+}

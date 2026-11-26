@@ -41,6 +41,11 @@ impl Chain for Node {
         self.0.broadcast(tx).await.map(|_| ()).map_err(text)
     }
 
+    /// The node's mempool, or Esplora's mempool and chain.
+    async fn in_mempool(&self, txid: &bitcoin::Txid) -> Result<Option<bool>, String> {
+        self.0.holds(txid).await.map(Some).map_err(text)
+    }
+
     async fn broadcast_package(&self, txs: &[Transaction]) -> Result<(), String> {
         self.0
             .broadcast_package(txs)

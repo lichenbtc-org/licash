@@ -120,6 +120,10 @@ stopped) holds all of them as of one moment. It is not all of `<data>`:
   from its start ([The header chain](#the-header-chain)).
 - `payouts.json`, `notify.json` and `tor/state`.
 
+Never back up, sync or restore `contracts-instance`: it names the copy of
+the hub that took its contracts over ([Taking over](#taking-over)), and
+a copy holding another's would lead beside it.
+
 Copy the database first, then the files: an instance or a receipt is
 written before the database names it, and none is removed, so files
 copied after the database cover all it names. Outside `<data>`, back up
@@ -147,7 +151,7 @@ dbs:
 
 Sync the other files of `<data>` beside it, every few seconds (as with
 `rsync`), leaving out the databases, their `-wal`, `-shm` and `.lock`
-files, and Litestream's `.hub.sqlite-litestream`: a file synced later
+files, Litestream's `.hub.sqlite-litestream` and `contracts-instance`: a file synced later
 than the database that names it is missing from a restore, which the
 hub's alert at start tells of. Restore with `litestream restore -o
 <data>/hub.sqlite file:///REPLICA/hub` first, then the files. Keep Litestream
@@ -169,23 +173,28 @@ paid in full.
 
 Restoring on another host, while contracts may be in dispute:
 
-1. Fence the old host first: stop it for good, and revoke its Core and
-   LND logins. Two hubs answering one claim may sign two different
-   responses with one one-time key, which gives the holder the hub's
-   outputs. Witnesses ([Contract witnesses](#contract-witnesses)) keep
-   them to the same response, but fencing stays mandatory: the old host
-   still spends the wallet and plays the ledger. Never start the hub from
-   a snapshot of a live VM, nor keep one running beside it.
+1. Fence the old host's ledger and wallet: stop it, and revoke its Core
+   and LND logins. Two copies answering one claim are kept to the same
+   answer by the witnesses ([Contract witnesses](#contract-witnesses)),
+   and a copy superseded opens no contract ([Taking over](#taking-over)),
+   but two copies serving wallets fork the ledger, and two spending one
+   wallet race for its coins. Never start the hub from a snapshot of a
+   live VM, nor keep one serving wallets beside it.
 2. Restore the newest copy into `<data>`, with the same Core wallet.
 3. On other hardware, delete `hp-proofs/bench.json`: it is the old
    device's speed, matched by kind (`cuda` or `cpu`) alone, and the hub
    admits and proves by it (below).
-4. Start the hub without its public route (its proxy or onion off; it
-   listens on `127.0.0.1` unless told). It plays the disputes that began
-   while it was down, however long ago, as far as their windows allow.
-   Read its alerts: missing instances, its header chain, its prover.
-5. Open its public route only once the copy is known to be the newest:
-   an older ledger takes spent notes again.
+4. Take the contracts over, `licash-hub contracts-takeover` with the
+   witness flags of `run`, then start the hub with `--respond-only`. It
+   plays the disputes that began while it was down, however long ago, as
+   far as their windows allow, and serves nothing but `/health`. Read its
+   alerts: missing instances, its header chain, its prover, and what its
+   Lightning receipts, deposits and swaps are owed, which no one collects
+   while it responds only. Go on to step 5 before the earliest of their
+   locks expires.
+5. Start it as a whole (without `--respond-only`), and open its public
+   route, only once the copy is known to be the newest: an older ledger
+   takes spent notes again.
 
 A contract's response window (12 blocks at least on signet) is how long
 the hub may be down while a holder exits, from her request to its response
@@ -386,6 +395,13 @@ Reservations remain visible while a service is disabled. A swap's hash
 reservation is not by itself proof that it owns a gateway's existing lock:
 the recorded lock id decides ownership during recovery.
 
+On the clear web the hub (like the bridge, a swap provider and the
+observatory) speaks HTTP/1.1 to at most 1,024 connections at once,
+closing any more as they arrive, and closes a connection whose request
+headers take more than 30 seconds to arrive, or that stays idle that long
+between requests. Its onion service takes at most 128 streams, each given
+120 seconds for its headers.
+
 The hub serves at most 256 requests at once (`/health` aside); any past
 them, of its own API or its swaps', receive 503 at once rather than wait
 in a queue. A request whose body is still arriving 60 seconds after its
@@ -395,9 +411,28 @@ are outside those 256, under budgets and times of their own.
 
 Contract HTTP requests have separate admission budgets for new openings,
 progress and instance downloads; excess requests receive 503 before body
-buffering or node RPC. Four concurrent instance downloads remain supported.
+buffering or node RPC. One source (an onion circuit, an address, or a trusted
+proxy's client) has at most 8 contract requests in flight at once; more
+receive 503 at once. Four concurrent instance downloads remain supported.
 Admission lasts through response delivery, with a five-minute deadline for
-request handling. Onion services accept at most 128 streams and allow two minutes
+request handling. An opening's first request takes at most 1 MiB, and
+each next message (her commitment and openings, about 2.3 MB each at 78
+instances) at most 16 MiB. Requests about a contract opened (folds, evidence,
+proofs) take bodies of at most 256 KiB, which must arrive within 30
+seconds. Each such route reads up to 32 bodies at once, and answers two
+requests at a time only once their bodies have arrived, so clients
+stalling their bodies hold no place to be answered in. An instance upload
+is read only once its opening is known to
+await instances: of an opening unknown or past them, it is refused unread.
+A holder turned away as unavailable asks again after a
+jittered wait that doubles from about 2 seconds to 30, for up to 3 minutes:
+in place for an opening under way (an instance upload cut short too, which
+a 25 MB body learns of as its connection closed rather than as the 503;
+not one whose answer alone was lost, which the opening's resumption sends
+again only if the hub did not answer it),
+and from a new quote at an opening's start, whose deposit the hub gave up
+with it, at most twice: each asks for another of the 8 deposits a coin may
+ask a hub for. Onion services accept at most 128 streams and allow two minutes
 to receive HTTP headers, without limiting a valid response's duration.
 
 With `--nostr-relay URL --announce-url URL` (and `--chain`), the hub
@@ -477,15 +512,29 @@ named after it can be claimed in it: the hub offers no contract until its
 scan of the chain has begun, nor while it lags the tip by more than that
 depth. F, a contract's
 funding, spends the wallet's coins, which stay locked while the opening
-lives. A wallet that has the hub sign F and never broadcasts it holds
-those coins locked, so the hub frees them itself. Once a coin F spends is
+lives. The holder signs her deposit into F first, in her consent: the hub
+checks that signature, and that her deposit is still unspent in its node's
+mempool, before it signs its own inputs, then saves F whole, broadcasts it
+and answers it to her. Its signatures leave only inside the whole F, so a
+holder naming a coin she cannot spend gets none, and the hub signs nothing
+for her. The hub broadcasts F again each round while F is in no block and
+no coin it spends is spent elsewhere. A holder whose F is in no block and
+in no mempool her chain sees 6 blocks after she signed it, as when the hub
+withholds it, spends her deposit back to her own wallet, at no more than
+F's fee rate, so that it never replaces an F a mempool holds. F can still
+stay out of every block, for example when the node never relays it, so
+the hub frees those coins itself. Once a coin F spends is
 spent elsewhere 6 blocks deep (her deposit, say), it gives the opening up
 and unlocks them. If F is still in no block 144 blocks (a day) after the
 hub first saw it, or once F may no longer fund its contract, the hub
 spends one of its own coins F spends back to its wallet, then gives the
 opening up once that is deep. At most 16 signed openings may wait unfunded
 like this; past that, new openings are refused as unavailable, and the
-operator is alerted once. F's fee stays within the quote's ceiling (10
+operator is alerted once. An opening counts from the moment the hub signs
+it, not from the responder's next pass. The 16 bound new openings, not the
+total: up to 16 under way may still be signed past it. While either bound
+is reached, the hub's quotes are refused as unavailable too, before a
+holder asks for a deposit for her reserve. F's fee stays within the quote's ceiling (10
 sat/vB) over F unsigned, as wallets check it: when the node estimates a rate
 near or above the ceiling, F is funded again at a lower one. Since graph id 8,
 a contract's graph returns
@@ -497,6 +546,16 @@ the holder's wallet, kept in `<data>/opening-instances/`. The hub takes one open
 builds one instance, at a time, the others waiting their turn: each opening
 takes about 30 CPU seconds over a few threads, and the hub holds about
 700 MB once it has opened a few: allow it 2 GB of memory.
+
+The hub never removes an instance itself. It quotes and opens no new
+contract (503, logged as an error) while the filesystem of `<data>` has
+less than 5 GiB or 5% free; contracts already open are unaffected. Watch
+its free space, and grow it before it runs out. The instances of an
+opening given up before the hub signed F (abandoned in the dashboard's
+openings), and of a contract ended (logged as `contract ended` with its
+id), are no longer needed: once a backup holds them, their
+`opening-instances/<id>/` directories may be deleted to free space.
+Never delete those of a contract that is still open.
 
 With `--contracts-payout-wallet URL` (a wallet's JSON-RPC, as
 `--contracts-wallet` takes one), each contract opened from then on pays the
@@ -790,6 +849,52 @@ nothing from a link: the hub posts it with the child its other coins make,
 or alone at its presigned fee, and alerts once a contract. Its terminals pay
 no fee of their own and wait for a coin, so keep the wallet funded.
 
+#### Taking over
+
+A copy of the hub takes its contracts over with `licash-hub
+contracts-takeover`, an operator's act on the copy that is to open them
+from now on: it keeps a new instance id in `<data>/contracts-instance`,
+then writes the next epoch, naming it, to every witness. A witness then
+enrolls no contract for a copy of an older epoch, so every other copy
+opens none. Each copy that opens contracts asks its witnesses which leads
+at start and every minute; superseded, it alerts and stops, and started
+again it responds only, as `--respond-only` runs it: no API but
+`/health`, no opening, fold, Lightning, deposit, swap, announcement or
+onion service, its responder, fee bumping and alerts on. It keeps what
+it saw in `<data>/contracts-superseded`, so that started while a witness
+is unreachable it responds only still.
+
+Any number of copies may respond at once, and none signs two answers of
+one one-time key: each answer is the first the witnesses kept, whichever
+copy decided it, and every copy signs it alike. First come is not newest
+wins: a copy restored older answers with what a newer one decided, but a
+copy that decides first (its ledger missing spends the other holds)
+binds every copy to its answer. Leading says which copy opens contracts,
+not which holds the newest ledger. Take the contracts back to the first
+copy the same way, once it is the newest.
+
+A takeover needs the hub's database bound to these witnesses, and every
+witness reachable and of this release (one of an earlier release refuses
+it: upgrade it, then take over again). One that fails part way leaves
+the witnesses it reached keeping the new epoch, which fences the other
+copies all the same: run it again on the same copy, which finishes that
+epoch rather than taking the next. Two copies taking over at once may
+both fail; the first witness by pin decides which leads. A witness
+unreachable leaves leadership unknown: the hub runs as it last knew
+itself (superseded or not), signing no contract answer until it is
+reached, though a hub that runs whole still serves wallets and Lightning.
+Until a first takeover no copy is fenced, as before epochs.
+
+A hub of an earlier release ignores epochs: once another copy took over,
+its enrollments are refused, so it opens no contract, but it still serves
+wallets and runs its gateways. Stop it, as the restore steps say.
+
+The responder can only answer what its node shows it. The hub alerts once
+if the node's tip stays unchanged for 12 blocks' time (2 hours, 6 minutes
+on Mutinynet, never on regtest), which means the node is stalled, out of
+sync or cut off, and once if the responder's rounds fail for 10 minutes.
+It alerts again once each recovers.
+
 A response commits the hub to a proof: its assertion must confirm within
 the assert window (48 blocks on signet, 2 of them to confirm in), or the
 holder's timeout pays her what she claims, as if it had not responded. So
@@ -986,6 +1091,12 @@ misconfigured proxy shows at once. For Traefik:
 - firewall `--listen` so only Traefik reaches it: a client reaching the
   hub directly from within a trusted block could name any source.
 
+The hub bounds what is asked and not paid, and what runs at once, but not
+how often one client asks. On the clear web, also limit each client's
+request rate at the proxy (Traefik's `rateLimit` middleware, with
+`sourceCriterion.ipStrategy`), keyed by its address, at well above what a
+wallet asks (a few requests a second, in bursts of some tens).
+
 Deposits and receipts recorded by an older release keep the source it
 stored, its peer's address and port: they count against that address
 until paid or ended.
@@ -1035,6 +1146,22 @@ Before starting it:
   Its contracts under way are answered only once it runs again, so do this
   before their deadlines. Never start an earlier release on a `hub.sqlite`
   bound to witnesses: it knows none, and signs as if it had none.
+- Witnesses keep which copy of the hub leads ([Taking over](#taking-over)):
+  upgrade every witness before taking over, as one of an earlier release
+  refuses it. Nothing changes until a first takeover: no epoch, no
+  `contracts-instance`, every copy unfenced as before. Once one copy took
+  over, an earlier release of the hub on another copy opens no contract
+  (its enrollments are refused), and answers as ever, but still serves
+  wallets. An upgraded hub with witnesses asks them which copy leads at
+  start and every minute; one unreachable is tolerated.
+- Openings speak version 3 of the opening protocol: she signs her deposit
+  into F before the hub signs. Upgrade the hub first, then the apps. An app
+  of version 2 opens no contract at a hub of version 3 until it is updated.
+  An opening already under way when the hub is upgraded finishes once its
+  app is updated too, before the hub abandons it after an hour idle. One
+  the hub had already signed finishes the old way. Once a hub has stored an
+  opening of version 3, do not downgrade it: an earlier release cannot read
+  that opening.
 
 ### From a ledger of schema 3
 

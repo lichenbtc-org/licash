@@ -243,6 +243,14 @@ async fn rpc(
             }
             None => rpc_error(-5, "Block not found"),
         },
+        "getmempoolentry" => {
+            let sent = chain.sent.lock().unwrap();
+            let txid = params[0].as_str().unwrap_or_default();
+            match sent.iter().any(|tx| tx.compute_txid().to_string() == txid) {
+                true => rpc_reply(json!({"vsize": 100})),
+                false => rpc_error(-5, "Transaction not in mempool"),
+            }
+        }
         "sendrawtransaction" => match send(&chain, params[0].as_str().unwrap_or_default()) {
             Ok(txid) => rpc_reply(json!(txid)),
             Err((code, message)) => rpc_error(code, message),
@@ -536,6 +544,12 @@ async fn esplora_tx(State(chain): State<Arc<Chain>>, Path(txid): Path<String>) -
     }
 }
 
+/// A transaction's status as Blockstream's electrs answers it: unconfirmed,
+/// even for one it never saw.
+async fn electrs_status() -> Json<Value> {
+    Json(json!({"confirmed": false}))
+}
+
 /// [`esplora_tx`], telling as few spends as [`mempool_txs`].
 async fn stingy_tx(State(chain): State<Arc<Chain>>, Path(txid): Path<String>) -> Response {
     match tx_of(&chain, &txid) {
@@ -607,6 +621,7 @@ async fn serve(
         .route("/api/block/{hash}/txs/{start}", get(esplora_txs))
         .route("/api/tx", post(esplora_send))
         .route("/api/tx/{txid}", get(esplora_tx))
+        .route("/api/tx/{txid}/status", get(electrs_status))
         // mempool's backend, and one telling no more of a transaction alone.
         .route("/mempool/api/blocks/tip/height", get(esplora_tip))
         .route("/mempool/api/block-height/{height}", get(esplora_hash))
@@ -1126,4 +1141,39 @@ async fn an_esplora_limiting_its_rate_is_asked_again_as_it_tells() {
     let error = format!("{:#}", refusing.tip().await.unwrap_err());
     assert!(error.contains("429"), "{error}");
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn a_node_tells_what_its_mempool_holds_and_esplora_what_it_ever_saw() {
+    let blocks = mine(4);
+    let address = serve(blocks.clone(), PASSWORD, None).await;
+    let [node, esplora] = sources(&address);
+    let unknown = bitcoin::Txid::from_byte_array([7; 32]);
+    let mined = blocks[2].txdata[0].compute_txid();
+    // In a block: no longer in the node's mempool; Esplora knows it.
+    assert!(!node.holds(&mined).await.unwrap());
+    assert!(esplora.holds(&mined).await.unwrap());
+    // Never seen: by neither, though electrs calls its status unconfirmed.
+    assert!(!node.holds(&unknown).await.unwrap());
+    assert!(!esplora.holds(&unknown).await.unwrap());
+    // Handed to the node: in its mempool.
+    let spend = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: coinbase_of(&blocks, 4),
+                vout: 7,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(45),
+            script_pubkey: script(0, 1),
+        }],
+    };
+    let txid = node.broadcast(&spend).await.unwrap();
+    assert!(node.holds(&txid).await.unwrap());
 }

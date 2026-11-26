@@ -4,10 +4,14 @@
 //! whose receipt the bridge publishes once paid. Served where the bridge's
 //! public URL says, if it does ([`crate::Config::public_url`]).
 
-use std::sync::Arc;
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
+    http::{Extensions, HeaderMap},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -26,6 +30,42 @@ const COMMENT: usize = 255;
 /// The most relays a zap receipt is published to, of those its request
 /// names.
 const ZAP_RELAYS: usize = 8;
+
+/// The most invoices of an account's address unpaid and unexpired: past
+/// them its callback refuses, so that anyone asking for many fills only
+/// that address, not the bridge's room at its hub.
+pub(crate) const MAX_UNPAID: u32 = 64;
+
+/// The most addresses of an `X-Forwarded-For` the bridge passes on, its
+/// caller's own added: as many as a hub reads.
+const MAX_FORWARDED: usize = 16;
+
+/// The `X-Forwarded-For` the bridge sends its hub for a caller at `peer`:
+/// those `headers` forward for (if each is a bare IP address, and but a
+/// few), then `peer`, as a proxy appends its client. A hub that trusts the
+/// bridge (and any proxy before it) counts each caller apart; one that
+/// does not reads no forwarded address of the bridge's.
+fn forwarded_for(headers: &HeaderMap, peer: IpAddr) -> String {
+    let mut chain = Vec::new();
+    for value in headers.get_all("x-forwarded-for") {
+        let Ok(value) = value.to_str() else {
+            chain.clear();
+            break;
+        };
+        chain.extend(value.split(',').map(|hop| hop.trim().parse::<IpAddr>()));
+    }
+    // A hop that does not parse makes none of them trusted.
+    let mut chain: Vec<IpAddr> = chain
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .unwrap_or_default();
+    if chain.len() >= MAX_FORWARDED {
+        chain.clear();
+    }
+    chain.push(peer.to_canonical());
+    let chain: Vec<String> = chain.iter().map(IpAddr::to_string).collect();
+    chain.join(", ")
+}
 
 /// The host, and port if any, of `url`: what its Lightning Addresses are
 /// at.
@@ -200,6 +240,12 @@ impl<T: Transport> Bridge<T> {
         comment: Option<&str>,
     ) -> Result<Value, Error> {
         let (id, address) = self.addressed(name)?;
+        let unpaid = (self.store).read(|c| crate::store::unpaid_addressed(c, id, crate::now()))?;
+        if unpaid >= MAX_UNPAID {
+            return Err(Error::Quota(format!(
+                "{MAX_UNPAID} invoices of this address are unpaid: later"
+            )));
+        }
         let (least, most) = self.sendable()?;
         if amount < least || amount > most {
             return Err(Error::Invalid(format!(
@@ -347,9 +393,21 @@ pub(crate) fn router<T: Transport + 'static>(bridge: Arc<Bridge<T>>) -> Router {
             get(
                 |State(b): State<Arc<Bridge<T>>>,
                  Path(name): Path<String>,
-                 Query(q): Query<Callback>| async move {
+                 Query(q): Query<Callback>,
+                 headers: HeaderMap,
+                 extensions: Extensions| async move {
                     let paid = b.pay_address(&name, q.amount, q.nostr.as_deref(), q.comment.as_deref());
-                    lnurl(paid.await)
+                    // Its invoice asked of the hub for the caller, served
+                    // over TCP: counted as theirs by a hub trusting the
+                    // bridge as its proxy.
+                    let lnurl_ = match extensions.get::<ConnectInfo<SocketAddr>>() {
+                        Some(ConnectInfo(peer)) => {
+                            let chain = forwarded_for(&headers, peer.ip());
+                            licash_transport::forwarding_for(chain, paid).await
+                        }
+                        None => paid.await,
+                    };
+                    lnurl(lnurl_)
                 },
             ),
         )
@@ -362,4 +420,41 @@ pub(crate) fn router<T: Transport + 'static>(bridge: Arc<Bridge<T>>) -> Router {
             ),
         )
         .with_state(bridge)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers(values: &[&str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for value in values {
+            headers.append("x-forwarded-for", value.parse().unwrap());
+        }
+        headers
+    }
+
+    /// The caller is always last, as its proxy appends it: a hub walking
+    /// from the right stops at it unless it trusts it, so no caller names
+    /// another.
+    #[test]
+    fn a_caller_is_forwarded_for_after_those_it_forwards_for() {
+        let peer: IpAddr = "198.51.100.2".parse().unwrap();
+        assert_eq!(forwarded_for(&headers(&[]), peer), "198.51.100.2");
+        assert_eq!(
+            forwarded_for(&headers(&["203.0.113.7", "192.0.2.1, 192.0.2.9"]), peer),
+            "203.0.113.7, 192.0.2.1, 192.0.2.9, 198.51.100.2"
+        );
+        // An IPv4 peer over IPv6 is that IPv4 address.
+        let mapped: IpAddr = "::ffff:198.51.100.2".parse().unwrap();
+        assert_eq!(forwarded_for(&headers(&[]), mapped), "198.51.100.2");
+        // Malformed, or too long, what it forwards for is dropped.
+        for odd in ["203.0.113.7:80", "unknown", &["192.0.2.1"; 16].join(",")] {
+            assert_eq!(
+                forwarded_for(&headers(&[odd]), peer),
+                "198.51.100.2",
+                "{odd}"
+            );
+        }
+    }
 }

@@ -419,6 +419,30 @@ async fn a_halted_hub_is_unhealthy_and_serves_nothing() {
     assert_eq!(problem.code, Code::Unavailable);
 }
 
+/// A copy of the hub responding only serves its health and nothing a
+/// wallet asks: no spend, info or lock, so it forks no ledger.
+#[tokio::test]
+async fn a_hub_responding_only_serves_its_health_alone() {
+    let mut service = service(0);
+    service.app = licash_hub_service::responding(service.hub.clone());
+    let (status, _) = service
+        .call(Method::GET, licash_hub_service::HEALTH, None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let alice = owner(1);
+    let coin = service.mint(&alice, 8);
+    let (proposal, _) = spend(&service.keyset, &coin, &[(alice.address(), 8)]);
+    let offer = json(&Offer::new(&proposal, std::slice::from_ref(&coin.note)));
+    let (status, _) = service
+        .call(Method::POST, licash_api::OFFER, Some(offer))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    for path in [licash_api::INFO, licash_api::LOCK_STATE] {
+        let (status, _) = service.call(Method::GET, path, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
+}
+
 /// A JSON webhook, and the titles it took.
 async fn hook() -> (licash_notify::Target, Arc<Mutex<Vec<String>>>) {
     let titles = Arc::new(Mutex::new(Vec::new()));
