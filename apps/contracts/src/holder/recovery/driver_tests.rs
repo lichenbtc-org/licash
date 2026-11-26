@@ -964,19 +964,48 @@ fn a_dispute_is_made_of_transactions_of_known_size() {
 }
 
 /// Each way a forced close ends, in transactions as the chain would see
-/// them: how many, the largest, the largest nulldata output, and what
-/// they weigh in all, with her publication at one, eight and 32 settled
-/// notes (`publication_vsize`'s bytes a note) and the hub's disclosure at
-/// its most (1 024 bytes). Fee inputs and payout sweeps are not counted.
-/// `--nocapture` prints the table `docs/r0.md` quotes.
+/// them: how many, the largest, the largest carrier (nulldata output, or
+/// leaf envelope script), and what they weigh in all, with her publication
+/// at one, eight and 32 settled notes (`publication_vsize`'s bytes a note)
+/// and the hub's disclosure at its most (1 024 bytes). Fee inputs and
+/// payout sweeps are not counted; under a leaf carrier her commitment C,
+/// which her publication spends, is, and the hub's disclosure counts its
+/// fee coin, the envelope. `--nocapture` prints the tables `docs/r0.md`
+/// quotes.
 #[test]
 fn each_exit_weighs_its_transactions_and_its_largest_carrier() {
+    exits_weighed(crate::testing::opened(), false);
+}
+
+/// [`each_exit_weighs_its_transactions_and_its_largest_carrier`] of a graph
+/// carrying her claim and the hub's disclosure in leaf envelopes: each path
+/// a fraction of nulldata's, its largest transaction a link of the proof's.
+#[test]
+fn each_exit_weighs_its_transactions_and_its_largest_carrier_in_leaf_envelopes() {
+    exits_weighed(crate::testing::opened_leaf(), true);
+}
+
+/// `before`, then `published`, then `after`.
+fn joined<'a>(
+    published: &[&'a Transaction],
+    before: &[&'a Transaction],
+    after: &[&'a Transaction],
+) -> Vec<&'a Transaction> {
+    [before, published, after].concat()
+}
+
+fn exits_weighed(saved: &crate::testing::Opened, leaf: bool) {
     use licash::recovery::Format;
     use licash_contract::reserve::publication_vsize;
 
-    let (o, keys) = signed();
-    let w = World::new();
-    let ho = w.hub.signed().unwrap();
+    let ctx = Context {
+        tip: 0,
+        trust: Trust::mock(),
+    };
+    let (o, keys) = signed_of(saved);
+    let hub = Hub::load(&saved.hub, &ctx).unwrap();
+    let ho = hub.signed().unwrap();
+    assert_eq!(o.carrier() == licash_statement::Carrier::Leaf, leaf);
     let proof = lichen_babe::statement::mock_prove(&licash_contract::graph::journal(&o.base));
     let fee = |name: &str| {
         let p = presign(&o.set, name).unwrap();
@@ -992,32 +1021,106 @@ fn each_exit_weighs_its_transactions_and_its_largest_carrier() {
         )
         .unwrap()
     };
-    // The nulldata a transaction carries: its OP_RETURN outputs' scripts.
+    // The bytes a transaction carries: its OP_RETURN outputs' scripts, or
+    // the envelope scripts its inputs reveal.
     let carried = |tx: &Transaction| {
-        tx.output
-            .iter()
+        let returns = (tx.output.iter())
             .filter(|o| o.script_pubkey.is_op_return())
-            .map(|o| o.script_pubkey.len())
-            .max()
-            .unwrap_or(0)
+            .map(|o| o.script_pubkey.len());
+        let envelopes = (tx.input.iter())
+            .filter_map(|i| i.witness.nth(1))
+            .filter(|s| licash_statement::enveloped(s).is_some())
+            .map(|s| s.len());
+        returns.chain(envelopes).max().unwrap_or(0)
     };
     let request = o.request(&keys, 4096, &[22; 32]).unwrap();
-    let respond = ho.respond(w.hub.keys(), 2048).unwrap();
+    let respond = ho.respond(hub.keys(), 2048).unwrap();
     let contest = o.contest(&keys).unwrap();
-    let assertion = ho.assert(w.hub.keys(), &proof).unwrap();
+    let assertion = ho.assert(hub.keys(), &proof).unwrap();
     let challenge = o.challenge(&keys, &assertion).unwrap();
-    let disclosure = ho.disclosure(w.hub.keys(), &[7; 1024], vec![]).unwrap();
+    let disclosure = {
+        let bytes = [7; 1024];
+        let tx = ho.disclosure(hub.keys(), &bytes, vec![]).unwrap();
+        match leaf {
+            false => tx,
+            true => {
+                let key = &hub.keys().party.payment;
+                let tree = dispute::envelope_tree(key, &bytes).unwrap();
+                let slot = presign(&ho.set, "respond").unwrap().tx.output
+                    [licash_statement::SLOT_VOUT as usize]
+                    .clone();
+                let coin = TxOut {
+                    value: Amount::from_sat(5_000),
+                    script_pubkey: tree.script_pubkey(),
+                };
+                let tree = dispute::CoinTree::Envelope(tree);
+                let mut tx = dispute::add_fee_of(
+                    tx,
+                    slot.clone(),
+                    (OutPoint::null(), coin.clone()),
+                    key,
+                    &tree,
+                )
+                .unwrap();
+                ho.seal(hub.keys(), &mut tx, &[slot, coin]).unwrap();
+                tx
+            }
+        }
+    };
     let wrongly = ho
         .finish(
             "wrongly_challenged_0",
             licash_contract::graph::HubProves::wrongly_wire(&[5; 32]),
         )
         .unwrap();
-    let publication = |notes: u32| {
-        // Her filing's bytes, as the reserve sizes them: a vB a byte, but
-        // for the transaction around them.
-        let bytes = publication_vsize(Format::Lean, notes) as usize - 120;
-        o.publication(&keys, &vec![9; bytes], vec![]).unwrap()
+    // Her publication, and under a leaf carrier the commitment it spends.
+    let publication = |notes: u32| -> Vec<Transaction> {
+        // Her filing's bytes, as the reserve sizes them: a vB a byte in
+        // nulldata, but for the transaction around them.
+        let bytes = vec![9; publication_vsize(Format::Lean, notes) as usize - 120];
+        if !leaf {
+            return vec![o.publication(&keys, &bytes, vec![]).unwrap()];
+        }
+        let fee_script = dispute::fee_script(&keys.party.payment).unwrap();
+        let c = o
+            .commitment(&keys, &request, &bytes, Amount::from_sat(344))
+            .unwrap();
+        let out = |value| TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: fee_script.clone(),
+        };
+        let mut p = o
+            .publication(&keys, &bytes, vec![out(DUST.to_sat()), out(10_000)])
+            .unwrap();
+        let slot = presign(&o.set, "request").unwrap().tx.output
+            [licash_statement::SLOT_VOUT as usize]
+            .clone();
+        let mut prevouts = vec![slot, request.output[1].clone()];
+        p.input.push(TxIn {
+            previous_output: OutPoint {
+                txid: request.compute_txid(),
+                vout: 1,
+            },
+            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            ..Default::default()
+        });
+        for vout in [dispute::COMMITTED, dispute::COMMITTED + 1] {
+            p.input.push(TxIn {
+                previous_output: OutPoint {
+                    txid: c.compute_txid(),
+                    vout,
+                },
+                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                ..Default::default()
+            });
+            prevouts.push(c.output[vout as usize].clone());
+        }
+        o.sign_publication(&keys, &mut p, &prevouts, &bytes)
+            .unwrap();
+        for i in [1, 3] {
+            dispute::sign_fee_input(&keys.party.payment, &mut p, i, &prevouts).unwrap();
+        }
+        vec![c, p]
     };
     let (one, eight, most) = (publication(1), publication(8), publication(32));
     let [request_timeout, respond_timeout, contest_timeout, success, failure] = [
@@ -1028,72 +1131,91 @@ fn each_exit_weighs_its_transactions_and_its_largest_carrier() {
         "failure",
     ]
     .map(fee);
-    for (name, tx) in [("1", &one), ("8", &eight), ("32", &most)] {
+    let vsize = |txs: &[Transaction]| txs.iter().map(|t| t.vsize()).sum::<usize>();
+    for (name, txs) in [("1", &one), ("8", &eight), ("32", &most)] {
         eprintln!(
-            "publication of {name:>2} notes: {:>6} vB, nulldata {:>6} B",
-            tx.vsize(),
-            carried(tx)
+            "publication of {name:>2} notes: {:>6} vB in {} txs, carrier {:>6} B",
+            vsize(txs),
+            txs.len(),
+            txs.iter().map(|t| carried(t)).max().unwrap()
         );
     }
+    eprintln!(
+        "disclosure: {} vB, carrier {} B",
+        disclosure.vsize(),
+        carried(&disclosure)
+    );
+    let published: Vec<&Transaction> = most.iter().collect();
     let paths: Vec<(&str, Vec<&Transaction>)> = vec![
-        ("the hub silent", vec![&request, &most, &request_timeout]),
+        (
+            "the hub silent",
+            joined(&published, &[&request], &[&request_timeout]),
+        ),
         (
             "uncontested",
-            vec![&request, &most, &respond, &respond_timeout],
+            joined(&published, &[&request], &[&respond, &respond_timeout]),
         ),
         (
             "uncontested, disclosed",
-            vec![&request, &most, &respond, &disclosure, &respond_timeout],
+            joined(
+                &published,
+                &[&request],
+                &[&respond, &disclosure, &respond_timeout],
+            ),
         ),
         (
             "contested, the hub silent",
-            vec![&request, &most, &respond, &contest, &contest_timeout],
+            joined(
+                &published,
+                &[&request],
+                &[&respond, &contest, &contest_timeout],
+            ),
         ),
         (
             "asserted, unchallenged",
-            vec![
-                &request,
-                &most,
-                &respond,
-                &disclosure,
-                &contest,
-                &assertion,
-                &success,
-            ],
+            joined(
+                &published,
+                &[&request],
+                &[&respond, &disclosure, &contest, &assertion, &success],
+            ),
         ),
         (
             "challenged, unanswered",
-            vec![
-                &request,
-                &most,
-                &respond,
-                &disclosure,
-                &contest,
-                &assertion,
-                &challenge,
-                &failure,
-            ],
+            joined(
+                &published,
+                &[&request],
+                &[
+                    &respond,
+                    &disclosure,
+                    &contest,
+                    &assertion,
+                    &challenge,
+                    &failure,
+                ],
+            ),
         ),
         (
             "challenged, answered",
-            vec![
-                &request,
-                &most,
-                &respond,
-                &disclosure,
-                &contest,
-                &assertion,
-                &challenge,
-                &wrongly,
-            ],
+            joined(
+                &published,
+                &[&request],
+                &[
+                    &respond,
+                    &disclosure,
+                    &contest,
+                    &assertion,
+                    &challenge,
+                    &wrongly,
+                ],
+            ),
         ),
     ];
     for (name, txs) in &paths {
         let total: usize = txs.iter().map(|t| t.vsize()).sum();
         let largest = txs.iter().map(|t| t.vsize()).max().unwrap();
-        let nulldata = txs.iter().map(|t| carried(t)).max().unwrap();
+        let carrier = txs.iter().map(|t| carried(t)).max().unwrap();
         eprintln!(
-            "{name:>26}: {:>2} txs, {total:>6} vB, largest {largest:>6} vB, nulldata {nulldata:>6} B",
+            "{name:>26}: {:>2} txs, {total:>6} vB, largest {largest:>6} vB, carrier {carrier:>6} B",
             txs.len()
         );
         // Every one standard by size (100 kvB), and the whole within the
@@ -1103,8 +1225,17 @@ fn each_exit_weighs_its_transactions_and_its_largest_carrier() {
     // The largest carrier is her filing's, at the most notes; the hub's
     // disclosure is a kB.
     assert!(carried(&disclosure) <= 1_100);
-    assert!(carried(&most) <= 14_000, "{}", carried(&most));
+    assert!(carried(&most[most.len() - 1]) <= 14_000);
     assert!(wrongly.vsize() <= 800, "{}", wrongly.vsize());
+    if leaf {
+        // As the reserve weighs C and P.
+        let weighed = vsize(&most) as u64;
+        let model = licash_contract::reserve::leaf_publication_vsize(32);
+        assert!(
+            (model - 150..=model).contains(&weighed),
+            "{weighed} of {model}"
+        );
+    }
 }
 
 /// A claim its statement would find wrong, and owe nothing, is told so

@@ -64,6 +64,12 @@ pub(crate) fn opened_returning() -> &'static Opened {
     static OPENED: OnceLock<Opened> = OnceLock::new();
     OPENED.get_or_init(|| build(licash_contract::graph::RETURNING))
 }
+/// As [`opened`], of a graph carrying her claim and the hub's disclosure in
+/// leaf envelopes ([`licash::recovery::LEAF_FROM`]).
+pub(crate) fn opened_leaf() -> &'static Opened {
+    static OPENED: OnceLock<Opened> = OnceLock::new();
+    OPENED.get_or_init(|| build(licash::recovery::LEAF_FROM))
+}
 fn sign(tx: &mut Transaction, prevouts: &[TxOut], inputs: &[usize], key: &Keypair) {
     for &i in inputs {
         let hash = SighashCache::new(&*tx)
