@@ -236,6 +236,13 @@ pub struct Services {
     pub ingress: Arc<Ingress>,
 }
 
+/// What a hub responding only serves ([`HEALTH`]): nothing a wallet asks
+/// of it, as its ledger takes no client's spend, so that a copy of the hub
+/// that does not lead forks no ledger of the one that does.
+pub fn responding(hub: Arc<Hub>) -> Router {
+    Router::new().route(HEALTH, get(health)).with_state(hub)
+}
+
 /// The API of `hub`, with the paths of its `services`.
 pub fn router(hub: Arc<Hub>, services: Services) -> Router {
     let Services {

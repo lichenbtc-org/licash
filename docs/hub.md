@@ -120,6 +120,10 @@ stopped) holds all of them as of one moment. It is not all of `<data>`:
   from its start ([The header chain](#the-header-chain)).
 - `payouts.json`, `notify.json` and `tor/state`.
 
+Never back up, sync or restore `contracts-instance`: it names the copy of
+the hub that took its contracts over ([Taking over](#taking-over)), and
+a copy holding another's would lead beside it.
+
 Copy the database first, then the files: an instance or a receipt is
 written before the database names it, and none is removed, so files
 copied after the database cover all it names. Outside `<data>`, back up
@@ -147,7 +151,7 @@ dbs:
 
 Sync the other files of `<data>` beside it, every few seconds (as with
 `rsync`), leaving out the databases, their `-wal`, `-shm` and `.lock`
-files, and Litestream's `.hub.sqlite-litestream`: a file synced later
+files, Litestream's `.hub.sqlite-litestream` and `contracts-instance`: a file synced later
 than the database that names it is missing from a restore, which the
 hub's alert at start tells of. Restore with `litestream restore -o
 <data>/hub.sqlite file:///REPLICA/hub` first, then the files. Keep Litestream
@@ -169,23 +173,25 @@ paid in full.
 
 Restoring on another host, while contracts may be in dispute:
 
-1. Fence the old host first: stop it for good, and revoke its Core and
-   LND logins. Two hubs answering one claim may sign two different
-   responses with one one-time key, which gives the holder the hub's
-   outputs. Witnesses ([Contract witnesses](#contract-witnesses)) keep
-   them to the same response, but fencing stays mandatory: the old host
-   still spends the wallet and plays the ledger. Never start the hub from
-   a snapshot of a live VM, nor keep one running beside it.
+1. Fence the old host's ledger and wallet: stop it, and revoke its Core
+   and LND logins. Two copies answering one claim are kept to the same
+   answer by the witnesses ([Contract witnesses](#contract-witnesses)),
+   and a copy superseded opens no contract ([Taking over](#taking-over)),
+   but two copies serving wallets fork the ledger, and two spending one
+   wallet race for its coins. Never start the hub from a snapshot of a
+   live VM, nor keep one serving wallets beside it.
 2. Restore the newest copy into `<data>`, with the same Core wallet.
 3. On other hardware, delete `hp-proofs/bench.json`: it is the old
    device's speed, matched by kind (`cuda` or `cpu`) alone, and the hub
    admits and proves by it (below).
-4. Start the hub without its public route (its proxy or onion off; it
-   listens on `127.0.0.1` unless told). It plays the disputes that began
-   while it was down, however long ago, as far as their windows allow.
-   Read its alerts: missing instances, its header chain, its prover.
-5. Open its public route only once the copy is known to be the newest:
-   an older ledger takes spent notes again.
+4. Take the contracts over, `licash-hub contracts-takeover` with the
+   witness flags of `run`, then start the hub with `--respond-only`. It
+   plays the disputes that began while it was down, however long ago, as
+   far as their windows allow, and serves nothing but `/health`. Read its
+   alerts: missing instances, its header chain, its prover.
+5. Start it as a whole (without `--respond-only`), and open its public
+   route, only once the copy is known to be the newest: an older ledger
+   takes spent notes again.
 
 A contract's response window (12 blocks at least on signet) is how long
 the hub may be down while a holder exits, from her request to its response
@@ -836,6 +842,32 @@ nothing from a link: the hub posts it with the child its other coins make,
 or alone at its presigned fee, and alerts once a contract. Its terminals pay
 no fee of their own and wait for a coin, so keep the wallet funded.
 
+#### Taking over
+
+A copy of the hub takes its contracts over with `licash-hub
+contracts-takeover`, an operator's act on the copy that is to open them
+from now on: it keeps a new instance id in `<data>/contracts-instance`,
+then writes the next epoch, naming it, to every witness. A witness then
+enrolls no contract for a copy of an older epoch, so every other copy
+opens none. Each copy that opens contracts asks its witnesses which leads
+at start and every minute; superseded, it alerts and stops, and started
+again it responds only, as `--respond-only` runs it: no API but
+`/health`, no opening, fold, Lightning, deposit, swap, announcement or
+onion service, its responder, fee bumping and alerts on. Any number of
+copies may respond at once: each one-time answer is the first the
+witnesses kept, whichever copy decided it, and each signs it alike, so a
+copy restored older answers with what the newer decided. Take the
+contracts back to the first copy the same way, once it is the newest.
+
+A takeover needs every witness reachable and of this release (one of an
+earlier release refuses it: upgrade it, then take over again), and fails,
+taking nothing, otherwise. One that stopped after its first witness
+fences the other copies all the same; run it again. A witness unreachable
+leaves leadership unknown: the hub runs as asked, and signs nothing new
+anyway. Until a first takeover no copy is fenced, as before epochs. A hub
+of an earlier release ignores epochs, but its enrollments are refused
+once another copy took over: it opens nothing.
+
 The responder can only answer what its node shows it. The hub alerts once
 if the node's tip stays unchanged for 12 blocks' time (2 hours, 6 minutes
 on Mutinynet, never on regtest), which means the node is stalled, out of
@@ -1093,6 +1125,12 @@ Before starting it:
   Its contracts under way are answered only once it runs again, so do this
   before their deadlines. Never start an earlier release on a `hub.sqlite`
   bound to witnesses: it knows none, and signs as if it had none.
+- Witnesses keep which copy of the hub leads ([Taking over](#taking-over)):
+  upgrade every witness before taking over, as one of an earlier release
+  refuses it. Nothing changes until a first takeover: no epoch, no
+  `contracts-instance`, every copy unfenced as before. Once one copy took
+  over, an earlier release of the hub on another copy opens no contract
+  (its enrollments are refused), and answers as ever.
 - Openings speak version 3 of the opening protocol: she signs her deposit
   into F before the hub signs. Upgrade the hub first, then the apps. An app
   of version 2 opens no contract at a hub of version 3 until it is updated.

@@ -1063,6 +1063,14 @@ enum Command {
         #[arg(long, value_name = "KIND", env = "LICASH_HUB_NOTIFY_KINDS", value_delimiter = ',',
               value_parser = clap::builder::PossibleValuesParser::new(notify::KINDS))]
         notify_kinds: Vec<String>,
+        /// Only answer the disputes of the contracts open, as a standby
+        /// copy of the hub: no API but `/health`, no new contract, fold,
+        /// Lightning, deposit, swap, announcement nor onion service. As a
+        /// copy runs once another took its contracts over
+        /// (`contracts-takeover`). Needs `--contracts` and witnesses.
+        #[arg(long, env = "LICASH_HUB_RESPOND_ONLY",
+              value_parser = clap::builder::BoolishValueParser::new())]
+        respond_only: bool,
     },
     /// Send a test notification to each `--notify` target. Fails if any
     /// target does not take it.
@@ -1129,6 +1137,18 @@ enum Command {
         /// The hub's network: bitcoin, regtest, signet or mutinynet.
         #[arg(long, env = "LICASH_HUB_NETWORK")]
         network: ChainProfile,
+    },
+    /// Take the contracts over for this copy of the hub, on the copy that
+    /// is to open contracts from now on: the next epoch, kept by every
+    /// witness, naming this copy (its id in `<data>/contracts-instance`,
+    /// never to be backed up or copied). Every other copy then opens no
+    /// contract and serves no wallet, and answers the disputes of those
+    /// open, as each may. Fails, taking nothing, where a witness cannot be
+    /// reached; where one is of an earlier release, upgrade it and run
+    /// again.
+    ContractsTakeover {
+        #[command(flatten)]
+        witnesses: WitnessArgs,
     },
     /// The hub's events as JSON lines, oldest first.
     Events {
@@ -1210,7 +1230,15 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             onion_pow,
             allow_unbacked_locks,
             notify_kinds,
+            respond_only,
         } => {
+            let respond_only = match responding_only(respond_only, &chain, &seed, &cli.data)? {
+                Some(why) => {
+                    tracing::warn!("responding only: {why}");
+                    true
+                }
+                None => false,
+            };
             let policy = policy.policy();
             let lock_window = policy.timing.window;
             let (indexing, tweaks_from) = (chain.tweaks, chain.tweaks_from);
@@ -1248,12 +1276,16 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 !contracting || chain.is_some(),
                 "opening contracts (--contracts) needs --chain"
             );
-            let lightning = lightning.gateway()?;
+            let lightning = match respond_only {
+                true => None,
+                false => lightning.gateway()?,
+            };
             anyhow::ensure!(
                 lightning.is_none() || chain.is_some(),
                 "a Lightning gateway (--lnd) needs --chain"
             );
             let depositing = match &chain {
+                Some(_) if respond_only => None,
                 // Polling the chain as often as the hub follows it.
                 Some((source, profile, every)) => deposits.config(*profile)?.map(|config| {
                     let config = deposit::Config {
@@ -1271,13 +1303,21 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 }
             };
             let relays = announce.mailboxes();
-            let mut announcing = (*announce).announcing(onion)?;
+            let onion = onion && !respond_only;
+            let mut announcing = match respond_only {
+                true => None,
+                false => (*announce).announcing(onion)?,
+            };
             anyhow::ensure!(
                 announcing.is_none() || chain.is_some(),
                 "announcing on Nostr (--nostr-relay) needs --chain"
             );
-            let swapping = swaps.terms()?;
-            let swaps_tor = swaps.swaps_tor;
+            let swapping = match respond_only {
+                true => None,
+                false => swaps.terms()?,
+            };
+            let swaps_tor = swaps.swaps_tor && !respond_only;
+            let indexing = indexing && !respond_only;
             anyhow::ensure!(
                 swapping.is_none() || chain.is_some(),
                 "providing swaps (--swaps) needs --chain"
@@ -1287,7 +1327,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 _ => false,
             };
             let swaps_dir = cli.data.join("swaps");
-            if swapping.is_none() {
+            if swapping.is_none() && !respond_only {
                 check_idle(&swaps_dir)?;
             }
             let targets = notify.targets()?;
@@ -1303,10 +1343,11 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             };
             let hub = Hub::open(&seed, &db, policy).context("open the hub")?;
             let hub = Arc::new(hub);
-            if lightning.is_none() {
+            // Responding only, what they owe waits for the copy that leads.
+            if lightning.is_none() && !respond_only {
                 check_gateway_idle(&hub, &db, false)?;
             }
-            if depositing.is_none() {
+            if depositing.is_none() && !respond_only {
                 check_gateway_idle(&hub, &db, true)?;
             }
             // Paused as it was when the hub stopped, before anything is paid.
@@ -1399,6 +1440,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                         Some(deposits) => {
                             licash_hub_service::close_with_deposits(&openings, deposits.clone())
                         }
+                        None if respond_only => {}
                         None => tracing::warn!(
                             "contracts are on and deposits are not (--deposit-sweep-address): no \
                              contract opens, for none has a deposit to return its holder's reserve to"
@@ -1503,7 +1545,8 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 _ => None,
             };
             // Once the files of what backs them are open, and up to date.
-            check_backed(&hub, &cli.data, allow_unbacked_locks)?;
+            // Responding only, it pays no lock: it says so, and answers.
+            check_backed(&hub, &cli.data, allow_unbacked_locks || respond_only)?;
             let swaps = match &swapping {
                 Some(Swapping { provider, .. }) => {
                     let nostr = match &announcing {
@@ -1529,7 +1572,10 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 urls: urls.clone(),
                 ingress: Arc::new(licash_hub_service::Ingress::new(ingress.trusted_proxies)),
             };
-            let router = licash_hub_service::router(hub.clone(), services);
+            let router = match respond_only {
+                true => licash_hub_service::responding(hub.clone()),
+                false => licash_hub_service::router(hub.clone(), services),
+            };
             // Served until the hub stops.
             let _onion = match &tor {
                 Some(tor) if onion => {
@@ -1548,6 +1594,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             };
             let tasks = Tasks {
                 contracts: responding,
+                respond_only,
                 chain,
                 notifier,
                 gateway,
@@ -1590,6 +1637,21 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             println!(
                 "enrolled {} contracts, kept {} answers signed and {} never to be signed; sealed",
                 imported.enrolled, imported.answers, imported.burnt
+            );
+            Ok(())
+        }
+        Command::ContractsTakeover { witnesses } => {
+            anyhow::ensure!(db.exists(), "no hub at {}", db.display());
+            anyhow::ensure!(
+                witnesses.contracts_witnesses.is_none(),
+                "a takeover is kept by witnesses: --contracts-witness-set and --contracts-witness"
+            );
+            let witnesses = witnesses.witnesses(&seed)?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            let epoch = runtime.block_on(witnesses.take_over(&cli.data))?;
+            println!(
+                "took the contracts over at epoch {epoch}: every other copy of the hub answers \
+                 their disputes only"
             );
             Ok(())
         }
@@ -1867,6 +1929,9 @@ fn swap_provider(
 struct Tasks {
     /// The contracts, their exits played every so often.
     contracts: Option<(Arc<Openings>, Duration)>,
+    /// Whether it only answers their disputes: opening none, it leaves
+    /// openings to the copy that leads, and follows no leadership.
+    respond_only: bool,
     chain: Option<(Source, ChainProfile, Duration)>,
     notifier: Option<Notifier>,
     gateway: Option<Arc<Gateway>>,
@@ -1899,6 +1964,7 @@ async fn serve(
 ) -> anyhow::Result<()> {
     let Tasks {
         contracts,
+        respond_only,
         chain,
         notifier,
         gateway,
@@ -1933,10 +1999,20 @@ async fn serve(
     // What the hub can't do without: one stopping stops it.
     let mut critical = Critical::default();
     if let Some((openings, every)) = contracts {
-        critical.spawn(
-            "the idle openings' sweeper",
-            openings.clone().sweep_every_minute(),
-        );
+        if !respond_only {
+            critical.spawn(
+                "the idle openings' sweeper",
+                openings.clone().sweep_every_minute(),
+            );
+            // Superseded, it stops: started again, it responds only.
+            let (leading, notify) = (openings.clone(), hub.clone());
+            critical.spawn("the lead of the contracts", async move {
+                let epoch = leading.lead_until_superseded(LEADERSHIP).await;
+                let message = superseded(epoch);
+                tracing::error!("{message}");
+                let _ = tokio::task::spawn_blocking(move || notify.alert(&message)).await;
+            });
+        }
         critical.spawn("the contracts' responder", openings.respond_every(every));
     }
     if let (Some((source, network, every)), Some((index, from))) = (&chain, tweaks) {
@@ -2042,6 +2118,54 @@ async fn serve(
     }
     tracing::info!("stopped");
     Ok(())
+}
+
+/// How often a hub that opens contracts asks its witnesses whether another
+/// copy took them over.
+const LEADERSHIP: Duration = Duration::from_secs(60);
+
+/// What a hub superseded at `epoch` tells its operator.
+fn superseded(epoch: u64) -> String {
+    format!(
+        "another copy of the hub took the contracts over (epoch {epoch}): this one now only \
+         answers their disputes, serving no wallet, until it takes them back \
+         (licash-hub contracts-takeover)"
+    )
+}
+
+/// Why `run` responds only, if it does: asked (`respond_only`, refused
+/// without contracts and witnesses), or another copy of the hub took the
+/// contracts over, as its witnesses say. Not known, it runs as asked: as
+/// its witnesses unreachable stop its signing anyway.
+fn responding_only(
+    respond_only: bool,
+    chain: &Chain,
+    seed: &Path,
+    data: &Path,
+) -> anyhow::Result<Option<String>> {
+    use licash_contracts::hub::Leadership;
+    let witnessed = chain.contracts && chain.witnesses.contracts_witness_set.is_some();
+    if respond_only {
+        anyhow::ensure!(
+            witnessed,
+            "--respond-only answers the contracts' disputes beside the copy that leads: it \
+             needs --contracts and their witnesses"
+        );
+        return Ok(Some("asked (--respond-only)".into()));
+    }
+    if !witnessed {
+        return Ok(None);
+    }
+    let witnesses = chain.witnesses.witnesses(seed)?;
+    let asked = tokio::runtime::Runtime::new()?.block_on(witnesses.leadership(data));
+    Ok(match asked {
+        Ok(Leadership::Superseded(epoch)) => Some(superseded(epoch)),
+        Ok(Leadership::Unfenced | Leadership::Leads(_)) => None,
+        Err(e) => {
+            tracing::warn!("which copy of the hub leads, not known: {e:#}");
+            None
+        }
+    })
 }
 
 /// The tasks the hub can't serve without, each looping for as long as it
@@ -2239,7 +2363,7 @@ fn events(db: &Path, mut after: u64, limit: u32, follow: bool) -> anyhow::Result
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Command, Critical};
+    use super::{responding_only, Cli, Command, Critical};
 
     #[tokio::test]
     async fn the_first_critical_task_to_stop_or_panic_is_named() {
@@ -2327,6 +2451,52 @@ mod tests {
         // Set without contracts: refused, as before.
         let refused = Cli::try_parse_from(["licash-hub", "run", "--contracts-max-cap", "2097151"]);
         assert!(refused.is_err());
+    }
+
+    /// Asked to respond only, a hub does so only with contracts witnessed;
+    /// unasked, it never does without witnesses to say another copy
+    /// leads, nor asks them anything.
+    #[test]
+    fn a_hub_responds_only_as_asked_with_witnesses_or_superseded() {
+        let only = |args: &[&str]| {
+            let cli = Cli::try_parse_from([&["licash-hub", "run"], args].concat()).unwrap();
+            match cli.command {
+                Command::Run {
+                    chain,
+                    respond_only,
+                    ..
+                } => {
+                    let dir = tempfile::tempdir().unwrap();
+                    let seed = dir.path().join("seed");
+                    responding_only(respond_only, &chain, &seed, dir.path())
+                }
+                _ => unreachable!(),
+            }
+        };
+        let witnessed = [
+            "--contracts",
+            "--contracts-witness-set",
+            &"03".repeat(32),
+            "--contracts-witness",
+            &format!("https://127.0.0.1:1#{}", "ab".repeat(32)),
+        ];
+        for refused in [&["--respond-only"][..], &["--respond-only", "--contracts"]] {
+            assert!(only(refused).is_err(), "{refused:?}");
+        }
+        let unwitnessed = [
+            "--respond-only",
+            "--contracts",
+            "--contracts-witnesses",
+            "none",
+        ];
+        assert!(only(&unwitnessed).is_err());
+        let asked = [&["--respond-only"][..], &witnessed].concat();
+        assert!(only(&asked).unwrap().is_some());
+        assert_eq!(only(&[]).unwrap(), None);
+        assert_eq!(
+            only(&["--contracts", "--contracts-witnesses", "none"]).unwrap(),
+            None
+        );
     }
 
     #[test]
