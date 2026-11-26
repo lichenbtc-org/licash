@@ -29,6 +29,7 @@ bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] 
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 hex = { version = "0.4", features = ["serde"] }
 hex-literal = "0.4"
+rand_core = { version = "0.6", features = ["getrandom"], optional = true }
 rusqlite = { version = "0.40", features = ["bundled", "backup"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -42,7 +43,7 @@ rustix = { version = "1.1", default-features = false, features = ["fs", "std"], 
 [features]
 # The hub's side, and a node or an Esplora API as the holder's chain.
 default = ["node"]
-node = ["dep:axum", "dep:licash-chain-client", "dep:licash-witness", "dep:sha2", "dep:rustix"]
+node = ["dep:axum", "dep:licash-chain-client", "dep:licash-witness", "dep:rand_core", "dep:sha2", "dep:rustix"]
 # A contract kept without opening one, for tests of what it holds a wallet to.
 testing = []
 # A dishonest hub's behaviors, and a dishonest holder's, for tests.

@@ -15,6 +15,13 @@
 //! one set (`witness_bound`), by its first contract's seal (`genesis`) or
 //! by an import of the contracts it signed before it had witnesses
 //! ([`Witnesses::import`]): never inferred from a seal or a marker absent.
+//!
+//! Which copy of the hub leads is kept by its witnesses too: a copy takes
+//! the next epoch over ([`Witnesses::take_over`]), the operator's act,
+//! naming itself by an instance id of its own ([`INSTANCE_FILE`]), a file never
+//! backed up. A copy whose witnesses keep a newer epoch than any it took
+//! ([`Leadership::Superseded`]) enrolls no contract, so opens none: it only
+//! answers those open, as any copy may, each decision first come.
 
 use std::path::Path;
 
@@ -24,7 +31,7 @@ use licash::spend::ChainProfile;
 use licash_store::Kind;
 use licash_witness::{
     client::{Client, Refused},
-    slot, Entry, Read, Status, Write, FORMAT, SEALED,
+    leader_id, slot, Entry, Read, Status, Write, FORMAT, SEALED,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -58,6 +65,64 @@ const BODY: u32 = 1;
 
 /// How many times a witness is asked before it counts as unreachable.
 const ATTEMPTS: u32 = 3;
+
+/// The file, in the hub's data directory, of the instance id this copy of
+/// the hub took an epoch over as ([`Witnesses::take_over`]), in hex. Never
+/// backed up, restored nor copied to another copy: a copy holding it
+/// leads as the one that took the epoch.
+pub const INSTANCE_FILE: &str = "contracts-instance";
+
+/// Which copy of the hub leads, as its witnesses say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Leadership {
+    /// No copy ever took an epoch over, or the hub has no witnesses: every
+    /// copy opens contracts, as before epochs.
+    Unfenced,
+    /// This copy took the newest epoch over.
+    Leads(u64),
+    /// Another copy took over this epoch, the newest: this one opens no
+    /// contract, and answers those open.
+    Superseded(u64),
+}
+
+impl Leadership {
+    /// The epoch this copy writes at: its own, if it leads, else none.
+    fn epoch(self) -> u64 {
+        match self {
+            Self::Leads(epoch) => epoch,
+            Self::Unfenced | Self::Superseded(_) => 0,
+        }
+    }
+}
+
+/// This copy's instance id, if it ever took an epoch over.
+fn instance(data: &Path) -> Result<Option<[u8; 32]>> {
+    let path = data.join(INSTANCE_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(hex) => {
+            let id = <[u8; 32]>::try_from(hex::decode(hex.trim()).unwrap_or_default())
+                .map_err(|_| anyhow::anyhow!("{}: 32 bytes in hex", path.display()))?;
+            Ok(Some(id))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+/// Keep `id` as this copy's instance id, on disk before it is used.
+fn keep_instance(data: &Path, id: &[u8; 32]) -> Result<()> {
+    use std::io::Write as _;
+    let (path, new) = (
+        data.join(INSTANCE_FILE),
+        data.join(format!("{INSTANCE_FILE}.new")),
+    );
+    let mut file = std::fs::File::create(&new).with_context(|| format!("{}", new.display()))?;
+    file.write_all(hex::encode(id).as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&new, &path)?;
+    std::fs::File::open(data)?.sync_all()?;
+    Ok(())
+}
 
 /// What the hub decided to sign with one of a contract's one-time keys,
 /// as its witnesses keep it.
@@ -259,6 +324,7 @@ impl Witnesses {
     /// funding: no witness keeps a decision of a contract never enrolled.
     /// `fresh` says whether the hub never signed a one-time answer, nor a
     /// funding: then, the set unsealed, it is sealed as the hub's first.
+    /// Refused for a copy superseded ([`Leadership::Superseded`]).
     pub(super) async fn enroll(
         &self,
         data: &Path,
@@ -266,8 +332,15 @@ impl Witnesses {
         fresh: impl FnOnce() -> Result<bool>,
     ) -> Result<()> {
         let Some(set) = &self.0 else { return Ok(()) };
-        set.ready(data, fresh).await?;
-        let enroll = set.signed(id, slot::ENROLL, Vec::new())?;
+        let leadership = set.ready(data, fresh).await?;
+        if let Leadership::Superseded(epoch) = leadership {
+            bail!(
+                "another copy of the hub took the contracts over (epoch {epoch}): this one opens \
+                 none, and answers those open"
+            );
+        }
+        let mut enroll = set.signed(id, slot::ENROLL, Vec::new())?;
+        enroll.epoch = leadership.epoch();
         for member in &set.members {
             let read = set.put(data, member, &enroll).await?;
             ensure!(
@@ -358,6 +431,54 @@ impl Witnesses {
             }
         }
         found.map(|e| Decision::from_body(&e.body)).transpose()
+    }
+
+    /// Which copy leads, as the witnesses say now: [`Leadership::Unfenced`]
+    /// without witnesses. An error where any cannot be relied on
+    /// ([`Set::check`]): then nothing is known of it.
+    pub async fn leadership(&self, data: &Path) -> Result<Leadership> {
+        let Some(set) = &self.0 else {
+            return Ok(Leadership::Unfenced);
+        };
+        let statuses = set.statuses(data).await?;
+        set.leadership(data, &statuses)
+    }
+
+    /// Take the next epoch over for this copy of the hub, its data in
+    /// `data`: the operator's act, never the hub's own, on the copy that is
+    /// to open contracts from now on. Its new instance id is kept first
+    /// ([`INSTANCE_FILE`]), then written to every witness, by pin: the epoch
+    /// taken. Every other copy is superseded as each witness keeps it.
+    /// Refused where a witness cannot be reached, or keeps no epochs (of
+    /// an earlier release), or another copy took the epoch first: run it
+    /// again then.
+    pub async fn take_over(&self, data: &Path) -> Result<u64> {
+        let set = self.0.as_ref().context("a takeover needs witnesses")?;
+        let statuses = set.statuses(data).await?;
+        let epoch = set.newest(&statuses)?.map_or(0, |(epoch, _)| epoch) + 1;
+        let mut id = [0; 32];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut id);
+        keep_instance(data, &id)?;
+        let mut write = set.signed(&leader_id(epoch), slot::LEADER, id.to_vec())?;
+        write.epoch = epoch;
+        for member in &set.members {
+            let url = member.url();
+            let read = set.put(data, member, &write).await.with_context(|| {
+                format!(
+                    "witness {url} took no epoch over (one of an earlier release keeps none: \
+                     upgrade it, then take over again)"
+                )
+            })?;
+            let kept = read
+                .entry
+                .with_context(|| format!("witness {url} kept nothing"))?;
+            ensure!(
+                kept.body == id,
+                "another copy of the hub took epoch {epoch} over first, at witness {url}: take \
+                 over again if this copy is to lead"
+            );
+        }
+        Ok(epoch)
     }
 
     /// Give a hub's witnesses, all unsealed, what it signed before it had
@@ -553,6 +674,13 @@ impl Set {
         if let Some(seal) = &status.seal {
             self.check_entry(&SEALED, slot::SEAL, seal)?;
         }
+        if let Some(leader) = &status.leader {
+            self.check_entry(&leader_id(leader.epoch), slot::LEADER, &leader.entry)?;
+            ensure!(
+                leader.entry.body.len() == 32,
+                "witness {url} keeps a leader of no instance"
+            );
+        }
         let pin = member.pin();
         let c = open(data)?;
         let seen: Option<i64> = c
@@ -626,15 +754,49 @@ impl Set {
         Ok(())
     }
 
+    /// Every witness's status, by pin, each checked ([`Set::check`]).
+    async fn statuses(&self, data: &Path) -> Result<Vec<Status>> {
+        let mut statuses = Vec::with_capacity(self.members.len());
+        for member in &self.members {
+            statuses.push(self.status(data, member).await?);
+        }
+        Ok(statuses)
+    }
+
+    /// The newest epoch any of `statuses` keeps, and the instance that took
+    /// it: as the first by pin keeps it, where two keep it otherwise.
+    fn newest(&self, statuses: &[Status]) -> Result<Option<(u64, [u8; 32])>> {
+        let mut newest: Option<(u64, [u8; 32])> = None;
+        for leader in statuses.iter().filter_map(|s| s.leader.as_ref()) {
+            let id = <[u8; 32]>::try_from(leader.entry.body.as_slice())?;
+            if newest.is_none_or(|(epoch, _)| leader.epoch > epoch) {
+                newest = Some((leader.epoch, id));
+            }
+        }
+        Ok(newest)
+    }
+
+    /// Which copy leads, of `statuses`: any witness keeping an epoch fences
+    /// the copies that did not take it, as it refuses to enroll for them.
+    fn leadership(&self, data: &Path, statuses: &[Status]) -> Result<Leadership> {
+        Ok(match self.newest(statuses)? {
+            None => Leadership::Unfenced,
+            Some((epoch, leader)) if instance(data)? == Some(leader) => Leadership::Leads(epoch),
+            Some((epoch, _)) => Leadership::Superseded(epoch),
+        })
+    }
+
     /// Whether every witness can be relied on now: each as [`Set::check`],
     /// all sealed alike. A hub's database bound to none is bound as they
     /// are sealed, or, unsealed and `fresh` (it never signed), sealed as
-    /// the hub's first.
-    async fn ready(&self, data: &Path, fresh: impl FnOnce() -> Result<bool>) -> Result<()> {
-        let mut seals = Vec::with_capacity(self.members.len());
-        for member in &self.members {
-            seals.push(self.status(data, member).await?.seal.map(|s| s.body));
-        }
+    /// the hub's first. Which copy leads, as they say.
+    async fn ready(&self, data: &Path, fresh: impl FnOnce() -> Result<bool>) -> Result<Leadership> {
+        let statuses = self.statuses(data).await?;
+        let leadership = self.leadership(data, &statuses)?;
+        let seals: Vec<Option<Vec<u8>>> = statuses
+            .into_iter()
+            .map(|s| s.seal.map(|s| s.body))
+            .collect();
         let bound = bound(data)?;
         if let Some(bound) = bound {
             ensure!(bound == self.id, "the hub is bound to another witness set");
@@ -644,7 +806,7 @@ impl Set {
             if bound.is_none() {
                 bind(data, &self.id, "adopted")?;
             }
-            return Ok(());
+            return Ok(leadership);
         }
         let unsealed: Vec<&str> = self
             .members
@@ -665,7 +827,8 @@ impl Set {
              stopped (licash-hub contracts-witness-import)"
         );
         self.seal_all(data, &seal("genesis", None)).await?;
-        bind(data, &self.id, "genesis")
+        bind(data, &self.id, "genesis")?;
+        Ok(leadership)
     }
 }
 

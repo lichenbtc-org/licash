@@ -21,7 +21,7 @@ pub mod terms;
 mod vigil;
 mod witness;
 
-pub use witness::Witnesses;
+pub use witness::{Leadership, Witnesses, INSTANCE_FILE};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -484,6 +484,33 @@ impl Openings {
         self.witnesses
             .set(witnesses)
             .map_err(|_| anyhow::anyhow!("the hub's witnesses are set already"))
+    }
+
+    /// Which copy of the hub leads, as its witnesses say now
+    /// ([`Witnesses::leadership`]).
+    pub async fn leadership(&self) -> Result<Leadership> {
+        self.witnesses()?.leadership(&self.data).await
+    }
+
+    /// Take the contracts over for this copy of the hub
+    /// ([`Witnesses::take_over`]): the epoch taken.
+    pub async fn take_over(&self) -> Result<u64> {
+        self.witnesses()?.take_over(&self.data).await
+    }
+
+    /// Until another copy of the hub takes the contracts over, as its
+    /// witnesses say, asked every `every`: then the epoch it took. Not
+    /// known (a witness unreachable), it goes on as it led, as signing
+    /// stops anyway.
+    pub async fn lead_until_superseded(self: Arc<Self>, every: Duration) -> u64 {
+        loop {
+            match self.leadership().await {
+                Ok(Leadership::Superseded(epoch)) => return epoch,
+                Ok(_) => {}
+                Err(e) => tracing::warn!("which copy of the hub leads: {e:#}"),
+            }
+            tokio::time::sleep(every).await;
+        }
     }
 
     fn witnesses(&self) -> Result<&Witnesses> {
