@@ -105,7 +105,7 @@ fn addressed<T: Transport>(bridge: &Bridge<T>, event: &Event, now: Timestamp) ->
 }
 
 /// The answer to `event`, a request, if it is one to this bridge
-/// ([`addressed`]): signed by it, encrypted to its client as it came.
+/// (`addressed`): signed by it, encrypted to its client as it came.
 pub async fn answer<T: Transport>(bridge: &Bridge<T>, event: &Event) -> Option<Event> {
     if !addressed(bridge, event, Timestamp::now()) {
         return None;

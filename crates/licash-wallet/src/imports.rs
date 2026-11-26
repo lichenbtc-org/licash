@@ -571,7 +571,7 @@ pub(crate) fn release(t: &Transaction<'_>, id: &[u8; 32]) -> Result<usize, Error
 impl<T: Transport> Wallet<T> {
     /// Every note of this wallet spendable, its coordinates and its hold
     /// key, and the refund of each of its locks unsettled that pays it
-    /// ([`Refund`]), sealed to `to`, a wallet's x-only key at the bridge
+    /// (`Refund`), sealed to `to`, a wallet's x-only key at the bridge
     /// answering as `source`, for that wallet to claim in a recovery of its
     /// own ([`Wallet::import_notes`]). Nothing that spends them: whoever
     /// holds the export may claim them, which voids them should this
@@ -708,7 +708,7 @@ impl<T: Transport> Wallet<T> {
     /// wallet's key at the bridge that made it ([`Wallet::export_notes`]),
     /// for its recoveries to claim: all or none, refused if one is not a
     /// note its keyset's issuer signed or its hold key is not the note's,
-    /// or a refund is not all it says ([`Refund::check`]). The same export
+    /// or a refund is not all it says (`Refund::check`). The same export
     /// again adds nothing; a later one of the same bridge, what is new.
     pub fn import_notes(&self, sealed: &[u8]) -> Result<Imported, Error> {
         if sealed.len() < HEADER + 16 {

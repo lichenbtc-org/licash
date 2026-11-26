@@ -66,7 +66,7 @@ pub mod slot {
 /// What the contract ids of epochs begin with: no contract's.
 const LEADERS: [u8; 24] = *b"licash-witness/leader/v1";
 
-/// The contract an epoch's leader is kept under: [`LEADERS`], then the
+/// The contract an epoch's leader is kept under: `LEADERS`, then the
 /// epoch, big-endian, so that the newest sorts last.
 pub fn leader_id(epoch: u64) -> [u8; 32] {
     let mut id = [0; 32];

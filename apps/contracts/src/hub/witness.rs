@@ -475,7 +475,7 @@ impl Witnesses {
 
     /// Which copy leads, as the witnesses say now: [`Leadership::Unfenced`]
     /// without witnesses. An error where any cannot be relied on
-    /// ([`Set::check`]): then nothing is known of it.
+    /// (`Set::check`): then nothing is known of it.
     pub async fn leadership(&self, data: &Path) -> Result<Leadership> {
         let Some(set) = &self.0 else {
             return Ok(Leadership::Unfenced);

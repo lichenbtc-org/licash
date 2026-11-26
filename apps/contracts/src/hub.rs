@@ -1085,7 +1085,7 @@ impl Openings {
 
     /// Play the exits every `every` while the hub runs: never returns. The
     /// operator is told if the node's chain stalls, or rounds fail, for long
-    /// ([`vigil::Vigil`]).
+    /// (`vigil::Vigil`).
     pub async fn respond_every(self: Arc<Self>, every: Duration) {
         loop {
             let failed = match self.answer_requests().await {

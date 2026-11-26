@@ -1078,7 +1078,7 @@ fn smallest(coins: Vec<SilentCoin>, least: u64) -> Option<SilentCoin> {
 
 /// How many blocks after she signed her deposit into F first, F in none
 /// and in no mempool her chain sees, she takes her coin back
-/// ([`refresh`]): the hub, which alone holds F whole, withholds it, or
+/// (`refresh`): the hub, which alone holds F whole, withholds it, or
 /// never heard.
 pub const F_UNSEEN: u32 = 6;
 

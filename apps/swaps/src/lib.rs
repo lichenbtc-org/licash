@@ -1,7 +1,7 @@
 //! The swap provider service: a [`Provider`] behind the HTTP API of
 //! [`licash_api::swaps`], the steps that take its swaps on, the chain its
 //! payouts on Bitcoin follow, the node its Lightning payments and receipts
-//! follow, the donations it takes over LNURL-pay ([`lnurl`]), and its
+//! follow, the donations it takes over LNURL-pay (`lnurl`), and its
 //! announcement on Nostr.
 
 pub mod dashboard;
@@ -100,7 +100,7 @@ pub struct Serving {
 }
 
 /// The API of `provider`, as `serving` says, its donations over LNURL-pay
-/// ([`lnurl`]) if it takes them, and [`HEALTH`]: at most [`MAX_SERVING`]
+/// (`lnurl`) if it takes them, and [`HEALTH`]: at most [`MAX_SERVING`]
 /// requests at once, each body still arriving
 /// [`licash_serve::BODY_TIME`] after its head refused, each request's
 /// source resolved before any handler.
