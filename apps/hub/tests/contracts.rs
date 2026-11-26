@@ -5004,6 +5004,149 @@ async fn a_hub_answers_her_request_mined_again_written_otherwise_after_a_reorg()
     Ok(())
 }
 
+/// [`recovery::equivocate`] for as long as it lives: off again when the
+/// test ends, however it does.
+struct Equivocating;
+
+impl Equivocating {
+    fn of(b: u32) -> Self {
+        licash_contracts::holder::recovery::equivocate(Some(b));
+        Self
+    }
+}
+
+impl Drop for Equivocating {
+    fn drop(&mut self) {
+        licash_contracts::holder::recovery::equivocate(None);
+    }
+}
+
+/// Her request, in a block, answered: the hub's response in the mempool,
+/// where no miner takes it (its fee as good as none to them). Then a reorg
+/// mines her other request in its place, the same txid signing another
+/// `b`. The hub neither posts its response again nor signs another; her
+/// timeout replaces it and pays her the other `b`, and the hub, holding
+/// both her signatures, takes every output of it by `equiv_b` before her
+/// wait ends.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_hub_takes_her_payout_by_equiv_b_after_a_reorg_mines_her_other_request() -> Result<()> {
+    use licash_contracts::holder::recovery::{self, Stage};
+    use serde_json::{json, Value};
+
+    let _equivocating = Equivocating::of(65_536);
+    let s = stale_claim([31; 32]).await?;
+    let told = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let alerts = told.clone();
+    s.openings.alert_with(Arc::new(move |message: &str| {
+        alerts.lock().unwrap().push(message.to_owned())
+    }));
+    let count = |of: &str| {
+        let told = told.lock().unwrap();
+        told.iter().filter(|m| m.contains(of)).count()
+    };
+    let db = s.mine.join("wallet.sqlite");
+    let advance = || recovery::advance(&s.wallet, &s.chain, &db, s.rate);
+    let node = rpc_of(&s.rt, None)?;
+    let mut request = None;
+    let mut response = None;
+    for _ in 0..200 {
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        let r = advance().await?[0].clone();
+        ensure!(!matches!(r.stage, Stage::Lost | Stage::Done), "{r:?}");
+        if let Some(txid) = r.request.filter(|_| r.response.is_none()) {
+            let main = bitcoin::OutPoint { txid, vout: 0 };
+            if let Some(x) = spending_in_mempool(&s.rt, main)? {
+                if s.rt.confirmations(&txid)?.is_some() {
+                    let _: Value = node
+                        .rpc(
+                            "prioritisetransaction",
+                            json!([x.compute_txid().to_string(), 0, -100_000_000]),
+                        )
+                        .await?;
+                    response = Some(x.compute_txid());
+                    request = Some(txid);
+                    break;
+                }
+            }
+        }
+        s.rt.mine(1)?;
+    }
+    let txid = request.context("the hub never responded")?;
+    let main = bitcoin::OutPoint { txid, vout: 0 };
+    let other = recovery::take_equivocation().context("no other request")?;
+    ensure!(other.compute_txid() == txid, "the same transaction");
+    ensure!(other.compute_wtxid() != s.rt.get_tx(&txid)?.compute_wtxid());
+
+    let at = s.rt.confirmations(&txid)?.context("unconfirmed")?;
+    let hash: Value = node.rpc("getblockhash", json!([at])).await?;
+    let _: Option<Value> = node.rpc_optional("invalidateblock", json!([hash])).await?;
+    s.rt.mine_with(std::slice::from_ref(&other))?;
+    ensure!(
+        s.rt.get_tx(&txid)?.compute_wtxid() == other.compute_wtxid(),
+        "her other request mined"
+    );
+
+    let mut timeout: Option<bitcoin::Transaction> = None;
+    for _ in 0..200 {
+        s.rt.mine(1)?;
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        // Her wallet's own reading of what happened is not under test: it
+        // may fail to sweep what the hub took.
+        let _ = advance().await;
+        if timeout.is_none() {
+            // Her payout, of an output a bit, in the response's place.
+            timeout =
+                spending_in_mempool(&s.rt, main)?.filter(|t| Some(t.compute_txid()) != response);
+            ensure!(
+                timeout.as_ref().is_none_or(|t| t.output.len() > 4),
+                "the hub posted another response: {timeout:?}"
+            );
+        }
+        let Some(t) = &timeout else { continue };
+        let paid = t.compute_txid();
+        let Some(sweep) = spending_in_mempool(
+            &s.rt,
+            bitcoin::OutPoint {
+                txid: paid,
+                vout: 0,
+            },
+        )?
+        else {
+            continue;
+        };
+        // Every bit's output and her reserve's, by `equiv_b`: both her
+        // signatures on `b` in each witness, and the hub's.
+        let bits = sweep.input.len() - 1;
+        ensure!(bits >= 8, "{} inputs", sweep.input.len());
+        for (k, input) in sweep.input.iter().enumerate() {
+            ensure!(
+                input.previous_output
+                    == bitcoin::OutPoint {
+                        txid: paid,
+                        vout: k as u32
+                    },
+                "{sweep:?}"
+            );
+        }
+        let wire = sweep.input[0].witness.len() - 3;
+        ensure!(wire % 2 == 0 && wire >= 2 * 8, "{sweep:?}");
+        ensure!(sweep.input[0].sequence == bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME);
+        s.rt.mine(1)?;
+        ensure!(
+            s.rt.confirmations(&sweep.compute_txid())?.is_some(),
+            "unmined"
+        );
+        // Told once of each: her other request, and the sweep.
+        ensure!(count("another b or E") == 1, "{:?}", told.lock().unwrap());
+        ensure!(count("by equiv_b.") == 1, "{:?}", told.lock().unwrap());
+        return Ok(());
+    }
+    anyhow::bail!("never swept: {timeout:?}")
+}
+
 /// The transaction of `rt`'s `harness` wallet (the hub's) that funded
 /// `coin`, in the mempool, replaced by a spend of its inputs back to that
 /// wallet at a higher fee: `coin` gone, and what spent it with it, as an

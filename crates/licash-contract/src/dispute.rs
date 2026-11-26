@@ -818,6 +818,70 @@ pub fn sweep_with(
     )?;
     sweep_owned(&owned, coins, key, payout.wire, to, rate)
 }
+/// `owned`, outputs of a payout of the word she signed ([`equivocated`]),
+/// swept by their `equiv_b` leaves with her two signatures on different
+/// words, `wires` (each as the payout's leaves take it,
+/// [`HubProves::b_wire`]): the request she signed one, and the one a
+/// reorganization mined in its place, its txid the same, the other. They
+/// take no wait, so the hub sweeps them before hers end.
+pub fn sweep_equivocated(
+    owned: &[Owned],
+    key: &Keypair,
+    wires: [&[Vec<u8>]; 2],
+    to: ScriptBuf,
+    rate: FeeRate,
+) -> Result<Transaction> {
+    ensure!(wires[0] != wires[1], "one signature, not two");
+    ensure!(!owned.is_empty(), "no output to sweep");
+    sweep_owned(owned, &[], key, &wires.concat(), to, rate)
+}
+
+/// Every output of `payout`, a terminal paying the word she signed under
+/// `b_key` (`request_timeout`, `contest_timeout`, `failure`), that reads
+/// that signature: each bit's and the reserve output, hers as much as the
+/// hub's, by their `equiv_b` leaves ([`sweep_equivocated`]). In output
+/// order; an output not of its script (none paid) is skipped.
+pub fn equivocated(
+    babe: &HubProves,
+    payout: &Transaction,
+    b_key: &WotsPublic,
+) -> Result<Vec<Owned>> {
+    let core = babe.core();
+    let (t, ctx) = (core.terms, core.ctx());
+    let txid = payout.compute_txid();
+    let bits = t.paid_bits();
+    // Her reserve's output follows the bits' (Lichen's `Core::owned`), its
+    // `equiv_b` index the first after theirs.
+    let reserve = (
+        bits.len() as u32,
+        lichen_contract::reserve_tree_signed(&ctx, t, b_key, Role::User)?,
+        bits.end,
+    );
+    let outputs = (bits.clone())
+        .map(|i| {
+            let tree = lichen_contract::bit_tree_signed(&ctx, i, b_key, Role::User)?;
+            Ok((i - t.low_bits, tree, i))
+        })
+        .chain(std::iter::once(Ok(reserve)))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(outputs
+        .into_iter()
+        .filter_map(|(vout, tree, i)| {
+            let out = (payout.output.get(vout as usize))
+                .filter(|o| o.script_pubkey == tree.script_pubkey())?
+                .clone();
+            Some(Owned {
+                op: OutPoint { txid, vout },
+                out,
+                tree,
+                leaf: format!("equiv_b_{i}"),
+                with_value: true,
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            })
+        })
+        .collect())
+}
+
 fn sweep_owned(
     owned: &[Owned],
     coins: &[(OutPoint, TxOut)],

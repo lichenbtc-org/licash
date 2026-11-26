@@ -512,6 +512,30 @@ pub fn doubt_assertions(doubt: bool) {
     DOUBT.store(doubt, std::sync::atomic::Ordering::SeqCst);
 }
 
+#[cfg(feature = "faults")]
+static EQUIVOCATE: std::sync::Mutex<(Option<u32>, Option<Transaction>)> =
+    std::sync::Mutex::new((None, None));
+
+/// Sign, with every request made from now on in this process, another of
+/// `b` and the same `E` (its txid the same), kept for
+/// [`take_equivocation`], and take either for hers once mined, as a
+/// dishonest holder would to mine one in place of the other in a
+/// reorganization: for tests of the hub's `equiv_b`. None, none.
+#[cfg(feature = "faults")]
+pub fn equivocate(b: Option<u32>) {
+    *EQUIVOCATE.lock().unwrap_or_else(|e| e.into_inner()) = (b, None);
+}
+
+/// The other request last signed ([`equivocate`]), if any.
+#[cfg(feature = "faults")]
+pub fn take_equivocation() -> Option<Transaction> {
+    EQUIVOCATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .1
+        .take()
+}
+
 /// Whether the statement of the contract of `base` would owe the claim
 /// filed as `filed` under `request` whole, should the hub show nothing
 /// against it: its own judgment ([`licash::recovery::owed`]), on the
@@ -1481,7 +1505,15 @@ impl<'a, T: Transport, C: Chain> Run<'a, T, C> {
     }
     fn request_matches(&self, state: &State, tx: &Transaction) -> Result<bool> {
         let r = self.requested(state)?;
-        Ok(graph::requested(&self.o.base, tx)? == (r.amount, r.claim_digest))
+        let mined = graph::requested(&self.o.base, tx)?;
+        // Equivocating, she takes either request for hers.
+        #[cfg(feature = "faults")]
+        if (EQUIVOCATE.lock().unwrap_or_else(|e| e.into_inner()).0)
+            .is_some_and(|b| mined == (b, r.claim_digest))
+        {
+            return Ok(true);
+        }
+        Ok(mined == (r.amount, r.claim_digest))
     }
 }
 
@@ -1544,6 +1576,13 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
         let r = self
             .o
             .request(&self.keys, request.amount, &request.claim_digest)?;
+        #[cfg(feature = "faults")]
+        {
+            let mut equivocate = EQUIVOCATE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(b) = equivocate.0 {
+                equivocate.1 = Some(self.o.request(&self.keys, b, &request.claim_digest)?);
+            }
+        }
         let filing = self.filing_of(state)?;
         if let Err(e) = self.build_p(&r, &filing, None, state, false) {
             // Past what she allowed, or failing otherwise: she is told.

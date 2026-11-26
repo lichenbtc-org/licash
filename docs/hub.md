@@ -762,7 +762,12 @@ a second answer signed with a one-time key over other evidence gives the
 holder the hub's outputs. A request is the one pinned when it is the same
 transaction claiming the same `b` with the same `E`, however its witness
 writes them: a request mined again after a reorg, its digits written
-otherwise or her signatures made again, is answered as pinned. So the hub signs none where it can tell one was:
+otherwise or her signatures made again, is answered as pinned. One mined
+again claiming another `b` or `E`, its txid the same (she signed two), is
+answered no more, and the operator is told: her payout of another `b` the
+hub takes whole by `equiv_b` with her two signatures, before her outputs'
+wait ends; of another `E` alone, her timeout pays her. On mainnet the hub
+decides on a request 6 blocks deep for that. So the hub signs none where it can tell one was:
 the openings keep each answer before it is signed, and one kept with nothing
 pinned for it, as when the pins' rows were lost, is not decided anew. Nor is
 one neither keeps (the whole database restored older) while a transaction in

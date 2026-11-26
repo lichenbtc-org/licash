@@ -157,6 +157,19 @@ pub enum Played {
     Posted(&'static str),
 }
 
+/// The hub's statement does not hold of what it responded on, as the
+/// blocks show it now.
+#[derive(Debug)]
+struct Unprovable(String);
+
+impl std::fmt::Display for Unprovable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unprovable {}
+
 impl Openings {
     /// Opening `id` loaded from `state`: checked, its graph built and
     /// signed, which takes seconds, once for each state it is in rather
@@ -890,6 +903,23 @@ impl Openings {
             recovery::owed(&o.base, &request, &filed, evidence, &chain).map_err(|e| anyhow!("{e}"))
         };
         let pins = Responses::open(&self.data)?;
+        // Her request in a block is not the one the hub answered, its txid
+        // the same (a reorganization mined her other): it signs nothing
+        // for it, nor posts its response again, which reads the txid alone
+        // but would commit it to a proof of the other's `E`. Her payout of
+        // another `b` it takes by `equiv_b`.
+        if pins.other_request(id, r)?.is_some() {
+            if self.once(id, "another request") {
+                self.alert(&format!(
+                    "contract {}: her request was mined again signing another b or E than \
+                     the one the hub answered (a reorganization). It responds no more: \
+                     her payout of another b it takes by equiv_b; of another E alone, \
+                     her timeout pays her what she claims.",
+                    crate::hex_id(id)
+                ));
+            }
+            return Ok(Played::Idle);
+        }
         let spends = OutPoint {
             txid: r.compute_txid(),
             vout: 0,
@@ -1630,10 +1660,23 @@ impl Openings {
                 }
                 let (input, receipt) = match self
                     .input(id, hub, o, r, r_at, x, x_at, c_at, tip, &pinned)
-                    .await?
+                    .await
                 {
-                    Ok(input) => input,
-                    Err(played) => return Ok(Err(played)),
+                    Ok(Ok(input)) => input,
+                    Ok(Err(played)) => return Ok(Err(played)),
+                    Err(e) => {
+                        if e.downcast_ref::<Unprovable>().is_some() && self.once(id, "unprovable") {
+                            self.alert(&format!(
+                                "contract {}: the hub responded, and its statement does not \
+                                 hold of what is in the blocks now ({e:#}), as when a \
+                                 reorganization mined her request signing another E. It \
+                                 asserts nothing: her timeout pays her what she claims and \
+                                 the hub's reserve.",
+                                crate::hex_id(id)
+                            ));
+                        }
+                        return Err(e);
+                    }
                 };
                 let bytes = input.to_bytes();
                 match prover {
@@ -1791,8 +1834,8 @@ impl Openings {
         };
         match licash_hp::check(&input) {
             Ok(j) if j == graph::journal(&o.base) => Ok(Ok((input, None))),
-            Ok(_) => bail!("the statement's journal is not the contract's"),
-            Err(e) => bail!("the hub's statement does not hold: {e}"),
+            Ok(_) => Err(Unprovable("the statement's journal is not the contract's".into()).into()),
+            Err(e) => Err(Unprovable(format!("the hub's statement does not hold: {e}")).into()),
         }
     }
 
@@ -1875,8 +1918,8 @@ impl Openings {
         };
         match licash_hp::check_on(&input, &program) {
             Ok(j) if j == graph::journal(&o.base) => Ok(Ok((input, Some(receipt.file)))),
-            Ok(_) => bail!("the statement's journal is not the contract's"),
-            Err(e) => bail!("the hub's statement does not hold: {e}"),
+            Ok(_) => Err(Unprovable("the statement's journal is not the contract's".into()).into()),
+            Err(e) => Err(Unprovable(format!("the hub's statement does not hold: {e}")).into()),
         }
     }
 
@@ -2557,7 +2600,13 @@ impl Openings {
                 let (b, _) = HubProves::read_request(&link_args(r))?;
                 o.requested_b(r)?;
                 let (word, _) = HubProves::requested_word(r)?;
-                (word, HubProves::b_wire(&b), &o.holder.b_key, Role::User)
+                let wire = HubProves::b_wire(&b);
+                if let Some(other) = self.equivocation(id, r, word)? {
+                    return self
+                        .sweep_equivocated(id, hub, o, payout, paid_at, [&wire, &other], tip)
+                        .await;
+                }
+                (word, wire, &o.holder.b_key, Role::User)
             }
             n if n == "success"
                 || n == "respond_timeout"
@@ -2609,6 +2658,72 @@ impl Openings {
         // payout is never looked at again.
         if self.post(&sweep).await {
             return Ok(Played::Posted("sweep"));
+        }
+        Ok(Played::Idle)
+    }
+
+    /// Her other signature on `b`'s one-time key, as the payout's leaves
+    /// take it, if the request the hub pinned for opening `id` is `r` by
+    /// its txid but signs another word than `r`'s, `word`: a
+    /// reorganization mined one of her two requests in place of the
+    /// other. None otherwise.
+    fn equivocation(
+        &self,
+        id: &[u8; 32],
+        r: &Transaction,
+        word: u32,
+    ) -> Result<Option<Vec<Vec<u8>>>> {
+        let Some(pinned) = Responses::open(&self.data)?.other_request(id, r)? else {
+            return Ok(None);
+        };
+        if pinned.compute_txid() != r.compute_txid()
+            || HubProves::requested_word(&pinned)?.0 == word
+        {
+            return Ok(None);
+        }
+        let (b, _) = HubProves::read_request(&link_args(&pinned))?;
+        Ok(Some(HubProves::b_wire(&b)))
+    }
+
+    /// `payout`, of the word she signed, mined at `paid_at`, she signed
+    /// another word too (`wires`, the payout's and the other): every
+    /// output of it that reads her signature, hers as much as the hub's,
+    /// swept by `equiv_b` before her reserve's wait ends. Ended once
+    /// they are swept and the payout deep.
+    #[allow(clippy::too_many_arguments)]
+    async fn sweep_equivocated(
+        &self,
+        id: &[u8; 32],
+        hub: &Hub,
+        o: &HubOpening,
+        payout: &Transaction,
+        paid_at: u32,
+        wires: [&[Vec<u8>]; 2],
+        tip: u32,
+    ) -> Result<Played> {
+        if self.once(id, "equivocated") {
+            self.alert(&format!(
+                "contract {}: her request was mined again signing another b than the one \
+                 the hub answered (a reorganization): it takes every output of her payout \
+                 by equiv_b.",
+                crate::hex_id(id)
+            ));
+        }
+        let mut left = Vec::new();
+        for out in dispute::equivocated(&o.babe, payout, &o.holder.b_key)? {
+            if self.unspent(out.op, false).await? {
+                left.push(out);
+            }
+        }
+        if left.is_empty() {
+            self.end_if_deep(id, hub, o, paid_at, tip).await?;
+            return Ok(Played::Idle);
+        }
+        let to = self.payout_script().await?;
+        let rate = self.fee_rate().await;
+        let sweep = dispute::sweep_equivocated(&left, &hub.keys().party.payment, wires, to, rate)?;
+        if self.post(&sweep).await {
+            return Ok(Played::Posted("equiv_b"));
         }
         Ok(Played::Idle)
     }

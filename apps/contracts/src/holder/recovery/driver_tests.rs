@@ -1038,6 +1038,67 @@ fn an_assertion_of_pi1_alone_is_checked_with_the_pi2_and_pi3_the_hub_shows() {
     o.challenge(&keys, &alone).unwrap();
 }
 
+/// Her two requests of one txid but another `b` (a reorganization mining
+/// one in place of the other): her payout's every output, each bit's and
+/// the reserve's, swept by `equiv_b` in one standard transaction with her
+/// two signatures, none with one.
+#[test]
+fn her_payout_of_a_b_she_signed_twice_is_swept_by_equiv_b() {
+    let ctx = Context {
+        tip: 0,
+        trust: Trust::mock(),
+    };
+    let saved = crate::testing::opened_pi1_alone();
+    let (o, keys) = signed_of(saved);
+    let hub = Hub::load(&saved.hub, &ctx).unwrap();
+    let ho = hub.signed().unwrap();
+    let [first, other] = [4096, 2048].map(|b| o.request(&keys, b, &[22; 32]).unwrap());
+    assert_eq!(first.compute_txid(), other.compute_txid());
+    let wire = |r: &Transaction| {
+        let args = licash_contract::graph::link_args(r);
+        let (b, _) = licash_contract::graph::HubProves::read_request(&args).unwrap();
+        licash_contract::graph::HubProves::b_wire(&b)
+    };
+    let (a, b) = (wire(&first), wire(&other));
+    assert_ne!(a, b);
+    let p = presign(&o.set, "request_timeout").unwrap();
+    let coin = TxOut {
+        value: DUST,
+        script_pubkey: dispute::fee_script(&keys.party.payment).unwrap(),
+    };
+    let payout = dispute::add_fee(
+        o.finish("request_timeout", vec![]).unwrap(),
+        p.prevout.clone(),
+        (OutPoint::null(), coin),
+        &keys.party.payment,
+    )
+    .unwrap();
+    let owned = dispute::equivocated(&ho.babe, &payout, &ho.holder.b_key).unwrap();
+    let bits = ho.babe.core().terms.paid_bits();
+    assert_eq!(owned.len(), bits.len() + 1);
+    let names: Vec<_> = owned.iter().map(|o| o.leaf.clone()).collect();
+    assert_eq!(names.first().unwrap(), &format!("equiv_b_{}", bits.start));
+    assert_eq!(names.last().unwrap(), &format!("equiv_b_{}", bits.end));
+    let to = dispute::fee_script(&hub.keys().party.payment).unwrap();
+    let rate = bitcoin::FeeRate::from_sat_per_vb(3).unwrap();
+    let key = &hub.keys().party.payment;
+    let sweep = dispute::sweep_equivocated(&owned, key, [&a, &b], to.clone(), rate).unwrap();
+    assert_eq!(sweep.input.len(), owned.len());
+    let widest = sweep.input.iter().map(|i| i.witness.size()).max().unwrap();
+    eprintln!(
+        "equiv_b sweep: {} inputs, {} vB, widest witness {widest} B",
+        sweep.input.len(),
+        sweep.vsize()
+    );
+    assert!(sweep.weight().to_wu() <= 400_000, "{} WU", sweep.weight());
+    // Each input's witness: both wires, her signature, the leaf and its
+    // control block.
+    let leaf = sweep.input[0].witness.len();
+    assert_eq!(leaf, a.len() + b.len() + 3);
+    assert!(dispute::sweep_equivocated(&owned, key, [&a, &a], to.clone(), rate).is_err());
+    assert!(dispute::sweep_equivocated(&[], key, [&a, &b], to, rate).is_err());
+}
+
 /// `before`, then `published`, then `after`.
 fn joined<'a>(
     published: &[&'a Transaction],

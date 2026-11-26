@@ -225,6 +225,22 @@ impl Responses {
             .transpose()
     }
 
+    /// The request pinned for `id` if `request` is another
+    /// ([`same_request`]): the same transaction by its txid but signing
+    /// another `b` or `E`, as a reorganization may mine in place of the
+    /// one the hub answered (her signatures on both, made again), or
+    /// another transaction altogether. None if none is pinned or it is
+    /// `request`.
+    pub fn other_request(
+        &self,
+        id: &[u8; 32],
+        request: &Transaction,
+    ) -> Result<Option<Transaction>> {
+        Ok(self
+            .request(id)?
+            .filter(|pinned| !same_request(pinned, request)))
+    }
+
     /// Whether nothing is pinned.
     pub fn is_empty(&self) -> Result<bool> {
         let n: i64 = self
@@ -404,6 +420,10 @@ mod tests {
             .answer(&[1; 32], &other, || panic!("signed another claim"))
             .is_err());
         assert!(pins.pin_proof(&[2; 32], &other, b"proof").is_err());
+        // Shown another, the hub finds the one it pinned.
+        assert_eq!(pins.other_request(&[1; 32], &again)?, None);
+        assert_eq!(pins.other_request(&[1; 32], &other)?, Some(r));
+        assert_eq!(pins.other_request(&[3; 32], &other)?, None);
         Ok(())
     }
 
