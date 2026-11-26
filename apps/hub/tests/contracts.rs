@@ -89,7 +89,20 @@ async fn hub_serving(
     dir: &Path,
     range: Option<Range>,
 ) -> Result<(String, Source, Arc<Hub>)> {
-    serve(rt, dir, range, None).await
+    let (url, source, hub, _) = serve(rt, dir, range, None).await?;
+    Ok((url, source, hub))
+}
+
+/// As [`hub_serving`], quoting graphs that carry claims in nulldata
+/// ([`Openings::carry_in_nulldata`]), not leaf envelopes.
+async fn hub_serving_nulldata(
+    rt: &Regtest,
+    dir: &Path,
+    range: Option<Range>,
+) -> Result<(String, Source, Arc<Hub>)> {
+    let (url, source, hub, openings) = serve(rt, dir, range, None).await?;
+    openings.carry_in_nulldata();
+    Ok((url, source, hub))
 }
 
 /// As [`hub_serving`], its openings' chain the node estimating every fee at
@@ -99,7 +112,7 @@ async fn serve(
     dir: &Path,
     range: Option<Range>,
     rate: Option<f64>,
-) -> Result<(String, Source, Arc<Hub>)> {
+) -> Result<(String, Source, Arc<Hub>, Arc<Openings>)> {
     std::fs::create_dir_all(dir)?;
     let (seed, db) = (dir.join("seed"), dir.join("hub.sqlite"));
     Hub::init(&seed, &db, NOTE_POW)?;
@@ -124,7 +137,7 @@ async fn serve(
     // gives only once it follows a chain.
     followed(&hub, &source, &deposits).await?;
     let services = Services {
-        contracts: Some(openings),
+        contracts: Some(openings.clone()),
         deposits: Some(deposits),
         ..Default::default()
     };
@@ -132,7 +145,7 @@ async fn serve(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
     tokio::spawn(async move { axum::serve(listener, app).await });
-    Ok((url, source, hub))
+    Ok((url, source, hub, openings))
 }
 
 /// The node of `real`, but estimating every fee at `rate` sat/vB: a JSON-RPC
@@ -720,7 +733,7 @@ async fn a_wallet_opens_contracts_at_a_hub_and_sees_them_confirm() -> Result<()>
 async fn a_hub_funds_f_within_the_fee_ceiling_however_high_fees_are() -> Result<()> {
     let rt = Regtest::start_standard()?;
     let dir = tempfile::tempdir()?;
-    let (url, source, _) = serve(&rt, &dir.path().join("hub"), None, Some(25.0)).await?;
+    let (url, source, _, _) = serve(&rt, &dir.path().join("hub"), None, Some(25.0)).await?;
     let chain = Node(source);
     let path = dir.path().join("wallet.sqlite");
     let regtest = ChainProfile::Core30DefaultRegtest;
@@ -1011,6 +1024,19 @@ fn pay_at(
 #[ignore = "needs bitcoind and a release build"]
 async fn a_holder_forces_her_contract_closed_on_a_silent_hub_and_takes_her_notes_value(
 ) -> Result<()> {
+    forced_closed_on_a_silent_hub(false).await
+}
+
+/// As [`a_holder_forces_her_contract_closed_on_a_silent_hub_and_takes_her_notes_value`],
+/// her claim carried in a leaf envelope (graph [`licash::recovery::LEAF_FROM`]):
+/// her purse commits to it first, and P reveals it spending that.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_holder_forces_her_contract_closed_on_a_silent_hub_from_a_leaf_envelope() -> Result<()> {
+    forced_closed_on_a_silent_hub(true).await
+}
+
+async fn forced_closed_on_a_silent_hub(leaf: bool) -> Result<()> {
     use bitcoin::FeeRate;
     use licash_contracts::holder::recovery::{self, Stage};
 
@@ -1018,7 +1044,10 @@ async fn a_holder_forces_her_contract_closed_on_a_silent_hub_and_takes_her_notes
     let dir = tempfile::tempdir()?;
     let at = dir.path().join("hub");
     // A hub service that answers no request: silent.
-    let (url, source, hub) = hub_serving(&rt, &at, None).await?;
+    let (url, source, hub) = match leaf {
+        true => hub_serving(&rt, &at, None).await?,
+        false => hub_serving_nulldata(&rt, &at, None).await?,
+    };
     let chain = Node(source);
     let mine = dir.path().join("wallet");
     std::fs::create_dir(&mine)?;
@@ -1162,25 +1191,63 @@ async fn a_holder_forces_her_contract_closed_on_a_silent_hub_and_takes_her_notes
         txid: r.compute_txid(),
         vout,
     };
-    ensure!(spent == [of_r(2), of_r(1), of_r(3)], "{p:?}");
-    // The reserve's model weighs them as measured (7 notes, compact), and
-    // at most as if each note she funded it with were one more: a forced
-    // close the quote's reserve affords is one that confirms.
-    let model = licash_contracts::reserve::publication_vsize(Format::Compact, 7);
-    let most = licash_contracts::reserve::publication_vsize(
-        Format::Compact,
-        7 + opened.funded.count_ones(),
-    );
     ensure!(
         r.vsize() as u64 <= licash_contracts::reserve::R_VSIZE,
         "R weighs {} vB",
         r.vsize()
     );
-    ensure!(
-        (model - 20..=most).contains(&(p.vsize() as u64)),
-        "P weighs {} vB, the model {model} to {most}",
-        p.vsize()
-    );
+    if leaf {
+        // Her purse spent by her commitment alone, to the coin carrying
+        // her claim and its change; P spends both, and carries no nulldata.
+        let c = rt.get_tx(&spent.get(2).context("no commitment spent")?.txid)?;
+        let of_c = |vout| bitcoin::OutPoint {
+            txid: c.compute_txid(),
+            vout,
+        };
+        let c_spends: Vec<_> = c.input.iter().map(|i| i.previous_output).collect();
+        ensure!(c_spends == [of_r(3)], "{c:?}");
+        ensure!(spent == [of_r(2), of_r(1), of_c(0), of_c(1)], "{p:?}");
+        ensure!(
+            p.output.iter().all(|o| !o.script_pubkey.is_op_return()),
+            "{p:?}"
+        );
+        let w = &p.input[2].witness;
+        let script = w.nth(1).context("no leaf")?;
+        ensure!(
+            w.len() == 3 && script.len() > 1_000 && script.last() == Some(&0x68),
+            "P reveals no envelope: {w:?}"
+        );
+        eprintln!(
+            "leaf, 7 notes: R {} vB, C {} vB (fee {}), P {} vB (fee {}), envelope {} B",
+            r.vsize(),
+            c.vsize(),
+            fee_of(&rt, &c)?,
+            p.vsize(),
+            fee_of(&rt, &p)?,
+            script.len()
+        );
+    } else {
+        ensure!(spent == [of_r(2), of_r(1), of_r(3)], "{p:?}");
+        // The reserve's model weighs them as measured (7 notes, compact),
+        // and at most as if each note she funded it with were one more: a
+        // forced close the quote's reserve affords is one that confirms.
+        let model = licash_contracts::reserve::publication_vsize(Format::Compact, 7);
+        let most = licash_contracts::reserve::publication_vsize(
+            Format::Compact,
+            7 + opened.funded.count_ones(),
+        );
+        ensure!(
+            (model - 20..=most).contains(&(p.vsize() as u64)),
+            "P weighs {} vB, the model {model} to {most}",
+            p.vsize()
+        );
+        eprintln!(
+            "nulldata, 7 notes: R {} vB, P {} vB (fee {})",
+            r.vsize(),
+            p.vsize(),
+            fee_of(&rt, &p)?
+        );
+    }
 
     // Nothing to do until it passes; then request_timeout, paid of P's
     // fee coin.
@@ -1553,13 +1620,29 @@ async fn empty(rt: &Regtest, wallet: &Wallet<Http>, chain: &Node) -> Result<()> 
 #[ignore = "needs bitcoind and a release build"]
 async fn a_holder_publishes_within_her_reserve_and_bumps_it_then_adds_a_coin_she_allows(
 ) -> Result<()> {
+    published_within_her_reserve_and_bumped(false).await
+}
+
+/// As [`a_holder_publishes_within_her_reserve_and_bumps_it_then_adds_a_coin_she_allows`],
+/// her claim carried in a leaf envelope: her commitment to it made once,
+/// and every version of P spending it, her purse's rest in its change.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_holder_bumps_her_leaf_publication_over_the_one_commitment() -> Result<()> {
+    published_within_her_reserve_and_bumped(true).await
+}
+
+async fn published_within_her_reserve_and_bumped(leaf: bool) -> Result<()> {
     use bitcoin::FeeRate;
     use licash_contracts::holder::recovery::{self, Stage};
 
     let rt = Regtest::start_standard()?;
     let dir = tempfile::tempdir()?;
     let at = dir.path().join("hub");
-    let (url, source, hub) = hub_serving(&rt, &at, None).await?;
+    let (url, source, hub) = match leaf {
+        true => hub_serving(&rt, &at, None).await?,
+        false => hub_serving_nulldata(&rt, &at, None).await?,
+    };
     let chain = Node(source);
     let mine = dir.path().join("wallet");
     std::fs::create_dir(&mine)?;
@@ -1622,22 +1705,47 @@ async fn a_holder_publishes_within_her_reserve_and_bumps_it_then_adds_a_coin_she
     let spent = |p: &bitcoin::Transaction| -> Vec<_> {
         p.input.iter().map(|i| i.previous_output).collect()
     };
-    ensure!(
-        spent(&first) == [of_r(2), of_r(1), of_r(3)],
-        "first spends {:?}",
-        spent(&first)
-    );
-    // What R hands her for it, less the fee coin her terminals need.
-    let held: u64 = [1, 2, 3].iter().map(|&v| r.output[v].value.to_sat()).sum();
-    let limit = held - first.output[1].value.to_sat();
+    // Under a leaf carrier, her commitment in her purse's place: its coin
+    // carrying the claim and its change.
+    let c = match leaf {
+        true => Some(rt.get_tx(&spent(&first).get(2).context("no commitment")?.txid)?),
+        false => None,
+    };
+    let base: Vec<_> = match &c {
+        Some(c) => {
+            let of_c = |vout| bitcoin::OutPoint {
+                txid: c.compute_txid(),
+                vout,
+            };
+            vec![of_r(2), of_r(1), of_c(0), of_c(1)]
+        }
+        None => vec![of_r(2), of_r(1), of_r(3)],
+    };
+    ensure!(spent(&first) == base, "first spends {:?}", spent(&first));
+    // What R hands her for it, less the fee coin her terminals need (after
+    // P's nulldata, or first): of a commitment, what it left of her purse.
+    let fee_vout = usize::from(!leaf);
+    let held: u64 = match &c {
+        Some(c) => {
+            ([1, 2].iter().map(|&v| r.output[v].value.to_sat())).sum::<u64>()
+                + c.output.iter().map(|o| o.value.to_sat()).sum::<u64>()
+        }
+        None => [1, 2, 3].iter().map(|&v| r.output[v].value.to_sat()).sum(),
+    };
+    let limit = held - first.output[fee_vout].value.to_sat();
     ensure!(
         fee_of(&rt, &first)? <= limit / 4,
         "first fee {} limit {limit}",
         fee_of(&rt, &first)?
     );
 
-    // R in a block, P held out: at half its window, bumped to half.
-    let r_at = rt.mine_with(std::slice::from_ref(&r))?;
+    // R in a block (her commitment too), P held out: at half its window,
+    // bumped to half.
+    let r_at = rt.mine_with(
+        &std::iter::once(r.clone())
+            .chain(c.clone())
+            .collect::<Vec<_>>(),
+    )?;
     advance().await?;
     for _ in 0..3 {
         rt.mine_with(&[])?;
@@ -1646,7 +1754,8 @@ async fn a_holder_publishes_within_her_reserve_and_bumps_it_then_adds_a_coin_she
     ensure!(bumped.stage == Stage::Published, "{bumped:?}");
     let half = rt.get_tx(&bumped.publication.context("no P")?)?;
     ensure!(half.compute_txid() != first.compute_txid());
-    ensure!(half.output[..2] == first.output[..2] && spent(&half) == spent(&first));
+    let kept = fee_vout + 1;
+    ensure!(half.output[..kept] == first.output[..kept] && spent(&half) == spent(&first));
     ensure!(
         fee_of(&rt, &half)? == limit / 2,
         "half fee {} limit {limit}",
@@ -1683,9 +1792,9 @@ async fn a_holder_publishes_within_her_reserve_and_bumps_it_then_adds_a_coin_she
     let paid = rt.get_tx(&allowed.publication.context("no P")?)?;
     let inputs = spent(&paid);
     ensure!(
-        inputs[..3] == [of_r(2), of_r(1), of_r(3)]
-            && inputs.len() == 4
-            && funded.contains(&inputs[3]),
+        inputs[..base.len()] == base[..]
+            && inputs.len() == base.len() + 1
+            && funded.contains(&inputs[base.len()]),
         "paid spends {inputs:?}"
     );
     ensure!(
@@ -3007,6 +3116,27 @@ async fn stale_claim_scanned(seed: [u8; 32], scanned: bool) -> Result<Stale> {
     stale_claim_after(seed, scanned, |_| ()).await
 }
 
+/// Whether [`stale_copy`]'s hub quotes graphs that carry claims in nulldata
+/// ([`Openings::carry_in_nulldata`]): while a [`Nulldata`] lives.
+static NULLDATA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// [`NULLDATA`] for as long as it lives: off again when the test ends,
+/// however it does.
+struct Nulldata;
+
+impl Nulldata {
+    fn on() -> Self {
+        NULLDATA.store(true, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for Nulldata {
+    fn drop(&mut self) {
+        NULLDATA.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// A dishonest holder's filings for as long as it lives
 /// ([`licash_contracts::holder::recovery::forge_filings`]): honest again
 /// when the test ends, however it does.
@@ -3122,6 +3252,9 @@ async fn stale_copy<T: licash_wallet::Transport>(
     let dir = tempfile::tempdir()?;
     let at = dir.path().join("hub");
     let (url, source, hub, openings) = hub_answering_with(&rt, &at, Some(STALE_RANGE)).await?;
+    if NULLDATA.load(std::sync::atomic::Ordering::SeqCst) {
+        openings.carry_in_nulldata();
+    }
     let chain = Node(source.clone());
     let (mine, wallet) = holder_wallet(&rt, &chain, dir.path(), &url, seed, &[COIN, COIN]).await?;
     let chosen = Ask {
@@ -5339,14 +5472,66 @@ async fn fee_coins_swept(s: &Stale) -> Result<usize> {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs bitcoind and a release build"]
 async fn a_hub_hands_its_fee_coins_funding_to_a_chain_apart_from_its_wallet() -> Result<()> {
-    let apart = Apart::on();
+    disclosed_uncontested(false, true).await
+}
+
+/// Her stale claim, carried in nulldata, as graphs before
+/// [`licash::recovery::LEAF_FROM`] carry it: the hub reads it from P's
+/// nulldata, and discloses the unlock in nulldata too, not in its fee
+/// coin's envelope; she is paid what is left, uncontested.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_hub_discloses_in_nulldata_on_a_graph_that_carries_claims_there() -> Result<()> {
+    disclosed_uncontested(true, false).await
+}
+
+/// Her stale claim disclosed and paid uncontested, its hub's chain apart
+/// from its wallet's node if `apart`, its graph's carrier nulldata if
+/// `nulldata`, else leaf envelopes. Its disclosure carries what it does as
+/// that says.
+async fn disclosed_uncontested(nulldata: bool, apart: bool) -> Result<()> {
+    let carried = nulldata.then(Nulldata::on);
+    let away = apart.then(Apart::on);
     let s = stale_claim([20; 32]).await?;
-    drop(apart);
+    drop((away, carried));
     let done = played(&s, |_| true).await?;
     let x = done.response.context("no response")?;
+    let slot = bitcoin::OutPoint { txid: x, vout: 2 };
+    ensure!(!s.rt.is_unspent(&slot)?, "never disclosed: {done:?}");
+    let p = s.rt.get_tx(&done.publication.context("no P")?)?;
+    let returns = |tx: &bitcoin::Transaction| {
+        (tx.output.iter())
+            .filter(|o| o.script_pubkey.is_op_return() && o.script_pubkey.len() > 1)
+            .count()
+    };
+    ensure!(returns(&p) == usize::from(nulldata), "{p:?}");
+    // Its disclosure: one nulldata output carrying the unlock, or its fee
+    // coin, input 1, spent by the envelope that does.
+    let disclosure = (0..=s.rt.height()?)
+        .rev()
+        .map(|h| s.rt.block_txs(h))
+        .find_map(|txs| match txs {
+            Ok(txs) => (txs.into_iter())
+                .find(|tx| tx.input.iter().any(|i| i.previous_output == slot))
+                .map(Ok),
+            Err(e) => Some(Err(e)),
+        })
+        .context("no disclosure in a block")??;
     ensure!(
-        !s.rt.is_unspent(&bitcoin::OutPoint { txid: x, vout: 2 })?,
-        "never disclosed: {done:?}"
+        returns(&disclosure) == usize::from(nulldata),
+        "{disclosure:?}"
+    );
+    let enveloped = (disclosure.input.get(1))
+        .and_then(|i| i.witness.nth(1))
+        .is_some_and(|script| script.len() > 100 && script.last() == Some(&0x68));
+    ensure!(enveloped != nulldata, "{disclosure:?}");
+    eprintln!(
+        "{}: P {} vB (fee {}), disclosure {} vB (fee {})",
+        if nulldata { "nulldata" } else { "leaf" },
+        p.vsize(),
+        fee_of(&s.rt, &p)?,
+        disclosure.vsize(),
+        fee_of(&s.rt, &disclosure)?
     );
     ensure!(done.corrected == Some(98_304), "{done:?}");
     ensure!(
