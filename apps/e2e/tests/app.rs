@@ -1076,7 +1076,7 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     // beside it, apart.
     const OPENING: u64 = 10_000;
     const RESERVE: u64 = 20_000;
-    // Its sizes, 2^n - 1 sat: the least.
+    // The least cap, 2^17 - 1 sat.
     const LEAST: u64 = 131_071;
     // Her own part of the coin she is told to cash out for it.
     const PART: u64 = 1_000;
@@ -1124,13 +1124,13 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     // No coin on Bitcoin pays its price: offered a cover for what it holds
     // at hub1 not protected there, of its own: those notes cashed out to
     // itself first, the cost and reserve paid from them and the rest its
-    // part, in the smallest size that takes them, the hub funding the
-    // rest of it. Its cost and reserve. Nothing to pay or choose yet.
+    // part, in a contract of it of the least cap at least, the hub funding
+    // the rest of it. Its cost and reserve. Nothing to pay or choose yet.
     at_hub(phone, eco.hub(1)).await?;
     phone.tap_id("open-contract").await?;
     let wanted = amount(&phone.by_id("quote-cap", 60).await?.text);
     ensure!(
-        (wanted + 1).is_power_of_two() && wanted >= LEAST,
+        licash_api::is_cap(u32::try_from(wanted)?) && wanted >= LEAST,
         "a cover of {wanted} offered with no coin"
     );
     let first = amount(&phone.by_id("quote-price", 10).await?.text);
@@ -1225,9 +1225,10 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     let before = phone.balance().await?;
     eprintln!("a coin of {coin} kept, {before} held, {credit} on credit");
 
-    // Paid from it now: the cover offered for it, the smallest it fills,
-    // its price as hub1 prices it, all the rest of the coin her part, less
-    // than dust left. Larger covers take it whole too: hers to choose.
+    // Paid from it now: the cover offered for it, of her part (the least,
+    // it being less), its price as hub1 prices it, all the rest of the coin
+    // her part, less than dust left. Larger covers take it whole too: hers
+    // to choose.
     at_hub(phone, eco.hub(1)).await?;
     phone.tap_id("open-contract").await?;
     let cap = amount(&phone.by_id("quote-cap", 60).await?.text);

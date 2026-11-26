@@ -28,16 +28,16 @@ import org.licash.core.ContractQuote
 import org.licash.core.ContractRange
 import org.licash.core.DepositCoin
 import org.licash.core.Holding
+import org.licash.core.contractCapAtLeast
 import org.licash.core.contractFee
 import org.licash.core.contractFit
+import org.licash.core.contractMaxCap
 import org.licash.core.contractPrice
-import org.licash.core.contractSizes
 import org.licash.wallet.Chosen
 import org.licash.wallet.Engine
 import org.licash.wallet.digits
 import org.licash.wallet.percent
 import org.licash.wallet.sat
-import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 /** The coins of `q` a contract within its hub's range takes whole: none if none does, or it has no range. */
@@ -99,36 +99,25 @@ internal fun Offered(
 }
 
 /**
- * The contracts within `range` over `blocks` that `coin` pays for whole
- * ([contractFit]), one of each cap, smallest first: none if no contract
- * takes the coin. The coin is spent whole, the price and the rest of it her
- * part, issued back to her as notes; the rest of the cap is the hub's.
+ * The contract within `range` over `blocks` that `coin` pays for whole
+ * ([contractFit]), of `least` sat at least: none if none takes the coin.
+ * The coin is spent whole, the price and the rest of it her part, issued
+ * back to her as notes; the rest of the cap, what she asks past her part,
+ * is the hub's. Of no `least`, her part only, the hub adding no more than
+ * makes a cap.
  */
-internal fun fitsOf(q: ContractQuote, range: ContractRange, blocks: UInt, coin: DepositCoin): List<ContractFit> =
-    fitsFrom(range.minCap) { least ->
-        contractFit(range, blocks, coin.value, least, q.dust, q.denominations, q.fundedNotes)
-    }
-
-/** Each contract `fit` gives of `least` sat at least and above, the smallest it finds above the last. */
-internal fun fitsFrom(least: ULong, fit: (least: ULong) -> ContractFit?): List<ContractFit> = buildList {
-    var from = least
-    while (true) {
-        val found = fit(from)?.takeIf { it.cap >= from } ?: break
-        add(found)
-        if (found.cap == ULong.MAX_VALUE) break
-        from = found.cap + 1uL
-    }
-}
+internal fun fitAt(q: ContractQuote, range: ContractRange, blocks: UInt, coin: DepositCoin, least: ULong = 0uL): ContractFit? =
+    contractFit(range, blocks, coin.value, least, 0uL, q.dust, q.denominations, q.fundedNotes)
 
 /**
- * What protection is mostly for, which sizes it at first: the smallest her
- * coin fills, the hub adding as little as it can, at its interest (`halves`
- * none); or room for what she puts in and holds at the hub (`halves` of it,
- * in halves), to pay with; half as much again, to be paid too; or three
- * times it, to be paid mostly. The hub funds the room beyond her part.
+ * What protection is mostly for, which sizes it at first: her part only,
+ * the hub adding as little as it can, at its interest (`halves` none); or
+ * room for what she puts in and holds at the hub (`halves` of it, in
+ * halves), to pay with; half as much again, to be paid too; or three times
+ * it, to be paid mostly. The hub funds the room beyond her part.
  */
 internal enum class Intent(val label: String, val says: String, val halves: ULong) {
-    FITS("Smallest", "The smallest your deposit fills, the hub adding the rest. It costs the least.", 0uL),
+    FITS("Yours", "Your deposit only, the hub adding nothing. It costs the least.", 0uL),
     PAY("Pay", "Room for what you put in, to pay with.", 2uL),
     BOTH("Both", "Room for half as much again, to receive.", 3uL),
     RECEIVE("Receive", "Room to receive twice what you put in.", 6uL),
@@ -141,50 +130,43 @@ internal enum class Intent(val label: String, val says: String, val halves: ULon
 internal fun intentOf(saved: String?): Intent = Intent.entries.find { it.name == saved } ?: Intent.FITS
 
 /**
- * The contract offered at first of `fits` for a coin of `coin` sat, with
- * `missing` sat at its hub not protected yet, for `intent`: the smallest
- * covering both as [Intent.halves] says, else the largest the hub allows
- * for it.
+ * The cap asked at least of a coin of `coin` sat, with `missing` sat at its
+ * hub not protected yet, for `intent`: both as [Intent.halves] says.
  */
-internal fun intentFit(fits: List<ContractFit>, coin: ULong, missing: ULong, intent: Intent): ContractFit? {
-    val wanted = (coin + missing) * intent.halves / 2uL
-    return fits.firstOrNull { it.cap >= wanted } ?: fits.lastOrNull()
+internal fun intentLeast(coin: ULong, missing: ULong, intent: Intent): ULong = (coin + missing) * intent.halves / 2uL
+
+/**
+ * The contract offered of a coin, `fit` of a least cap (as [fitAt]), with
+ * `least` sat asked: of that cap, else of the largest the hub allows for
+ * the coin (`most`, [contractMaxCap]), else of her part only.
+ */
+internal fun fitFor(least: ULong, most: ULong, fit: (least: ULong) -> ContractFit?): ContractFit? =
+    fit(least) ?: fit(minOf(least, most)) ?: fit(0uL)
+
+/**
+ * The contract offered at first of a coin of `coin` sat, with `missing`
+ * sat at its hub not protected yet, for `intent` ([intentLeast], [fitFor]).
+ */
+internal fun intentFit(coin: ULong, missing: ULong, intent: Intent, most: ULong, fit: (least: ULong) -> ContractFit?): ContractFit? =
+    fitFor(intentLeast(coin, missing, intent), most, fit)
+
+/** The contract that takes `coin` whole of her part only, if one does. */
+internal fun fitOf(q: ContractQuote, range: ContractRange, blocks: UInt, coin: DepositCoin): ContractFit? =
+    fitAt(q, range, blocks, coin)
+
+/**
+ * The cap asked at `value` of a slider from `low` to `high`: in steps of
+ * 1,000 sat but at its ends, any she likes between.
+ */
+internal fun capAt(value: Float, low: ULong, high: ULong): ULong {
+    if (high <= low) return low
+    val at = value.toDouble().coerceIn(low.toDouble(), high.toDouble())
+    val rounded = (at / CAP_STEP).roundToLong().toULong() * CAP_STEP.toULong()
+    return rounded.coerceIn(low, high)
 }
 
-/**
- * The contract offered at first of `fits` for a coin of `coin` sat, with
- * `missing` sat at its hub not protected yet: the smallest covering half
- * again both, room to be paid more, else the largest the hub allows for it.
- */
-internal fun suggestedFit(fits: List<ContractFit>, coin: ULong, missing: ULong = 0uL): ContractFit? =
-    intentFit(fits, coin, missing, Intent.BOTH)
-
-/** The smallest contract that takes `coin` whole, if one does. */
-internal fun fitOf(q: ContractQuote, range: ContractRange, blocks: UInt, coin: DepositCoin): ContractFit? =
-    fitsOf(q, range, blocks, coin).firstOrNull()
-
-/**
- * Each cover some coin of `fits` (each coin's contracts, as [fitsOf])
- * opens whole, smallest first, with the coins paying it, smallest first:
- * the cover is chosen, then a coin that pays it.
- */
-internal fun coversOf(fits: List<Pair<DepositCoin, List<ContractFit>>>): List<Pair<ULong, List<DepositCoin>>> =
-    fits.flatMap { (coin, its) -> its.map { it.cap to coin } }
-        .groupBy({ it.first }, { it.second })
-        .toSortedMap()
-        .map { (cap, coins) -> cap to coins.sortedBy { it.value } }
-
-/**
- * The cover offered at first: the one suggested for the smallest coin a
- * contract takes whole, with `missing` sat at its hub not protected yet.
- */
-internal fun suggestedCover(
-    fits: List<Pair<DepositCoin, List<ContractFit>>>,
-    missing: ULong = 0uL,
-    intent: Intent = Intent.FITS,
-): ULong? =
-    fits.filter { it.second.isNotEmpty() }.minByOrNull { it.first.value }
-        ?.let { (coin, its) -> intentFit(its, coin.value, missing, intent)?.cap }
+/** The steps of [capAt], in sat. */
+private const val CAP_STEP = 1_000.0
 
 /** What to cash out to herself to protect what she holds at a hub: a coin of `coin` sat opening `cap`, `funded` of it hers. */
 internal data class CashOutFirst(val cap: ULong, val coin: ULong, val funded: ULong)
@@ -202,22 +184,21 @@ internal fun cashOutRoom(missing: ULong): ULong = minOf(missing, missing / 100uL
  * first to protect the `missing` sat at a hub not protected yet, of her
  * own: those sat but for the cash-out's fees ([cashOutRoom]), the cost and
  * reserve paid from them and the rest her part, issued back, in the
- * smallest of `sizes` that takes it whole (`fit` of a coin at a least cap,
- * as [contractFit]), the hub funding the rest of it, as a coin she holds is
- * sized at first ([Intent.FITS]). The price paid from what she holds, the
- * rest is covered. At least what the smallest takes, [FIXED_PART] hers; at
- * most what the largest takes, all hers. None with nothing missing, or if
- * no contract takes it.
+ * contract of her part (`fit` of a coin at a least cap, as [contractFit]),
+ * the hub adding what makes a cap of `least` sat at least, as a coin she
+ * holds is sized at first ([Intent.FITS]). The price paid from what she
+ * holds, the rest is covered. At least what the smallest takes,
+ * [FIXED_PART] hers; at most what the `largest` cap takes, all hers. None
+ * with nothing missing, or if no contract takes it.
  */
 internal fun cashOutOwn(
-    sizes: List<ULong>,
+    least: ULong,
+    largest: ULong,
     missing: ULong,
     price: (cap: ULong, funded: ULong) -> ULong,
     fit: (coin: ULong, least: ULong) -> ContractFit?,
 ): CashOutFirst? {
-    if (missing == 0uL) return null
-    val least = sizes.firstOrNull() ?: return null
-    val largest = sizes.last()
+    if (missing == 0uL || largest < least) return null
     val own = missing - cashOutRoom(missing)
     val coin = own.coerceIn(price(least, FIXED_PART) + FIXED_PART, price(largest, largest) + largest)
     return fit(coin, least)?.let { CashOutFirst(it.cap, coin, it.funded) }
@@ -226,22 +207,24 @@ internal fun cashOutOwn(
 /**
  * With no coin on Bitcoin that pays for it, the coin to cash out to herself
  * first to protect the `missing` sat at a hub not protected yet, mostly of
- * the hub's funds (under More: [cashOutOwn] at first): one paying
- * the price of the smallest of `sizes` covering half again them (else the
- * largest) and [FIXED_PART], her part, the hub funding the rest. If a
+ * the hub's funds (under More: [cashOutOwn] at first): one paying the price
+ * of a cap of half again them (`capAtLeast`, as [contractCapAtLeast]; else
+ * the `largest`) and [FIXED_PART], her part, the hub funding the rest. If a
  * contract of that cap does not take it whole (`fit` of a coin at a least
- * cap, as [contractFit]), as an older hub bounding the cap by the coin
- * refuses, the next smaller that does. None with nothing missing.
+ * cap, as [contractFit]), as a hub bounding the cap by the coin refuses,
+ * the `least`. None with nothing missing.
  */
 internal fun cashOutFirst(
-    sizes: List<ULong>,
+    least: ULong,
+    largest: ULong,
     missing: ULong,
     price: (cap: ULong, funded: ULong) -> ULong,
+    capAtLeast: (sat: ULong) -> ULong?,
     fit: (coin: ULong, least: ULong) -> ContractFit?,
 ): CashOutFirst? {
-    if (missing == 0uL) return null
-    val wanted = sizes.firstOrNull { it >= missing + missing / 2uL } ?: sizes.lastOrNull() ?: return null
-    return sizes.filter { it <= wanted }.asReversed().firstNotNullOfOrNull { cap ->
+    if (missing == 0uL || largest < least) return null
+    val wanted = capAtLeast(missing + missing / 2uL) ?: largest
+    return listOf(wanted, least).distinct().firstNotNullOfOrNull { cap ->
         val coin = price(cap, FIXED_PART) + FIXED_PART
         fit(coin, cap)?.takeIf { it.cap == cap }?.let { CashOutFirst(cap, coin, it.funded) }
     }
@@ -279,8 +262,9 @@ internal fun ChooseSheet(
  * Protection of terms chosen within what its hub allows, as rows of the
  * column it is in, a sheet's or a page's. First what is
  * protected at the hub once it opens (`cover`, the hub's now, with it), then
- * what it covers, chosen first, which decides the coins on Bitcoin that pay
- * it whole: the smallest at first. Then what it costs, the reserve, hers and
+ * what it covers: of the coin on Bitcoin paying it whole, the smallest at
+ * first, her part of it only unless she asks the hub for more (her intent,
+ * or as much as she likes). Then what it costs, the reserve, hers and
  * refundable, and what of the coin joins her balance once its funding
  * confirms: the coin is spent whole. How long, and the cost itemized, under
  * More. Offered unasked, it can be declined. Not paid for until the app is
@@ -312,17 +296,27 @@ internal fun Choosing(
     val download = android.text.format.Formatter.formatShortFileSize(LocalContext.current, q.download.toLong())
     val blockSecs = LocalBlockSeconds.current
     var blocks by remember(q) { mutableStateOf(q.suggestedBlocks.coerceIn(range.minBlocks, range.maxBlocks)) }
-    val fits = coins.map { it to fitsOf(q, range, blocks, it) }
-    val covers = coversOf(fits)
-    // The cover chosen, kept while some coin opens it; at first, or once
-    // none does, the one suggested.
-    var chosenCap by remember(q) { mutableStateOf<ULong?>(null) }
+    // The coins a contract of her part takes whole, the smallest first: it
+    // at first, or once the one chosen is not.
+    val payers = coins.filter { fitAt(q, range, blocks, it) != null }.sortedBy { it.value }
     var chosenCoin by remember(q) { mutableStateOf<DepositCoin?>(null) }
-    var picked by remember(q) { mutableStateOf(intent) }
-    val cap = chosenCap?.takeIf { c -> covers.any { it.first == c } } ?: suggestedCover(fits, cover.missing, picked)
-    val payers = covers.firstOrNull { it.first == cap }?.second.orEmpty()
     val coin = chosenCoin?.takeIf { it in payers } ?: payers.firstOrNull()
-    val fit = coin?.let { c -> fits.first { it.first == c }.second.firstOrNull { it.cap == cap } }
+    // The cover asked, past her part the hub's at its interest: as she
+    // chose it, else as her intent sizes it.
+    var chosenCap by remember(q) { mutableStateOf<ULong?>(null) }
+    var picked by remember(q) { mutableStateOf(intent) }
+    val ownFit = coin?.let { fitAt(q, range, blocks, it) }
+    val most = coin?.let { contractMaxCap(range, it.value) } ?: range.minCap
+    val fit = coin?.let { c ->
+        val at = { least: ULong -> fitAt(q, range, blocks, c, least) }
+        when (val asked = chosenCap) {
+            null -> intentFit(c.value, cover.missing, picked, most, at)
+            else -> fitFor(asked, most, at)
+        }
+    }
+    // The covers she may ask of it, from her part's own to the largest the hub allows.
+    val low = ownFit?.cap ?: range.minCap
+    val high = maxOf(low, minOf(most, range.maxCap))
     val capped = fit?.cap ?: range.minCap
     val funded = fit?.funded ?: 0uL
     // What the hub is paid: its fee and interest, then the reserve, hers.
@@ -333,11 +327,18 @@ internal fun Choosing(
     val protectsFor = if (blocks > q.afterAssert) blocks - q.afterAssert else 0u
     // None paying it: what she holds here protected by a coin cashed out to
     // herself first, of her own at first; mostly the hub's under More.
-    val sizes = contractSizes(range)
     val priced = { c: ULong, f: ULong -> contractPrice(range, c, blocks, f) }
-    val fitted = { v: ULong, least: ULong -> contractFit(range, blocks, v, least, q.dust, q.denominations, q.fundedNotes) }
-    val own = if (fit == null && cashOut != null) cashOutOwn(sizes, cover.missing, priced, fitted) else null
-    val hubs = if (fit == null && cashOut != null) cashOutFirst(sizes, cover.missing, priced, fitted) else null
+    val fitted = { v: ULong, least: ULong ->
+        contractFit(range, blocks, v, least, 0uL, q.dust, q.denominations, q.fundedNotes)
+    }
+    val capAtLeast = { sat: ULong -> contractCapAtLeast(range, sat) }
+    val (least, largest) = range.minCap to range.maxCap
+    val own = if (fit == null && cashOut != null) cashOutOwn(least, largest, cover.missing, priced, fitted) else null
+    val hubs = if (fit == null && cashOut != null) {
+        cashOutFirst(least, largest, cover.missing, priced, capAtLeast, fitted)
+    } else {
+        null
+    }
     val first = own ?: hubs
     val mostlyHubs = hubs?.takeIf { own != null && it != own }
     if (fit != null || first != null) {
@@ -431,10 +432,10 @@ internal fun Choosing(
                 )
             }
         }
-        // Its size, after what it costs: at first the smallest her coin
-        // fills; larger, by what it is for or exactly, the hub funds more
-        // of it, room to be paid more at its interest.
-        if (fit != null && covers.size > 1) {
+        // Its size, after what it costs: at first her part only; larger, by
+        // what it is for or as much as she likes, the hub funds more of it,
+        // room to be paid more at its interest.
+        if (fit != null && high > low) {
             Text("What it is for", modifier = Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyLarge)
             Segmented(
                 Intent.entries.map { it.label },
@@ -452,12 +453,10 @@ internal fun Choosing(
                 color = colors.onSurfaceVariant,
             )
             Text(PROTECTED_AMOUNT, modifier = Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyLarge)
-            val at = covers.indexOfFirst { it.first == capped }
             Slider(
-                value = at.toFloat(),
-                onValueChange = { chosenCap = covers[it.roundToInt().coerceIn(covers.indices)].first },
-                valueRange = 0f..covers.lastIndex.toFloat(),
-                steps = covers.size - 2,
+                value = capped.coerceIn(low, high).toFloat(),
+                onValueChange = { chosenCap = capAt(it, low, high) },
+                valueRange = low.toFloat()..high.toFloat(),
                 modifier = Modifier.testTag("contract-cap"),
             )
         }
