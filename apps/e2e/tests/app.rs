@@ -1378,7 +1378,11 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     })
     .await?;
     let now = amount(&phone.by_id("credit", 10).await?.text);
-    phone.back_to("receive").await?;
+    // Its first vault since the guide was asked for: said ready once, in
+    // Home's place, with a cheer; then Home.
+    phone.back_to("setup-ready").await?;
+    phone.tap_id("setup-done").await?;
+    phone.home(30).await?;
     let after = phone.balance().await?;
     // Less its coin, but her part back in notes: its price and what less
     // than dust it left, and what keeping its notes few may have cost
