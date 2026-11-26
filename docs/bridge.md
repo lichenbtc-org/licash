@@ -76,7 +76,14 @@ With `--public-url https://domain`, the bridge serves LNURL-pay at
 `/.well-known/lnurlp/NAME` for each account that picked a name
 (`licash-wallet bridge address NAME`), so payers reach it at `NAME@domain`.
 It accepts NIP-57 zap requests and publishes the zap receipt on the
-requested relays once paid. The hub's fee on receiving comes out of what
+requested relays once paid: up to 8 of them, and only `wss://` relays at a
+public address or public domain. It drops loopback, private, link-local,
+unique-local and unspecified addresses, `localhost`, single-label names,
+`.local`, `.internal` and `.onion`, so a payer cannot point it at a
+service on its own network. If no requested relay is left, it uses its
+own `--relay`s. It does not resolve domains, so a public name that points
+at a private address can still be reached; firewall the bridge's egress
+if that matters. The hub's fee on receiving comes out of what
 the account is paid.
 
 Anyone may ask an address for invoices, so each address has at most 64

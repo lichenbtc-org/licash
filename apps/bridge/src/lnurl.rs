@@ -141,7 +141,8 @@ fn zap_request(nostr: &str, amount: u64) -> Result<Event, Error> {
     Ok(event)
 }
 
-/// The relays the zap request `event` names, at most [`ZAP_RELAYS`].
+/// The relays the zap request `event` names, at most [`ZAP_RELAYS`]: those
+/// a payer may have the bridge connect to ([`public_relay`]) alone.
 fn zap_relays(event: &Event) -> Vec<RelayUrl> {
     event
         .tags
@@ -149,8 +150,63 @@ fn zap_relays(event: &Event) -> Vec<RelayUrl> {
         .filter(|t| t.as_slice().first().is_some_and(|k| k == "relays"))
         .flat_map(|t| t.as_slice().iter().skip(1).cloned().collect::<Vec<_>>())
         .filter_map(|r| RelayUrl::parse(&r).ok())
+        .filter(public_relay)
         .take(ZAP_RELAYS)
         .collect()
+}
+
+/// Whether `relay`, which anyone paying an address may name, is one the
+/// bridge publishes to: over TLS (`wss://`), at a public address or a
+/// domain of the public DNS, so that no payer has it reach a service of
+/// its own network, or an onion service, which it would reach in the
+/// clear. A domain is not resolved: one of the public DNS pointing at a
+/// private address is still reached, over TLS to that domain.
+fn public_relay(relay: &RelayUrl) -> bool {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    use nostr::types::url::Host;
+    fn public_v4(ip: Ipv4Addr) -> bool {
+        let [a, b, ..] = ip.octets();
+        !(ip.is_loopback()
+            || ip.is_private()
+            || ip.is_link_local()
+            || ip.is_unspecified()
+            || ip.is_broadcast()
+            || ip.is_multicast()
+            || ip.is_documentation()
+            || a == 0
+            // Shared (carrier-grade NAT), 100.64.0.0/10.
+            || (a == 100 && (b & 0xc0) == 64)
+            // Reserved, 240.0.0.0/4.
+            || a >= 240)
+    }
+    fn public_v6(ip: Ipv6Addr) -> bool {
+        if let IpAddr::V4(v4) = IpAddr::V6(ip).to_canonical() {
+            return public_v4(v4);
+        }
+        let first = ip.segments()[0];
+        !(ip.is_loopback()
+            || ip.is_unspecified()
+            || ip.is_multicast()
+            // Unique local, fc00::/7, and link-local, fe80::/10.
+            || (first & 0xfe00) == 0xfc00
+            || (first & 0xffc0) == 0xfe80)
+    }
+    if relay.scheme() != nostr::types::url::RelayUrlScheme::Wss {
+        return false;
+    }
+    match relay.host() {
+        Some(Host::Ipv4(ip)) => public_v4(ip),
+        Some(Host::Ipv6(ip)) => public_v6(ip),
+        Some(Host::Domain(domain)) => {
+            let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+            let local = [".localhost", ".onion", ".local", ".internal", ".home.arpa"];
+            domain.contains('.')
+                && domain != "home.arpa"
+                && !local.iter().any(|suffix| domain.ends_with(suffix))
+        }
+        None => false,
+    }
 }
 
 /// A zap receipt to publish: its event, the relays to publish it to, and
@@ -432,6 +488,79 @@ mod tests {
             headers.append("x-forwarded-for", value.parse().unwrap());
         }
         headers
+    }
+
+    /// A zap request names relays the bridge connects to: those of its own
+    /// network, the bridge's host, or onion services are dropped, and
+    /// those unencrypted, so that a payer reaches no service of the
+    /// bridge's through it.
+    #[test]
+    fn a_zap_publishes_to_public_relays_alone() {
+        let public = |url: &str| public_relay(&RelayUrl::parse(url).unwrap());
+        for url in [
+            "wss://relay.example.com",
+            "wss://relay.example.com:7777/path",
+            "wss://8.8.8.8",
+            "wss://[2001:4860::8888]",
+            "wss://100.128.0.1",
+            "wss://RELAY.Example.COM.",
+        ] {
+            assert!(public(url), "{url}");
+        }
+        for url in [
+            "ws://relay.example.com",
+            "wss://localhost:8080",
+            "wss://LocalHost.",
+            "wss://relay.localhost",
+            "wss://127.0.0.1",
+            "wss://10.0.0.1",
+            "wss://172.16.5.4",
+            "wss://192.168.1.1:4869",
+            "wss://169.254.169.254",
+            "wss://100.64.0.1",
+            "wss://0.0.0.0",
+            "wss://255.255.255.255",
+            "wss://[::1]",
+            "wss://[::]",
+            "wss://[::ffff:127.0.0.1]",
+            "wss://[::ffff:10.0.0.1]",
+            "wss://[fd00::1]",
+            "wss://[fe80::1]",
+            "wss://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion",
+            "wss://printer.local",
+            "wss://metadata.google.internal",
+            "wss://relay",
+        ] {
+            assert!(!public(url), "{url}");
+        }
+    }
+
+    /// A zap request's relays, the private ones dropped, and at most so
+    /// many: none left, the bridge's own are used (as the receipt says).
+    #[test]
+    fn a_zap_requests_relays_are_its_public_ones_at_most_so_many() {
+        use nostr::prelude::{EventBuilder, FinalizeEvent, Keys, Kind, Tag};
+        let request = |relays: &[&str]| {
+            EventBuilder::new(Kind::ZapRequest, "")
+                .tag(Tag::custom("relays", relays.iter().copied()))
+                .finalize(&Keys::generate())
+                .unwrap()
+        };
+        let named = zap_relays(&request(&[
+            "wss://127.0.0.1:9735",
+            "wss://one.example",
+            "ws://two.example",
+            "not a url",
+            "wss://two.example",
+        ]));
+        let named: Vec<_> = named.iter().map(RelayUrl::as_str).collect();
+        assert_eq!(named, ["wss://one.example", "wss://two.example"]);
+        assert!(zap_relays(&request(&["wss://localhost"])).is_empty());
+        let many: Vec<_> = (0..ZAP_RELAYS + 3)
+            .map(|n| format!("wss://r{n}.example"))
+            .collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        assert_eq!(zap_relays(&request(&many)).len(), ZAP_RELAYS);
     }
 
     /// The caller is always last, as its proxy appends it: a hub walking
