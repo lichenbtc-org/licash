@@ -188,7 +188,10 @@ Restoring on another host, while contracts may be in dispute:
    witness flags of `run`, then start the hub with `--respond-only`. It
    plays the disputes that began while it was down, however long ago, as
    far as their windows allow, and serves nothing but `/health`. Read its
-   alerts: missing instances, its header chain, its prover.
+   alerts: missing instances, its header chain, its prover, and what its
+   Lightning receipts, deposits and swaps are owed, which no one collects
+   while it responds only. Go on to step 5 before the earliest of their
+   locks expires.
 5. Start it as a whole (without `--respond-only`), and open its public
    route, only once the copy is known to be the newest: an older ledger
    takes spent notes again.
@@ -853,20 +856,34 @@ opens none. Each copy that opens contracts asks its witnesses which leads
 at start and every minute; superseded, it alerts and stops, and started
 again it responds only, as `--respond-only` runs it: no API but
 `/health`, no opening, fold, Lightning, deposit, swap, announcement or
-onion service, its responder, fee bumping and alerts on. Any number of
-copies may respond at once: each one-time answer is the first the
-witnesses kept, whichever copy decided it, and each signs it alike, so a
-copy restored older answers with what the newer decided. Take the
-contracts back to the first copy the same way, once it is the newest.
+onion service, its responder, fee bumping and alerts on. It keeps what
+it saw in `<data>/contracts-superseded`, so that started while a witness
+is unreachable it responds only still.
 
-A takeover needs every witness reachable and of this release (one of an
-earlier release refuses it: upgrade it, then take over again), and fails,
-taking nothing, otherwise. One that stopped after its first witness
-fences the other copies all the same; run it again. A witness unreachable
-leaves leadership unknown: the hub runs as asked, and signs nothing new
-anyway. Until a first takeover no copy is fenced, as before epochs. A hub
-of an earlier release ignores epochs, but its enrollments are refused
-once another copy took over: it opens nothing.
+Any number of copies may respond at once, and none signs two answers of
+one one-time key: each answer is the first the witnesses kept, whichever
+copy decided it, and every copy signs it alike. First come is not newest
+wins: a copy restored older answers with what a newer one decided, but a
+copy that decides first (its ledger missing spends the other holds)
+binds every copy to its answer. Leading says which copy opens contracts,
+not which holds the newest ledger. Take the contracts back to the first
+copy the same way, once it is the newest.
+
+A takeover needs the hub's database bound to these witnesses, and every
+witness reachable and of this release (one of an earlier release refuses
+it: upgrade it, then take over again). One that fails part way leaves
+the witnesses it reached keeping the new epoch, which fences the other
+copies all the same: run it again on the same copy, which finishes that
+epoch rather than taking the next. Two copies taking over at once may
+both fail; the first witness by pin decides which leads. A witness
+unreachable leaves leadership unknown: the hub runs as it last knew
+itself (superseded or not), signing no contract answer until it is
+reached, though a hub that runs whole still serves wallets and Lightning.
+Until a first takeover no copy is fenced, as before epochs.
+
+A hub of an earlier release ignores epochs: once another copy took over,
+its enrollments are refused, so it opens no contract, but it still serves
+wallets and runs its gateways. Stop it, as the restore steps say.
 
 The responder can only answer what its node shows it. The hub alerts once
 if the node's tip stays unchanged for 12 blocks' time (2 hours, 6 minutes
@@ -1130,7 +1147,9 @@ Before starting it:
   refuses it. Nothing changes until a first takeover: no epoch, no
   `contracts-instance`, every copy unfenced as before. Once one copy took
   over, an earlier release of the hub on another copy opens no contract
-  (its enrollments are refused), and answers as ever.
+  (its enrollments are refused), and answers as ever, but still serves
+  wallets. An upgraded hub with witnesses asks them which copy leads at
+  start and every minute; one unreachable is tolerated.
 - Openings speak version 3 of the opening protocol: she signs her deposit
   into F before the hub signs. Upgrade the hub first, then the apps. An app
   of version 2 opens no contract at a hub of version 3 until it is updated.

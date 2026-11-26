@@ -21,7 +21,7 @@ pub mod terms;
 mod vigil;
 mod witness;
 
-pub use witness::{Leadership, Witnesses, INSTANCE_FILE};
+pub use witness::{superseded, Leadership, Witnesses, INSTANCE_FILE, SUPERSEDED_FILE};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

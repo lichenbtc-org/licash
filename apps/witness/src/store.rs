@@ -214,8 +214,13 @@ fn status(c: &Connection) -> Result<Status> {
 fn leader(c: &Connection) -> Result<Option<Leader>> {
     let newest: Option<([u8; 32], Entry)> = c
         .query_row(
-            "SELECT contract, body, sig FROM log WHERE slot = ?1 ORDER BY contract DESC LIMIT 1",
-            [slot::LEADER],
+            "SELECT contract, body, sig FROM log
+             WHERE contract BETWEEN ?1 AND ?2 AND slot = ?3 ORDER BY contract DESC LIMIT 1",
+            params![
+                crate::leader_id(1),
+                crate::leader_id(u64::MAX),
+                slot::LEADER
+            ],
             |r| {
                 let entry = Entry {
                     body: r.get(1)?,

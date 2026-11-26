@@ -72,6 +72,46 @@ const ATTEMPTS: u32 = 3;
 /// leads as the one that took the epoch.
 pub const INSTANCE_FILE: &str = "contracts-instance";
 
+/// The file, in the hub's data directory, of the newest epoch this copy
+/// saw another take over, in decimal: so that it knows itself superseded
+/// while its witnesses cannot be asked. Removed as it leads again.
+pub const SUPERSEDED_FILE: &str = "contracts-superseded";
+
+/// The epoch this copy last saw another take over, if it did and has not
+/// led since ([`SUPERSEDED_FILE`]).
+pub fn superseded(data: &Path) -> Result<Option<u64>> {
+    let path = data.join(SUPERSEDED_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            Ok(Some(text.trim().parse().with_context(|| {
+                format!("{}: an epoch", path.display())
+            })?))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+/// Keep what `leadership` says of this copy: superseded, or leading.
+fn remember(data: &Path, leadership: Leadership) -> Result<()> {
+    let path = data.join(SUPERSEDED_FILE);
+    match leadership {
+        Leadership::Superseded(epoch) => {
+            if superseded(data)? != Some(epoch) {
+                std::fs::write(&path, epoch.to_string())?;
+                std::fs::File::open(data)?.sync_all()?;
+            }
+        }
+        Leadership::Leads(_) => {
+            if let Err(e) = std::fs::remove_file(&path) {
+                ensure!(e.kind() == std::io::ErrorKind::NotFound, e);
+            }
+        }
+        Leadership::Unfenced => {}
+    }
+    Ok(())
+}
+
 /// Which copy of the hub leads, as its witnesses say.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Leadership {
@@ -441,7 +481,9 @@ impl Witnesses {
             return Ok(Leadership::Unfenced);
         };
         let statuses = set.statuses(data).await?;
-        set.leadership(data, &statuses)
+        let leadership = set.leadership(data, &statuses)?;
+        remember(data, leadership)?;
+        Ok(leadership)
     }
 
     /// Take the next epoch over for this copy of the hub, its data in
@@ -449,16 +491,30 @@ impl Witnesses {
     /// to open contracts from now on. Its new instance id is kept first
     /// ([`INSTANCE_FILE`]), then written to every witness, by pin: the epoch
     /// taken. Every other copy is superseded as each witness keeps it.
-    /// Refused where a witness cannot be reached, or keeps no epochs (of
-    /// an earlier release), or another copy took the epoch first: run it
-    /// again then.
+    /// Refused where the hub's database is bound to no set of these (it
+    /// enrolled no contract), a witness cannot be reached, keeps no epochs
+    /// (of an earlier release), or another copy took the epoch first: run
+    /// it again then. Where this copy took the newest epoch already, it
+    /// writes that one again, to the witnesses a takeover stopped short of:
+    /// never superseding itself.
     pub async fn take_over(&self, data: &Path) -> Result<u64> {
         let set = self.0.as_ref().context("a takeover needs witnesses")?;
+        ensure!(
+            bound(data)? == Some(set.id),
+            "the hub's database is bound to no set of these witnesses: it took over nothing"
+        );
         let statuses = set.statuses(data).await?;
-        let epoch = set.newest(&statuses)?.map_or(0, |(epoch, _)| epoch) + 1;
-        let mut id = [0; 32];
-        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut id);
-        keep_instance(data, &id)?;
+        let newest = set.newest(&statuses)?;
+        let ours = instance(data)?;
+        let (epoch, id) = match newest {
+            Some((epoch, leader)) if ours == Some(leader) => (epoch, leader),
+            _ => {
+                let mut id = [0; 32];
+                rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut id);
+                keep_instance(data, &id)?;
+                (newest.map_or(0, |(epoch, _)| epoch) + 1, id)
+            }
+        };
         let mut write = set.signed(&leader_id(epoch), slot::LEADER, id.to_vec())?;
         write.epoch = epoch;
         for member in &set.members {
@@ -478,6 +534,7 @@ impl Witnesses {
                  over again if this copy is to lead"
             );
         }
+        remember(data, Leadership::Leads(epoch))?;
         Ok(epoch)
     }
 

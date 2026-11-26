@@ -551,6 +551,9 @@ async fn a_copy_superseded_opens_nothing_and_answers_as_ever() {
         witnesses.leadership(master.path()).await.unwrap(),
         Leadership::Superseded(1)
     );
+    // Kept, for a start its witnesses cannot be asked at.
+    assert_eq!(superseded(master.path()).unwrap(), Some(1));
+    assert_eq!(superseded(replica.path()).unwrap(), None);
     let refused = witnesses
         .enroll(master.path(), &[2; 32], || Ok(false))
         .await
@@ -588,12 +591,16 @@ async fn a_copy_superseded_opens_nothing_and_answers_as_ever() {
         replicas.leadership(replica.path()).await.unwrap(),
         Leadership::Superseded(2)
     );
+    assert_eq!(superseded(master.path()).unwrap(), None);
+    assert_eq!(superseded(replica.path()).unwrap(), Some(2));
 }
 
 /// A takeover that reached only its first witness (and stopped there)
 /// fences the other copies all the same, as that witness enrolls nothing
-/// for them; taken again, it is the next epoch's. One that cannot reach
-/// every witness takes nothing.
+/// for them; taken again by the same copy, it is finished, never the next
+/// epoch's, so that the copy never supersedes itself. One that cannot
+/// reach every witness at first takes nothing, nor does one of a hub
+/// bound to no set.
 #[tokio::test]
 async fn a_takeover_half_written_fences_all_the_same_and_is_taken_again() {
     let (a, b) = (witness().await, witness().await);
@@ -604,6 +611,9 @@ async fn a_takeover_half_written_fences_all_the_same_and_is_taken_again() {
         .await
         .unwrap();
     let replica = restored(master.path());
+    let unbound = hub_dir();
+    assert!(masters.take_over(unbound.path()).await.is_err());
+    assert!(!unbound.path().join(INSTANCE_FILE).exists());
     let gone = Client::new("https://127.0.0.1:1", [0xff; 32]).unwrap();
     let unreachable = Witnesses::of(SET, vec![a.client(), gone], SECRET).unwrap();
     assert!(unreachable.take_over(replica.path()).await.is_err());
@@ -631,11 +641,16 @@ async fn a_takeover_half_written_fences_all_the_same_and_is_taken_again() {
         replicas.leadership(replica.path()).await.unwrap(),
         Leadership::Leads(1)
     );
-    assert_eq!(replicas.take_over(replica.path()).await.unwrap(), 2);
+    assert_eq!(replicas.take_over(replica.path()).await.unwrap(), 1);
+    let other = if a.pin < b.pin { &b } else { &a };
+    let kept = other.client().status().await.unwrap().leader.unwrap();
+    assert_eq!((kept.epoch, kept.entry.body), (1, vec![9; 32]));
     assert_eq!(
         replicas.leadership(replica.path()).await.unwrap(),
-        Leadership::Leads(2)
+        Leadership::Leads(1)
     );
+    // Another copy's takeover is the next epoch's.
+    assert_eq!(masters.take_over(master.path()).await.unwrap(), 2);
 }
 
 /// Without witnesses no copy is fenced, and none can take over.

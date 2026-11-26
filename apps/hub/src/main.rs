@@ -1343,12 +1343,31 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             };
             let hub = Hub::open(&seed, &db, policy).context("open the hub")?;
             let hub = Arc::new(hub);
-            // Responding only, what they owe waits for the copy that leads.
-            if lightning.is_none() && !respond_only {
-                check_gateway_idle(&hub, &db, false)?;
-            }
-            if depositing.is_none() && !respond_only {
-                check_gateway_idle(&hub, &db, true)?;
+            if respond_only {
+                // What its gateways and swaps owe is collected by the copy
+                // that leads, if one does: told, as no one here does.
+                let owed = [
+                    check_idle(&swaps_dir),
+                    check_gateway_idle(&hub, &db, false),
+                    check_gateway_idle(&hub, &db, true),
+                ];
+                for e in owed.into_iter().filter_map(Result::err) {
+                    let message = format!(
+                        "responding only, this copy collects nothing it is owed: {e:#}. The copy \
+                         that leads must run its gateways and swaps before their locks expire"
+                    );
+                    tracing::error!("{message}");
+                    if let Err(e) = hub.alert(&message) {
+                        tracing::error!("notifying an alert: {e:#}");
+                    }
+                }
+            } else {
+                if lightning.is_none() {
+                    check_gateway_idle(&hub, &db, false)?;
+                }
+                if depositing.is_none() {
+                    check_gateway_idle(&hub, &db, true)?;
+                }
             }
             // Paused as it was when the hub stopped, before anything is paid.
             let guard = payouts::Guard::open(&cli.data);
@@ -2135,8 +2154,10 @@ fn superseded(epoch: u64) -> String {
 
 /// Why `run` responds only, if it does: asked (`respond_only`, refused
 /// without contracts and witnesses), or another copy of the hub took the
-/// contracts over, as its witnesses say. Not known, it runs as asked: as
-/// its witnesses unreachable stop its signing anyway.
+/// contracts over, as its witnesses say. Not known (a witness unreachable),
+/// it responds only if it last saw itself superseded
+/// ([`licash_contracts::hub::superseded`]), else runs as asked: as its
+/// witnesses unreachable stop its signing anyway.
 fn responding_only(
     respond_only: bool,
     chain: &Chain,
@@ -2163,7 +2184,7 @@ fn responding_only(
         Ok(Leadership::Unfenced | Leadership::Leads(_)) => None,
         Err(e) => {
             tracing::warn!("which copy of the hub leads, not known: {e:#}");
-            None
+            licash_contracts::hub::superseded(data)?.map(superseded)
         }
     })
 }
@@ -2497,6 +2518,36 @@ mod tests {
             only(&["--contracts", "--contracts-witnesses", "none"]).unwrap(),
             None
         );
+    }
+
+    /// Its witnesses unreachable, a hub responds only if it last saw
+    /// another copy take its contracts over, and otherwise runs as asked.
+    #[test]
+    fn a_hub_once_superseded_responds_only_while_its_witnesses_are_unreachable() {
+        let dir = tempfile::tempdir().unwrap();
+        let (seed, db) = (dir.path().join("seed"), dir.path().join("hub.sqlite"));
+        licash_hub::Hub::init(&seed, &db, 6).unwrap();
+        let witness = format!("https://127.0.0.1:1#{}", "ab".repeat(32));
+        let args = [
+            "licash-hub",
+            "run",
+            "--contracts",
+            "--contracts-witness-set",
+            &"03".repeat(32),
+            "--contracts-witness",
+            &witness,
+        ];
+        let Command::Run { chain, .. } = Cli::try_parse_from(args).unwrap().command else {
+            unreachable!()
+        };
+        assert_eq!(
+            responding_only(false, &chain, &seed, dir.path()).unwrap(),
+            None
+        );
+        let marker = dir.path().join(licash_contracts::hub::SUPERSEDED_FILE);
+        std::fs::write(&marker, "3").unwrap();
+        let why = responding_only(false, &chain, &seed, dir.path()).unwrap();
+        assert!(why.unwrap().contains("epoch 3"));
     }
 
     #[test]
