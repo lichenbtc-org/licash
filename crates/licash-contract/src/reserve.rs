@@ -1,6 +1,7 @@
 //! What a holder's reserve pays for a forced close: her request R and her
 //! publication P as one package (P spends R's anchor, so R's fee waits on
-//! it), and the fee coin her later terminals are paid from.
+//! it), with the commitment C that P reveals her claim from under a leaf
+//! carrier, and the fee coin her later terminals are paid from.
 //!
 //! Her reserve is what R hands her (the claim slot, the anchor and her
 //! purse, [`graph::purse`]) and no more: a wrong fee rate or a bug can't
@@ -9,7 +10,11 @@
 //! reserve affords too low a rate for the filing the protocol allows is
 //! one a forced close may not get confirmed at.
 
-use licash::{base::GraphTerms, claim::MAX_ITEMS, recovery::Format};
+use licash::{
+    base::GraphTerms,
+    claim::MAX_ITEMS,
+    recovery::{leaf_carried, Format},
+};
 use lichen_btc::bitcoin::Amount;
 
 use crate::graph::{self, SLOT};
@@ -58,10 +63,26 @@ pub fn publication_vsize(format: Format, notes: u32) -> u64 {
     fixed + each * u64::from(notes)
 }
 
-/// What the package of R and P of `notes` settled notes, and her fee coin,
-/// weigh in all, in vB, in a graph of `g`'s terms.
+/// C's and P's vsize together under a leaf carrier, of a filing of `notes`
+/// settled notes (of the compact or lean format, the only ones a leaf
+/// carrier is of): the filing's bytes in P's witness, a quarter of a vB
+/// each, where [`publication_vsize`] weighs them a vB each in nulldata.
+/// Measured of [`publication_vsize`]'s bytes, C and P weigh 779, 1,488 and
+/// 3,921 vB at one, eight and 32 notes; and on regtest, of a filing nulldata
+/// carries in 5,071 vB, 1,760 (C 172 vB, P 1,588).
+pub fn leaf_publication_vsize(notes: u32) -> u64 {
+    680 + 102 * u64::from(notes)
+}
+
+/// What the package of R and P of `notes` settled notes (and C, under a
+/// leaf carrier), and her fee coin, weigh in all, in vB, in a graph of
+/// `g`'s terms.
 pub fn forced_close_vsize(g: &GraphTerms, notes: u32) -> u64 {
-    R_VSIZE + publication_vsize(Format::at(g.id), notes) + terminal_vsize(g)
+    let published = match leaf_carried(g.id) {
+        true => leaf_publication_vsize(notes),
+        false => publication_vsize(Format::at(g.id), notes),
+    };
+    R_VSIZE + published + terminal_vsize(g)
 }
 
 /// The rate in sat per 1,000 vB her reserve affords a forced close of a
@@ -127,6 +148,25 @@ mod tests {
         g.bits = u8::MAX;
         g.low_bits = 0;
         affordable_rate(&g, 1);
+    }
+
+    /// A leaf carrier weighs a filing's bytes a quarter of what nulldata
+    /// does, and C besides: as measured on regtest, the filing of 11 notes
+    /// and some (5,071 vB in nulldata, 520 of them and 403 a note) in 1,760
+    /// vB of C and P, which the model of 12 covers and of 11 nearly does.
+    #[test]
+    fn a_leaf_carrier_weighs_its_filing_a_quarter_and_its_commitment() {
+        let measured = 172 + 1_588;
+        assert_eq!((5_071 - 520) / 403, 11);
+        assert!(leaf_publication_vsize(12) >= measured);
+        assert!(leaf_publication_vsize(11) < measured + 102);
+        // Of the widest filing, under a third of nulldata's.
+        let (nulldata, leaf) = (terms(14, 0, 0), terms(15, 0, 0));
+        assert_eq!(
+            forced_close_vsize(&nulldata, 32) - forced_close_vsize(&leaf, 32),
+            publication_vsize(Format::Lean, 32) - leaf_publication_vsize(32)
+        );
+        assert!(3 * leaf_publication_vsize(32) < publication_vsize(Format::Lean, 32));
     }
 
     #[test]

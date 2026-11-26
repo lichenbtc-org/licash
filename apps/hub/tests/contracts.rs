@@ -1217,6 +1217,15 @@ async fn forced_closed_on_a_silent_hub(leaf: bool) -> Result<()> {
             w.len() == 3 && script.len() > 1_000 && script.last() == Some(&0x68),
             "P reveals no envelope: {w:?}"
         );
+        // The reserve's model weighs C and P as measured, as of nulldata.
+        let model = licash_contracts::reserve::leaf_publication_vsize(7);
+        let most =
+            licash_contracts::reserve::leaf_publication_vsize(7 + opened.funded.count_ones());
+        let weighed = (c.vsize() + p.vsize()) as u64;
+        ensure!(
+            (model - 20..=most).contains(&weighed),
+            "C and P weigh {weighed} vB, the model {model} to {most}"
+        );
         eprintln!(
             "leaf, 7 notes: R {} vB, C {} vB (fee {}), P {} vB (fee {}), envelope {} B",
             r.vsize(),
