@@ -301,6 +301,7 @@ impl Witnesses {
                     contract: *id,
                     slot: slot.to_owned(),
                     entry: entry.clone(),
+                    epoch: 0,
                 },
                 None => set.signed(id, slot, ours.to_body())?,
             };

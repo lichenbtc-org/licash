@@ -13,7 +13,15 @@
 //! A witness holds no key of the hub's or of any contract: it checks the
 //! hub's signature on what it is asked to keep, and keeps nothing else.
 //! It is reached over TLS with a certificate of its own, which the hub
-//! pins ([`client::Client`]). Here: what witnesses and hubs say to each
+//! pins ([`client::Client`]).
+//!
+//! It also keeps which copy of the hub leads: an entry for each epoch
+//! taken over ([`slot::LEADER`]), naming the copy that took it. A
+//! witness enrolls no contract for a copy writing at an older epoch than
+//! the newest it holds, so that a copy superseded opens none; what it
+//! decides of the contracts open is kept as ever, first come.
+//!
+//! Here: what witnesses and hubs say to each
 //! other, the witness's store ([`store::Store`]) and its service
 //! ([`server`]).
 
@@ -50,13 +58,36 @@ pub mod slot {
     /// all the hub had to give it (on a hub's first contract, or once
     /// imported), the same in every witness of a set.
     pub const SEAL: &str = "seal";
+    /// The copy of the hub that took an epoch over, under
+    /// [`super::leader_id`] of it: its instance, 32 bytes.
+    pub const LEADER: &str = "leader";
+}
+
+/// What the contract ids of epochs begin with: no contract's.
+const LEADERS: [u8; 24] = *b"licash-witness/leader/v1";
+
+/// The contract an epoch's leader is kept under: [`LEADERS`], then the
+/// epoch, big-endian, so that the newest sorts last.
+pub fn leader_id(epoch: u64) -> [u8; 32] {
+    let mut id = [0; 32];
+    id[..24].copy_from_slice(&LEADERS);
+    id[24..].copy_from_slice(&epoch.to_be_bytes());
+    id
+}
+
+/// The epoch `contract` keeps the leader of, if it is one's: from 1.
+pub fn epoch_of(contract: &[u8; 32]) -> Option<u64> {
+    let epoch = u64::from_be_bytes(contract[24..].try_into().expect("8 bytes"));
+    (contract[..24] == LEADERS && epoch > 0).then_some(epoch)
 }
 
 /// Whether `slot` is one kept for `contract`.
 pub fn valid(contract: &[u8; 32], slot: &str) -> bool {
+    let epoch = epoch_of(contract).is_some();
     match slot {
         slot::SEAL => *contract == SEALED,
-        slot::ENROLL | slot::RESPOND | slot::ASSERT => *contract != SEALED,
+        slot::ENROLL | slot::RESPOND | slot::ASSERT => *contract != SEALED && !epoch,
+        slot::LEADER => epoch,
         _ => false,
     }
 }
@@ -83,6 +114,17 @@ pub struct Status {
     pub hub_key: [u8; 32],
     pub sequence: u64,
     pub seal: Option<Entry>,
+    /// The newest epoch's leader, if any epoch was taken over: absent of
+    /// a witness that keeps none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader: Option<Leader>,
+}
+
+/// Who took `epoch` over: [`slot::LEADER`] of [`leader_id`] of it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Leader {
+    pub epoch: u64,
+    pub entry: Entry,
 }
 
 /// What a witness holds of a contract's slot.
@@ -102,6 +144,15 @@ pub struct Write {
     pub contract: [u8; 32],
     pub slot: String,
     pub entry: Entry,
+    /// The epoch its writer leads at, 0 for none: an enrollment at one
+    /// older than the witness's newest is refused. Not signed: an entry
+    /// is forwarded as first kept, whatever epoch carries it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub epoch: u64,
+}
+
+fn is_zero(epoch: &u64) -> bool {
+    *epoch == 0
 }
 
 /// What the hub signs for an entry of `body` in `slot` of `contract`, in
@@ -158,6 +209,7 @@ pub fn signed(
         contract: *contract,
         slot: slot.to_owned(),
         entry: Entry { body, sig },
+        epoch: 0,
     })
 }
 
