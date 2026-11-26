@@ -1,0 +1,68 @@
+#!/bin/sh
+# A worker of `licash-r0` on another machine, over SSH (docs/r0.md):
+#
+#   LICASH_R0_WORKERS='licash-r0-remote root@gpu-1; licash-r0-remote -p 2222 root@gpu-2'
+#
+# licash-r0-remote [ssh options] <destination> <job-dir> <from> <to>
+#
+# It carries the job to <destination>, runs `licash-r0 range-prove` there
+# (`LICASH_R0_REMOTE` names another command) and leaves what it proved as
+# <job-dir>/range, in one connection: the job goes in, the range comes
+# back, what the prover says there is said here. Nothing of the job is left
+# on the machine, whether it ends well or not.
+#
+# The machine needs `licash-r0` and, to prove on its GPU, `licash-r0-cuda`
+# beside it, as the hub's image has them in /usr/local/bin: no program, no
+# Groth16 setup. It reads what it proves (the statement's input), and is
+# trusted with nothing else: what it returns is verified where the proof is
+# made.
+set -eu
+
+[ $# -ge 4 ] || {
+    echo "usage: licash-r0-remote [ssh options] <destination> <job-dir> <from> <to>" >&2
+    exit 2
+}
+
+# The last three arguments are the job's; those before, ssh's.
+n=$(($# - 3))
+i=0
+for arg; do
+    i=$((i + 1))
+    if [ "$i" -le "$n" ]; then
+        set -- "$@" "$arg"
+    elif [ "$i" -eq $((n + 1)) ]; then
+        job=$arg
+    elif [ "$i" -eq $((n + 2)) ]; then
+        from=$arg
+    else
+        to=$arg
+    fi
+    shift
+done
+case "$from$to" in
+*[!0-9]* | "") echo "licash-r0-remote: segments $from..$to" >&2 && exit 2 ;;
+esac
+
+prover=${LICASH_R0_REMOTE:-licash-r0}
+# shellcheck disable=SC2016 # expanded there, not here
+there='set -eu
+d=$(mktemp -d)
+trap "rm -rf \"$d\"" EXIT
+trap "exit 1" HUP INT TERM
+tar -C "$d" -xf -
+'"$prover"' range-prove "$d" '"$from"' '"$to"' >&2
+cat "$d/range"'
+
+rm -f "$job/range" "$job/range.part"
+# A machine that stops answering fails the job within a minute, and none
+# waits for a password: the job goes to another.
+tar -C "$job" --exclude=./range.part -cf - . |
+    ssh -o BatchMode=yes -o ConnectTimeout=20 \
+        -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+        "$@" "$there" >"$job/range.part"
+# A range half received is none.
+[ -s "$job/range.part" ] || {
+    echo "licash-r0-remote: it returned nothing" >&2
+    exit 1
+}
+mv "$job/range.part" "$job/range"

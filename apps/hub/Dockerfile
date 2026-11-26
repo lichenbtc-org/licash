@@ -44,6 +44,7 @@ RUN --mount=type=cache,id=licash-r0-registry,target=/root/.cargo/registry,sharin
     mkdir -p /opt/r0/bin "$share/programs" "$share/groth16"; \
     cp r0/host/target/release/licash-r0 /opt/r0/bin/; \
     cp r0/host/target/cuda/release/licash-r0 /opt/r0/bin/licash-r0-cuda; \
+    cp r0/host/licash-r0-remote /opt/r0/bin/; \
     cp r0/programs/*.bin "$share/programs/"; \
     cp r0/host/bench.bin "$share/"
 COPY --from=risczero/risc0-groth16-prover:v2026-10-20.1@sha256:e8c2068fb34bbc41447255aa980a89cbb7d6e5a80c0d66041264431f2a955e47 \
@@ -60,9 +61,10 @@ FROM prover-${TARGETARCH} AS prover
 
 FROM debian:trixie-slim AS runtime
 # Root certificates, for notifications and Esplora over HTTPS; GMP, for the
-# Groth16 witness generator.
+# Groth16 witness generator; SSH, to the machines that prove segments too
+# (`licash-r0-remote`, docs/r0.md).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libgmp10 \
+    && apt-get install -y --no-install-recommends ca-certificates libgmp10 openssh-client \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin licash \
     && mkdir -p /data && chown licash /data && chmod 700 /data

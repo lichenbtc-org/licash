@@ -1022,6 +1022,21 @@ hours, too slow for signet's window but for the smallest contracts. Give it
 10 GB of memory or more. ARM images have no prover: their hubs respond to no
 contested claim on signet.
 
+A hub proves faster with machines it rents while it needs them: with
+`LICASH_R0_WORKERS` in its environment (docs/r0.md, Other machines), each
+proof's segments are proved by those machines too, over SSH, and joined and
+wrapped by the hub. The image has `licash-r0-remote` and an SSH client; the
+hub's key and `known_hosts` are in `<data>/.ssh`, its home. A rented machine
+needs the image's `/usr/local/bin/licash-r0` and `licash-r0-cuda` and an
+NVIDIA driver. The variable is read as a proof starts: restart the hub to
+change it, and the proof under way carries on with the segments it kept. A
+machine that fails or stops answering costs the proof its job's time and no
+more, as the hub proves what is left; it learns the inputs of the disputes
+it proves (the notes and spends of a claim), and can forge nothing. The
+hub's plan does not count these machines yet: it responds to the claims its
+own prover's measured speed can prove in time, and admits contracts by it
+(`--contracts-proof-scale` below 1 admits more).
+
 The hub stops, with an error, when one of its loops stops: the chain's
 watch, the tweaks' index, the gateways, the contracts' responder and
 sweeper, the swaps. Run it under a supervisor that starts it again (as
