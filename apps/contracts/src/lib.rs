@@ -389,9 +389,12 @@ pub fn trust(profile: ChainProfile) -> Result<Trust> {
 /// hub cites spends by their owners' signatures (graph id
 /// [`licash::recovery::SIGNED_FROM`]). Its Base's cap is any its payout
 /// pays exactly, a rest output past the graph's bits, and it reads `b` and
-/// `b′` as that payout counts their words.
+/// `b′` as that payout counts their words. It reads her claim from leaf
+/// envelopes too ([`licash::recovery::LEAF_FROM`]), and owes nothing to a
+/// claim whose `E` she signed twice
+/// ([`licash::recovery::two_claims_void`]).
 pub const SIGNET: [u8; 32] =
-    hex!("c04dadde4b7fa9295d385832d9fb5caf4bd5373e8ba33e744793ffa2ce9d8d9a");
+    hex!("c6bedce4b0dc40a09d0206dca36c729cdb2bfb324bf7f9474a738045deccd12b");
 
 /// Whether [`SIGNET`] decides the compact filing: true only for a program
 /// built from a tree whose `licash::recovery` reads it, and set in the
@@ -442,16 +445,18 @@ pub const CHAIN: [u8; 32] =
 
 /// The programs signet's (and Mutinynet's) contracts opened under before [`SIGNET`], newest
 /// first: no contract opens under them, and those that did are played still
-/// if of a Base this build reads. `1808247519df…`, of caps of `2^n - 1` sat
+/// if of a Base this build reads. `c04dadde4b7f…`, of graph id 14 at most
+/// (no leaf envelopes, no rule on two claims). `1808247519df…`, of caps of `2^n - 1` sat
 /// alone, whose Bases this build reads as it did (no rest, every word its
 /// amount). None before it since the note format v3: every earlier Base
 /// embeds a keyset of the format before, which this build does not read, so
 /// the programs of those contracts (`493d2f79…` and the nine before it, kept
 /// in `r0/programs/` up to commit 5904ef57) are played by the release before
 /// alone, whose hubs and wallets serve them to their end.
-pub const SIGNET_BEFORE: [[u8; 32]; 1] = [hex!(
-    "1808247519df8436457abfb21a7a5173e0b9948db0b75ee3dce0e93bc9443658"
-)];
+pub const SIGNET_BEFORE: [[u8; 32]; 2] = [
+    hex!("c04dadde4b7fa9295d385832d9fb5caf4bd5373e8ba33e744793ffa2ce9d8d9a"),
+    hex!("1808247519df8436457abfb21a7a5173e0b9948db0b75ee3dce0e93bc9443658"),
+];
 
 /// The programs contracts on `profile` opened under before the one they
 /// open under now ([`trust`]): played still, of a Base this build reads.
@@ -558,16 +563,17 @@ mod tests {
     fn the_hub_statement_image_is_pinned() {
         assert_eq!(
             SIGNET,
-            hex!("c04dadde4b7fa9295d385832d9fb5caf4bd5373e8ba33e744793ffa2ce9d8d9a"),
+            hex!("c6bedce4b0dc40a09d0206dca36c729cdb2bfb324bf7f9474a738045deccd12b"),
             "keep every funded contract's pinned guest available when changing opening trust"
         );
         // Emptied at the note format v3, v4 and v5, whose builds read no earlier Base:
         // otherwise a program contracts opened under is never to go.
         assert_eq!(
             SIGNET_BEFORE,
-            [hex!(
-                "1808247519df8436457abfb21a7a5173e0b9948db0b75ee3dce0e93bc9443658"
-            )]
+            [
+                hex!("c04dadde4b7fa9295d385832d9fb5caf4bd5373e8ba33e744793ffa2ce9d8d9a"),
+                hex!("1808247519df8436457abfb21a7a5173e0b9948db0b75ee3dce0e93bc9443658"),
+            ]
         );
     }
 

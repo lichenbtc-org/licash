@@ -270,6 +270,14 @@ mod tests {
         assert!(crate::hp::expected(&std::fs::read(path("answered")).unwrap()).is_ok());
         // A contract of a rest output, proved.
         assert!(crate::hp::expected(&std::fs::read(path("answered-rest")).unwrap()).is_ok());
+        // One of graph id 16, her claim in a leaf's envelope, owed nothing
+        // by her two signatures on `E`: proved as the library proves it.
+        let (dir, receipts) = exported(Some(licash::recovery::PI1_ALONE_FROM));
+        let bytes = std::fs::read(dir.path().join("answered-chained.bin")).unwrap();
+        let input = HubInput::from_bytes(&bytes).unwrap();
+        assert!(input.other_e.is_some() && input.evidence.is_empty());
+        assert!(crate::hp::expected(&bytes).is_ok());
+        decides(&pinned, &bytes, &receipts).unwrap();
     }
 
     /// Each program contracts opened before the pinned one are played
@@ -279,7 +287,7 @@ mod tests {
     /// program decides but on their chain): the hub decides with the
     /// library and proves with the program, so a program deciding otherwise
     /// is a response the hub cannot prove. A contract of a rest output,
-    /// which none of them was built for, each refuses.
+    /// which `1808247519df…` was not built for, it refuses.
     #[test]
     fn the_programs_before_decide_their_contracts_as_the_current_code() {
         let before = signet_before();
@@ -301,9 +309,9 @@ mod tests {
                     decides(program, &bytes, receipts)
                         .unwrap_or_else(|e| panic!("{id} on {graph:?}, {name}: {e:#}"));
                 }
-                if graph.is_none() {
-                    let rested = std::fs::read(path("answered-rest")).unwrap();
-                    assert!(decides(program, &rested, &[]).is_err(), "{id}");
+                let rested = std::fs::read(path("answered-rest"));
+                if graph.is_none() && id.starts_with("1808247519df") {
+                    assert!(decides(program, &rested.unwrap(), &[]).is_err(), "{id}");
                 }
             }
         }

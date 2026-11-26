@@ -184,7 +184,7 @@ mod tests {
         let path = dir.path().join("p.bin");
         std::fs::write(&path, b"packed").unwrap();
         assert_eq!(program(Some(path.to_str().unwrap())).unwrap(), b"packed");
-        // The program contracts open under on signet, kept in the checkout.
+        // A program contracts opened under on signet, kept in the checkout.
         let signet = "1808247519df8436457abfb21a7a5173e0b9948db0b75ee3dce0e93bc9443658";
         assert!(!program(Some(signet)).unwrap().is_empty());
         let unknown = "00".repeat(32);
