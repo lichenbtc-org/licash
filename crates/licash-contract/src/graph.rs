@@ -949,15 +949,19 @@ mod tests {
         const LEAST: u64 = 58_252;
         let holder = HolderKeys::derive(&[1; 32], &[3; 32]).public();
         let hub = HubKeys::from_secret(&[2; 32]).public();
-        let set = |reserve_hub: u64| {
+        let set_of = |reserve_hub: u64, bits: u8, challenge_window: u16| {
             let mut p = crate::opening::testing::base(&[3; 32]).parts().clone();
             p.graph.id = licash::recovery::PI1_ALONE_FROM;
             p.graph.reserve_alice = 25_000;
             p.graph.reserve_hub = reserve_hub;
+            p.graph.bits = bits;
+            p.cap = ((1u64 << bits) - 1) as u32;
+            p.graph.challenge_window = challenge_window;
             p.recipe.instances = 78;
             p.recipe.kept = 10;
             build(&Base::new(p)?, &holder, &hub, draft_hmsg(10))?.presign(OutPoint::null())
         };
+        let set = |reserve_hub: u64| set_of(reserve_hub, 12, 12);
         let named = |set: &[Presign], name: &str| set.iter().find(|p| p.name == name).cloned();
         // What the links take of the contract before `failure`: each its
         // floor and its outputs but the next link's (anchors, slots, the
@@ -976,6 +980,16 @@ mod tests {
         };
         let ample = set(100_000).unwrap();
         assert_eq!(taken(&ample), LEAST);
+        // Whatever the contract's cap and the holder's window to challenge
+        // in, the hub's on Bitcoin's network among them (60,000 sat, 288
+        // blocks).
+        for (bits, challenge_window) in [(17, 144), (27, 288), (31, 288)] {
+            let wide = set_of(LEAST, bits, challenge_window).unwrap();
+            assert_eq!(taken(&wide), LEAST, "{bits} bits");
+            let error = set_of(LEAST - 1, bits, challenge_window).unwrap_err();
+            assert!(error.to_string().contains("exceed the hub's reserve"));
+            assert!(set_of(60_000, bits, challenge_window).is_ok());
+        }
         assert_eq!(paid(&ample), 25_000 + 100_000 - LEAST);
         let least = set(LEAST).unwrap();
         assert_eq!(taken(&least), LEAST);
