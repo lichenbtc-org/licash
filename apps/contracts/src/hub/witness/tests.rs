@@ -375,15 +375,17 @@ async fn an_import_gives_what_the_hub_signed_once() {
     let (signed, burnt, untouched, pinned) = ([1; 32], [2; 32], [3; 32], [4; 32]);
     {
         let store = Store::open(hub.path()).unwrap();
+        // Each a real hub's state: its answers' words read by its payout.
+        let state = &crate::testing::opened().hub;
         for (n, id) in [signed, burnt, untouched, pinned].iter().enumerate() {
             let deposit = bitcoin::OutPoint {
                 txid: bitcoin::hashes::Hash::from_byte_array([9; 32]),
                 vout: n as u32,
             };
             assert!(store
-                .insert(id, 0, true, &deposit, &[0; 32], b"state")
+                .insert(id, 0, true, &deposit, &[0; 32], state)
                 .unwrap());
-            store.save(id, 0, true, &[0; 32], b"state").unwrap();
+            store.save(id, 0, true, &[0; 32], state).unwrap();
         }
         store.begin_signing(&burnt, "respond").unwrap();
         store.begin_signing(&pinned, "respond").unwrap();
