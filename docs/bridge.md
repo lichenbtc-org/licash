@@ -62,9 +62,13 @@ provider's bridge. Limits bound it:
 - `--max-accounts` accounts in all;
 - `--registrations-per-hour` new accounts in any hour (60 by default).
 
-Each management request is signed by the account's key and answered once;
-the bridge remembers up to 65,536 recent signatures and refuses more as
-unavailable until older ones expire, rather than forgetting any early.
+Each management request is signed by the account's key and answered once.
+The bridge remembers the recent signatures of keys that hold an account,
+256 per key and 65,536 in all, and refuses more as unavailable until older
+ones expire (10 minutes), rather than forgetting any early. A key without
+an account is refused whatever it asks except registering, and a refused
+registration may be asked again, so the bridge does not remember what such
+a key signs and strangers cannot fill its places.
 
 ### Lightning Addresses and zaps
 

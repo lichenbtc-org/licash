@@ -721,16 +721,27 @@ async fn the_management_api_answers_signed_requests_once() {
     let r = call(&app, bridge::ACCOUNT, Some(signed(bridge::ACCOUNT, "{}"))).await;
     let account: bridge::Account = serde_json::from_slice(&r.body).unwrap();
     assert_eq!(account.connections, vec![connected.connection]);
-    // Another key: no account.
+    // Another key: no account. What it signed is not kept, so strangers
+    // fill none of the places of the signatures kept: the same again is
+    // refused as it was, not as answered already.
     let at = licash_store::now();
     let stranger = Signed::sign(&secret(4), bridge::ACCOUNT, at, "{}".into()).unwrap();
-    let r = call(
-        &app,
-        bridge::ACCOUNT,
-        Some(serde_json::to_vec(&stranger).unwrap()),
-    )
-    .await;
-    assert_eq!(r.status, 409);
+    let stranger = serde_json::to_vec(&stranger).unwrap();
+    for _ in 0..2 {
+        let r = call(&app, bridge::ACCOUNT, Some(stranger.clone())).await;
+        assert_eq!(r.status, 409, "{}", String::from_utf8_lossy(&r.body));
+    }
+    // Nor a registration refused, which may be asked again.
+    let wrong = serde_json::to_string(&bridge::Register {
+        pairing: Some("not the code".into()),
+    })
+    .unwrap();
+    let wrong = Signed::sign(&secret(4), bridge::REGISTER, at, wrong).unwrap();
+    let wrong = serde_json::to_vec(&wrong).unwrap();
+    let refused = call(&app, bridge::REGISTER, Some(wrong.clone())).await;
+    assert_ne!(refused.status, 200);
+    let again = call(&app, bridge::REGISTER, Some(wrong)).await;
+    assert_eq!((again.status, again.body), (refused.status, refused.body));
 }
 
 #[tokio::test]
