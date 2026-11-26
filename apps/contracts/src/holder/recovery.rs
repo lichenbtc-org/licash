@@ -9,7 +9,7 @@ use licash::claim::{self, Branch, Item, Source, UnsignedClaim};
 use licash::recovery::{Filing, Format, Publication, Witness as FilingWitness};
 use licash::request::Request;
 use licash::spend::ChainProfile;
-use licash_contract::graph::{link_args, HubProves, PURSE_VOUT};
+use licash_contract::graph::{self, link_args, HubProves, PURSE_VOUT};
 use licash_contract::{
     dispute::{self, presign, Payout},
     keys::HolderKeys,
@@ -1450,7 +1450,7 @@ impl<'a, T: Transport, C: Chain> Run<'a, T, C> {
     }
     fn request_matches(&self, state: &State, tx: &Transaction) -> Result<bool> {
         let r = self.requested(state)?;
-        Ok(HubProves::requested_b(tx)? == (r.amount, r.claim_digest))
+        Ok(graph::requested(&self.o.base, tx)? == (r.amount, r.claim_digest))
     }
 }
 
@@ -2244,7 +2244,7 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
         match stage {
             Stage::Requested => {
                 if self.is_link("respond", &tx)? {
-                    state.reduced = Some(HubProves::responded_b(&tx)?.0);
+                    state.reduced = Some(graph::responded(&self.o.base, &tx)?);
                     state.response = Some(tx);
                     state.response_height = Some(height);
                     state.payout = None;
@@ -2435,8 +2435,9 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
     async fn check_response(&self, state: &State, may_wait: bool) -> Result<Option<bool>> {
         let response = state.response.as_ref().context("no response")?;
         let response_height = state.response_height.context("no response height")?;
-        let (reduced, _) = HubProves::responded_b(response)?;
-        let (amount, claim_digest) = HubProves::requested_b(state.r.as_ref().context("no R")?)?;
+        let reduced = graph::responded(&self.o.base, response)?;
+        let (amount, claim_digest) =
+            graph::requested(&self.o.base, state.r.as_ref().context("no R")?)?;
         let request = Request {
             amount,
             claim_digest,
@@ -2709,9 +2710,11 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
     /// What her challenge wins, its fee child's fee at most: her claim
     /// past the hub's response, and the hub's reserve.
     fn challenge_stake(&self, state: &State) -> Result<Amount> {
-        let (b, _) = HubProves::requested_b(state.r.as_ref().context("no R")?)?;
-        let (responded, _) =
-            HubProves::responded_b(state.response.as_ref().context("no response")?)?;
+        let (b, _) = graph::requested(&self.o.base, state.r.as_ref().context("no R")?)?;
+        let responded = graph::responded(
+            &self.o.base,
+            state.response.as_ref().context("no response")?,
+        )?;
         let unit = Amount::from_sat(self.o.base.parts().graph.unit_sats);
         Ok(unit * u64::from(b.saturating_sub(responded)) + self.o.babe.spec.terms.reserve_hub)
     }
@@ -3061,12 +3064,14 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
             .payout_name
             .as_deref()
             .context("payout provenance is unknown")?;
-        let (amount, wire, value_key, signer) = match name {
+        // The words signed, as the chain shows them: their bits select the
+        // outputs.
+        let (word, wire, value_key, signer) = match name {
             "request_timeout" | "contest_timeout" | "failure" => {
                 let r = state.r.as_ref().context("no R")?;
                 let (b, _) = HubProves::read_request(&link_args(r))?;
                 (
-                    state.amount,
+                    HubProves::requested_word(r)?.0,
                     HubProves::b_wire(&b),
                     &self.o.holder.b_key,
                     Role::User,
@@ -3074,13 +3079,13 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
             }
             "success" | "respond_timeout" => {
                 let (b, wire) =
-                    HubProves::responded_b(state.response.as_ref().context("no response")?)?;
+                    HubProves::responded_word(state.response.as_ref().context("no response")?)?;
                 (b, wire, &self.o.hub.b_key, Role::Hub)
             }
             n if n.starts_with("wrongly_challenged_") => {
                 presign(&self.o.set, n)?;
                 let (b, wire) =
-                    HubProves::responded_b(state.response.as_ref().context("no response")?)?;
+                    HubProves::responded_word(state.response.as_ref().context("no response")?)?;
                 (b, wire, &self.o.hub.b_key, Role::Hub)
             }
             _ => bail!("unknown payout provenance"),
@@ -3089,14 +3094,14 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
             transaction: payout,
             value_key,
             signer,
-            amount,
+            word,
             wire: &wire,
         };
         let owned = self.o.babe.core().owned(
             payout.transaction,
             payout.value_key,
             payout.signer,
-            payout.amount,
+            payout.word,
             Role::User,
         )?;
         let left = left_over(state, self.rate)?;

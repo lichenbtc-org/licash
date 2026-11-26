@@ -1040,7 +1040,7 @@ impl Openings {
                 pins.answer(id, r, || {
                     let tx = o.respond(keys, b_prime)?;
                     ensure!(
-                        HubProves::responded_b(&tx)?.0 == b_prime,
+                        graph::responded(&o.base, &tx)? == b_prime,
                         "the response signs another b′ than its witnesses keep"
                     );
                     Ok(tx)
@@ -2475,17 +2475,20 @@ impl Openings {
             })
             .map(|p| p.name.clone())
             .context("the exit went to an unknown transaction")?;
-        let (amount, wire, value_key, signer) = match terminal.as_str() {
+        // The words signed, as the chain shows them: their bits select the
+        // outputs.
+        let (word, wire, value_key, signer) = match terminal.as_str() {
             "request_timeout" | "contest_timeout" | "failure" => {
                 let (b, _) = HubProves::read_request(&link_args(r))?;
-                let (amount, _) = o.requested_b(r)?;
-                (amount, HubProves::b_wire(&b), &o.holder.b_key, Role::User)
+                o.requested_b(r)?;
+                let (word, _) = HubProves::requested_word(r)?;
+                (word, HubProves::b_wire(&b), &o.holder.b_key, Role::User)
             }
             n if n == "success"
                 || n == "respond_timeout"
                 || n.starts_with("wrongly_challenged_") =>
             {
-                let (b, wire) = HubProves::responded_b(response.context("no response")?)?;
+                let (b, wire) = HubProves::responded_word(response.context("no response")?)?;
                 (b, wire, &o.hub.b_key, Role::Hub)
             }
             _ => bail!("not a payout: {terminal}"),
@@ -2493,7 +2496,7 @@ impl Openings {
         let owned = o
             .babe
             .core()
-            .owned(payout, value_key, signer, amount, Role::Hub)?;
+            .owned(payout, value_key, signer, word, Role::Hub)?;
         if owned.is_empty() {
             self.note_once(id, "nothing", "nothing of the payout is the hub's");
             self.end_if_deep(id, hub, paid_at, tip).await?;
@@ -2519,7 +2522,7 @@ impl Openings {
                 transaction: payout,
                 value_key,
                 signer,
-                amount,
+                word,
                 wire: &wire,
             },
             Role::Hub,
@@ -3422,7 +3425,7 @@ fn contested_disclose_deadline(o: &HubOpening, c_at: u32) -> u32 {
 fn assert_stake(o: &HubOpening, r: &Transaction, x: &Transaction) -> Result<Amount> {
     let unit = Amount::from_sat(o.base.parts().graph.unit_sats);
     let (b, _) = o.requested_b(r)?;
-    let (responded, _) = HubProves::responded_b(x)?;
+    let responded = graph::responded(&o.base, x)?;
     Ok(unit * u64::from(b.saturating_sub(responded)) + o.babe.spec.terms.reserve_hub)
 }
 

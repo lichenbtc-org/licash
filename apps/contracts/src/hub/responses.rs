@@ -42,7 +42,8 @@ fn same_request(pinned: &Transaction, request: &Transaction) -> bool {
     if pinned.compute_wtxid() == request.compute_wtxid() {
         return true;
     }
-    let read = licash_contract::graph::HubProves::requested_b;
+    // the words as signed: the same request signs the same
+    let read = licash_contract::graph::HubProves::requested_word;
     pinned.compute_txid() == request.compute_txid()
         && matches!((read(pinned), read(request)), (Ok(a), Ok(b)) if a == b)
 }

@@ -115,9 +115,10 @@ impl Opening {
             "claim exceeds contract capacity"
         );
         self.forcible()?;
+        let word = graph::word(&self.babe.spec.terms, b)?;
         self.finish(
             "request",
-            HubProves::request_wire(&keys.b.sign(&b.to_be_bytes())?, &keys.e.sign(e)?),
+            HubProves::request_wire(&keys.b.sign(&word.to_be_bytes())?, &keys.e.sign(e)?),
         )
     }
     /// Publish the claim with optional fee coins and change outputs, all
@@ -261,9 +262,10 @@ impl HubOpening {
     pub fn default_close(&self) -> Result<Transaction> {
         self.finish("default", vec![])
     }
+    /// `request`'s `b`, as the payout counts it, and `E`.
     pub fn requested_b(&self, request: &Transaction) -> Result<(u32, [u8; 32])> {
         check_link(&self.set, "request", request)?;
-        HubProves::requested_b(request)
+        graph::requested(&self.base, request)
     }
     pub fn respond(&self, keys: &HubKeys, b_prime: u32) -> Result<Transaction> {
         ensure!(keys.public() == self.hub, "another hub's keys");
@@ -271,9 +273,10 @@ impl HubOpening {
             b_prime <= self.base.parts().cap,
             "response exceeds capacity"
         );
+        let word = graph::word(&self.babe.spec.terms, b_prime)?;
         self.finish(
             "respond",
-            HubProves::respond_wire(&keys.b.sign(&b_prime.to_be_bytes())?),
+            HubProves::respond_wire(&keys.b.sign(&word.to_be_bytes())?),
         )
     }
     pub fn disclosure(
@@ -556,7 +559,8 @@ pub struct Payout<'a> {
     pub transaction: &'a Transaction,
     pub value_key: &'a WotsPublic,
     pub signer: Role,
-    pub amount: u32,
+    /// The word signed, as the chain shows it: its bits select the outputs.
+    pub word: u32,
     pub wire: &'a [Vec<u8>],
 }
 
@@ -587,7 +591,7 @@ pub fn sweep_with(
         payout.transaction,
         payout.value_key,
         payout.signer,
-        payout.amount,
+        payout.word,
         party,
     )?;
     sweep_owned(&owned, coins, key, payout.wire, to, rate)

@@ -200,6 +200,27 @@ pub fn terms(p: &Parts) -> Result<Terms> {
     })
 }
 
+/// `request`'s `b`, as the payout of `base` counts the word she signed
+/// (the statement's [`licash_hp::payout`]), and `E`.
+pub fn requested(base: &Base, request: &Transaction) -> Result<(u32, [u8; 32])> {
+    let (word, e) = HubProves::requested_word(request)?;
+    Ok((licash_hp::payout(base).amount(word), e))
+}
+
+/// `respond`'s `b′`, as the payout of `base` counts the word the hub
+/// signed.
+pub fn responded(base: &Base, respond: &Transaction) -> Result<u32> {
+    let (word, _) = HubProves::responded_word(respond)?;
+    Ok(licash_hp::payout(base).amount(word))
+}
+
+/// The word that signs `amount` units of the payout of `terms`: what both
+/// parties sign, the same of the same amount after any restart
+/// (`Terms::word`).
+pub fn word(terms: &Terms, amount: u32) -> Result<u32> {
+    terms.word(u64::from(amount))
+}
+
 /// The dispute's windows, relative, in blocks: `w_H` for the hub's
 /// response, `k` for her claim's publication (after it the hub may reclaim
 /// an unspent slot), `w_X` for her contest of the response, `w_A` for the
@@ -668,8 +689,10 @@ impl HubProves {
 
     // ----- the links as the chain shows them -----
 
-    /// `request`'s script-checked `b` and `E`.
-    pub fn requested_b(request: &Transaction) -> Result<(u32, [u8; 32])> {
+    /// `request`'s script-checked `b` and `E`, `b` the word she signed:
+    /// what the payout pays her is that word ([`requested`] reads what
+    /// it counts).
+    pub fn requested_word(request: &Transaction) -> Result<(u32, [u8; 32])> {
         let (b, e) = Self::read_request(&link_args(request))?;
         let b = u32::from_be_bytes(
             b.message()
@@ -682,9 +705,10 @@ impl HubProves {
             .map_err(|_| anyhow::anyhow!("E's signature signs 32 bytes"))?;
         Ok((b, e))
     }
-    /// `respond`'s script-checked `b′`, and the hub's signature on it as
-    /// the payout's leaves take it.
-    pub fn responded_b(respond: &Transaction) -> Result<(u32, Vec<Vec<u8>>)> {
+    /// `respond`'s script-checked `b′`, the word the hub signed, and its
+    /// signature on it as the payout's leaves take it ([`responded`] reads
+    /// what the word counts).
+    pub fn responded_word(respond: &Transaction) -> Result<(u32, Vec<Vec<u8>>)> {
         let sig = Self::read_respond(&link_args(respond))?;
         let b = u32::from_be_bytes(
             sig.message()
@@ -840,6 +864,52 @@ fn script_signature(params: WotsParams, args: &[Vec<u8>]) -> Result<WotsSig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The words both parties sign (Lichen's `Terms::word`, which builds
+    /// the payout) are read by the statement as what they sign, and any
+    /// word as Lichen counts it: the payout and the statement agree.
+    #[test]
+    fn the_statement_counts_a_word_as_the_payout_does() {
+        for bits in 1..=8u32 {
+            for low_bits in [0, 1, 3].into_iter().filter(|l| *l < bits) {
+                for rest in std::iter::once(0).chain((1u32 << low_bits)..(1 << bits)) {
+                    let terms = Terms {
+                        id: 1,
+                        unit: Amount::from_sat(1),
+                        bits,
+                        low_bits,
+                        deposit: 0,
+                        t_close: 0,
+                        reserve_alice: Amount::ZERO,
+                        reserve_hub: Amount::ZERO,
+                        rest,
+                    };
+                    let payout = licash_statement::Payout { bits, rest };
+                    for amount in 0..=terms.v_max_units() as u32 {
+                        assert_eq!(payout.amount(word(&terms, amount).unwrap()), amount);
+                    }
+                    assert!(word(&terms, terms.v_max_units() as u32 + 1).is_err());
+                    for w in 0..(4u32 << bits) {
+                        assert_eq!(
+                            u64::from(payout.amount(w)),
+                            terms.amount(w),
+                            "{terms:?}: {w}"
+                        );
+                    }
+                }
+            }
+        }
+        // the extremes of the word
+        let payout = licash_statement::Payout {
+            bits: 31,
+            rest: (1 << 31) - 1,
+        };
+        assert_eq!(payout.amount(u32::MAX), u32::MAX - 1);
+        assert_eq!(
+            licash_statement::Payout { bits: 32, rest: 0 }.amount(u32::MAX),
+            u32::MAX
+        );
+    }
     use crate::keys::{HolderKeys, HubKeys};
 
     /// F's output stands before the instances are in: neither the hub's

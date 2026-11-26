@@ -462,17 +462,22 @@ type Decided = ([u8; 32], &'static str, Decision);
 /// pinned but not signed is not: what is pinned is written as any, once
 /// the hub runs again.
 fn to_import(data: &Path) -> Result<(Vec<[u8; 32]>, Vec<Decided>)> {
-    use licash_contract::graph::HubProves;
     let store = super::store::Store::open(data)?;
     let pins = super::responses::Responses::open(data)?;
     let ids = store.all_ids()?;
     let mut decided = Vec::new();
     for id in &ids {
+        // b and b′ as the contract's payout counts the words signed, as the
+        // hub decides them.
+        let base = || -> Result<_> {
+            let row = store.row(id)?.context("a contract of no row")?;
+            Ok(licash_contract::opening::Hub::peek(&row.state)?.base)
+        };
         let txid = |pin: &[u8; 32]| -> Result<_> {
             let request = pins
                 .request(pin)?
                 .context("an answer of no request pinned")?;
-            let (b, e) = HubProves::requested_b(&request)?;
+            let (b, e) = licash_contract::graph::requested(&base()?, &request)?;
             Ok((request.compute_txid().to_byte_array(), b, e))
         };
         let respond = match pins.response(id)? {
@@ -482,7 +487,7 @@ fn to_import(data: &Path) -> Result<(Vec<[u8; 32]>, Vec<Decided>)> {
                     request,
                     b,
                     e,
-                    owed: HubProves::responded_b(&response)?.0,
+                    owed: licash_contract::graph::responded(&base()?, &response)?,
                     evidence: pins.evidence(id)?.unwrap_or_default(),
                 })
             }
