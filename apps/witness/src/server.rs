@@ -11,10 +11,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use hyper_util::{
-    rt::{TokioIo, TokioTimer},
-    service::TowerToHyperService,
-};
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
 
@@ -33,9 +29,9 @@ pub fn entry_path(contract: &[u8; 32], slot: &str) -> String {
 const CERT: &str = "tls.crt";
 const KEY: &str = "tls.key";
 
-/// How long a client has to finish its TLS handshake, and its request's
-/// head.
-const HANDSHAKE: Duration = Duration::from_secs(10);
+/// How long a request's body may take to arrive: as long as a hub waits
+/// for its answer (an entry of [`MAX_BODY`] at 35 KB/s).
+pub const BODY_TIME: Duration = Duration::from_secs(15);
 
 /// The SHA-256 of a certificate's DER: what a hub pins a witness by.
 pub fn pin_of(cert: &[u8]) -> [u8; 32] {
@@ -129,19 +125,23 @@ async fn write(State(store): State<Arc<Store>>, body: axum::body::Bytes) -> Resp
     }
 }
 
-/// The witness's API over `store`.
+/// The witness's API over `store`: a request's body still arriving
+/// [`BODY_TIME`] after its head is refused.
 pub fn router(store: Arc<Store>) -> Router {
-    Router::new()
+    let api = Router::new()
         .route(STATUS, get(status))
         .route(&format!("{ENTRIES}/{{contract}}/{{slot}}"), get(read))
         .route(ENTRIES, post(write))
         // An entry, in hex, and its envelope.
         .layer(DefaultBodyLimit::max(2 * MAX_BODY + 4096))
-        .with_state(store)
+        .with_state(store);
+    licash_serve::bodies_within(api, BODY_TIME)
 }
 
 /// Serve `store` over TLS on `listener` with the identity in `dir`, until
-/// `stop`.
+/// `stop`: [`licash_serve::listen_tls`], at most
+/// [`licash_serve::MAX_CONNECTIONS`] at once, each let go if its handshake
+/// or a request's head takes longer than [`licash_serve::HEADERS`].
 pub async fn serve(
     listener: tokio::net::TcpListener,
     dir: &Path,
@@ -156,37 +156,33 @@ pub async fn serve(
         .with_single_cert(vec![cert], key)?;
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
-    let app = router(store);
-    tokio::pin!(stop);
-    loop {
-        let (stream, peer) = tokio::select! {
-            () = &mut stop => return Ok(()),
-            accepted = listener.accept() => match accepted {
-                Ok(accepted) => accepted,
-                Err(e) => {
-                    tracing::warn!("accepting a connection: {e}");
-                    continue;
-                }
-            },
-        };
-        let (acceptor, app) = (acceptor.clone(), app.clone());
-        tokio::spawn(async move {
-            let stream = match tokio::time::timeout(HANDSHAKE, acceptor.accept(stream)).await {
-                Ok(Ok(stream)) => stream,
-                Ok(Err(e)) => {
-                    tracing::debug!(%peer, "a TLS handshake failed: {e}");
-                    return;
-                }
-                Err(_) => return,
-            };
-            let served = hyper::server::conn::http1::Builder::new()
-                .timer(TokioTimer::new())
-                .header_read_timeout(HANDSHAKE)
-                .serve_connection(TokioIo::new(stream), TowerToHyperService::new(app))
-                .await;
-            if let Err(e) = served {
-                tracing::debug!(%peer, "a connection: {e}");
-            }
-        });
+    licash_serve::listen_tls(listener, acceptor, router(store), stop).await;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::{Body, Bytes};
+    use tower::ServiceExt as _;
+
+    use super::*;
+
+    /// An entry whose body stalls is refused once [`BODY_TIME`] passed,
+    /// rather than holding its connection and its task for good.
+    #[tokio::test(start_paused = true)]
+    async fn an_entry_whose_body_stalls_is_refused_in_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("witness.sqlite");
+        Store::create(&db, &[3; 32], &crate::public_key(&[7; 32]).unwrap()).unwrap();
+        let app = router(Arc::new(Store::open(&db).unwrap()));
+        let stalled =
+            Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
+        let request = axum::http::Request::post(ENTRIES).body(stalled).unwrap();
+        let writing = tokio::spawn(app.oneshot(request));
+        tokio::time::sleep(BODY_TIME - Duration::from_secs(1)).await;
+        assert!(!writing.is_finished());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let refused = writing.await.unwrap().unwrap();
+        assert!(refused.status().is_client_error(), "{}", refused.status());
     }
 }

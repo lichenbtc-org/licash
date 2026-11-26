@@ -809,6 +809,13 @@ licash-hub run --contracts --contracts-witness-set SET_ID \
     --contracts-witness https://w2.example:8339#PIN2 ...
 ```
 
+A witness answers anyone who reaches its port, so firewall it to the
+hubs it serves. It serves 1,024 connections at once at most, lets go of
+one whose TLS handshake or request head takes longer than 30 seconds,
+and refuses an entry whose body is still arriving 15 seconds after its
+head (as long as a hub waits for its answer). Even so, a client that
+reaches the port can hold those connections and keep a hub's writes out.
+
 A hub that never signed a contract seals its new set as it enrolls its
 first. One that signed contracts before it had witnesses imports them
 first, the hub stopped (signet and regtest only): `licash-hub
