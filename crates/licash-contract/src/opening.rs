@@ -175,11 +175,13 @@ impl Floors {
                 | ChainProfile::Core30Signet
                 | ChainProfile::Mutinynet => (144, 6, 144, 3, 6),
             };
-        // Mainnet: 10 sat/vB, so that a forced close of the filing at its
-        // widest gets confirmed in a fee market short of a spike. A bug or
-        // a wrong estimate can spend no more than the reserve in any case.
+        // Mainnet: 3 sat/vB, so that a forced close of the filing at its
+        // widest gets confirmed in a fee market short of a spike: of a
+        // contract carrying it in leaf envelopes, some 25,000 sat of hers
+        // (`crate::reserve::reserve_for`). A bug or a wrong estimate can
+        // spend no more than the reserve in any case.
         let reserve_rate = match profile {
-            ChainProfile::Core30Mainnet => 10_000,
+            ChainProfile::Core30Mainnet => 3_000,
             _ => 0,
         };
         Self {

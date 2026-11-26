@@ -1306,13 +1306,13 @@ async fn forced_closed_on_a_silent_hub(leaf: bool) -> Result<()> {
         after == before + paid,
         "{before} then {after}, {paid} swept"
     );
-    // Her claim's bits (3 000 rounded down to 2 560) and all her 20 000,
+    // Her claim's bits (3 000 rounded down to 2 560) and all her 25 000,
     // her purse (P's, taken already) refunded, less the sweep's fee (its
     // bits' witnesses are large): the hub, only silent, gets its 100 000
     // back less what the links took, her purse among it (its graph id 8's
     // `request_timeout`).
     ensure!(
-        paid > 2_560 + 20_000 - 3_000 && paid < 2_560 + 20_000,
+        paid > 2_560 + 25_000 - 3_000 && paid < 2_560 + 25_000,
         "{paid} swept"
     );
     let timeout = timed_out.timeout.context("no timeout")?;
@@ -1599,9 +1599,9 @@ async fn a_holder_claims_the_notes_a_frozen_bridge_exported_her_on_a_silent_hub(
     ensure!(scan(&wallet, &chain).await? == before + paid);
     // As her notes alone would, but of the claim's bits for 5 000, 4 096
     // at least: more than her 3 000 alone could sweep (2 560 of bits and
-    // her 20 000).
+    // her 25 000).
     ensure!(
-        paid > 2_560 + 20_000 && paid < 5_000 + 20_000,
+        paid > 2_560 + 25_000 && paid < 5_000 + 25_000,
         "{paid} swept"
     );
     Ok(())
@@ -1941,7 +1941,7 @@ async fn a_hub_ends_a_contract_no_one_exited_by_default_at_its_close() -> Result
     let value = funding["vout"][0]["value"]
         .as_f64()
         .context("no contract output")?;
-    let share = (value * 1e8).round() as u64 - 20_000;
+    let share = (value * 1e8).round() as u64 - 25_000;
     let ours: serde_json::Value = chain
         .0
         .rpc("listunspent", serde_json::json!([1, 1]))
@@ -2038,7 +2038,7 @@ async fn a_holder_closes_her_contract_early_with_the_hub_and_gets_her_reserve_ba
 
     // Her reserve and her funded notes' value at her wallet; the hub's share
     // less the fee at its own.
-    ensure!(scan(&wallet, &chain).await? == 20_000 + opened.funded);
+    ensure!(scan(&wallet, &chain).await? == 25_000 + opened.funded);
     let fold: serde_json::Value = chain
         .0
         .rpc(
@@ -2052,7 +2052,7 @@ async fn a_holder_closes_her_contract_early_with_the_hub_and_gets_her_reserve_ba
     let sats = |v: &serde_json::Value| (v["value"].as_f64().unwrap_or(0.0) * 1e8).round() as u64;
     let outs = fold["vout"].as_array().context("no outputs")?;
     ensure!(
-        outs.len() == 2 && sats(&outs[0]) == 20_000 + opened.funded,
+        outs.len() == 2 && sats(&outs[0]) == 25_000 + opened.funded,
         "{fold}"
     );
     let funding: serde_json::Value = chain
@@ -2063,7 +2063,7 @@ async fn a_holder_closes_her_contract_early_with_the_hub_and_gets_her_reserve_ba
         )
         .await?;
     let value = sats(&funding["vout"][0]);
-    let fee = value - 20_000 - opened.funded - sats(&outs[1]);
+    let fee = value - 25_000 - opened.funded - sats(&outs[1]);
     ensure!((1..2_000).contains(&fee), "a fee of {fee}: {fold}");
 
     // The hub posts no default, now or at the close, and ends it.
@@ -2073,7 +2073,7 @@ async fn a_holder_closes_her_contract_early_with_the_hub_and_gets_her_reserve_ba
     rt.mine(u64::from(close) - u64::from(rt.height()?) + 1)?;
     let round = openings.answer_requests().await?;
     ensure!(round == Default::default(), "{round:?}");
-    ensure!(scan(&wallet, &chain).await? == 20_000 + opened.funded);
+    ensure!(scan(&wallet, &chain).await? == 25_000 + opened.funded);
     Ok(())
 }
 
@@ -2224,7 +2224,7 @@ async fn a_holder_closes_her_contract_on_her_notes_and_its_fold_pays_them_to_her
     let fold = rt.get_tx(&txid)?;
     ensure!(fold.output.len() == 2, "{fold:?}");
     ensure!(
-        fold.output[0].value.to_sat() == 131_071 + 20_000,
+        fold.output[0].value.to_sat() == 131_071 + 25_000,
         "{fold:?}"
     );
     ensure!(scan(wallet, chain).await? == before + 151_071);
@@ -2549,7 +2549,7 @@ async fn a_hub_is_paid_its_share_of_a_default_at_its_payout_wallet() -> Result<(
     let value = funding["vout"][0]["value"]
         .as_f64()
         .context("no contract output")?;
-    let share = (value * 1e8).round() as u64 - 20_000;
+    let share = (value * 1e8).round() as u64 - 25_000;
     let coins: serde_json::Value = cold.rpc("listunspent", serde_json::json!([1])).await?;
     let coins = coins.as_array().context("no coins")?;
     ensure!(coins.len() == 1, "{coins:?}");
@@ -2592,7 +2592,7 @@ async fn a_hub_is_paid_its_share_of_a_fold_at_its_payout_wallet() -> Result<()> 
 
     let txid = holder::close(&wallet, &chain, &mine.join("wallet.sqlite"), &opened.id).await?;
     rt.mine(1)?;
-    ensure!(scan(&wallet, &chain).await? == 20_000 + opened.funded);
+    ensure!(scan(&wallet, &chain).await? == 25_000 + opened.funded);
     let fold: serde_json::Value = source
         .rpc(
             "getrawtransaction",

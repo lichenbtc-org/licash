@@ -1216,7 +1216,7 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     // default), none of hers: the cost shown. Its reserve, hers, is paid
     // beside it, apart.
     const OPENING: u64 = 10_000;
-    const RESERVE: u64 = 20_000;
+    const RESERVE: u64 = 25_000;
     // The least cap, 2^17 - 1 sat.
     const LEAST: u64 = 131_071;
     // Her own part of the coin she is told to cash out for it.

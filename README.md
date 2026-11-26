@@ -54,9 +54,9 @@ A hub prices a contract by an opening fee and yearly interest on the part
 of the cover it locks up. Your deposit funds most of the cover: the
 vault is the smallest size your deposit fills, and the hub adds the rest.
 At a hub asking 10,000 sat and 20% a year, a 200,000 sat deposit opens a
-262,143 sat vault for six months, the hub adding about 102,000 sat: it
-costs 10,000 sat plus about 10,200 sat of interest. You also put in a reserve, say
-20,000 sat: it is yours, pays the Bitcoin fees if you ever recover without
+262,143 sat vault for six months, the hub adding about 108,000 sat: it
+costs 10,000 sat plus about 10,800 sat of interest. You also put in a reserve, say
+25,000 sat: it is yours, pays the Bitcoin fees if you ever recover without
 the hub, and comes back otherwise. Deposit a bit more than you expect to
 spend, to leave room to swap some out if you later need to receive more.
 

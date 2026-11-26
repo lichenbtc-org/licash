@@ -30,8 +30,12 @@ pub fn lock_of(quote: &Quote) -> u32 {
 /// cap ([`licash_api::MIN_CAP`]).
 pub const CAP: u32 = licash_api::MIN_CAP;
 
-/// The holder's reserve, from her deposit.
-pub const RESERVE_ALICE: u64 = 20_000;
+/// The holder's reserve, from her deposit: of the widest filing, a forced
+/// close at 3 sat/vB of a contract carrying it in leaf envelopes, of a cap
+/// of 27 bits at most (`licash_contract::reserve::reserve_for`: 22,248 sat
+/// of the least, 25,860 of the largest, of 31 bits, which it affords at
+/// 2.9 sat/vB).
+pub const RESERVE_ALICE: u64 = 25_000;
 
 /// The hub's fee for an opening, from her deposit, unless its operator
 /// sets another ([`Timing::with_opening_fee`]): half a year's interest at
@@ -161,13 +165,11 @@ impl Timing {
                 // Mainnet waits for windows set from a measured proof time and
                 // a real proof played on Bitcoin; its hub reserve must then
                 // cover the hub's answer to a challenge at some 25 sat/vB,
-                // about 520 000 sat, not RESERVE_HUB's 100 000. And her reserve
-                // must afford a forced close of the widest filing at its floor
-                // (`licash_contract::reserve::reserve_for`: some 170 000 sat at
-                // 10 sat/vB of the least cap, 182 000 of the largest, the hub's
-                // at least twice that, her purse being at
-                // most half of it), not RESERVE_ALICE's 20 000: quotes below
-                // the floor are refused (`Quote::check`).
+                // about 520 000 sat, not RESERVE_HUB's 100 000. Her reserve,
+                // RESERVE_ALICE, affords a forced close of the widest filing
+                // at its floor of 3 sat/vB in leaf envelopes, of a cap of 27
+                // bits at most: quotes below the floor are refused
+                // (`Quote::check`).
                 _ => bail!("the hub offers no contracts on {profile} yet"),
             };
         if let Some(r) = range {
@@ -572,16 +574,16 @@ mod tests {
             (
                 None,
                 [
-                    "8fae26f6c05403f2c15e693b79a73b8818b5e1462cff187b2d399910b3b34d6c",
-                    "ce437f59f881e2c6ba564cf5847da678d8f8fd9ac0e8633f8468ec72cc15e1f9",
+                    "9fff4c86157d364b801a2f82955baa61f9c0bb321de32ca4ec0351dce12ecd34",
+                    "5e6993fa884ffe4d0230862f1926f4133104dab7f2fdb51e8021c41d21199569",
                 ],
                 3_000,
             ),
             (
                 Some(RANGE),
                 [
-                    "18a3661c82de2e094636b000c485c17380dc8ce9914af6729cfc2c8087703a37",
-                    "440d6f591159a77d7531a4080e983498dae5a10888ac0a29bc403f135882320e",
+                    "ed375c93c646ab3388db6bcf940a33098a952fdd9673920cc46cfde56105507e",
+                    "9e15a5920dde659cb2e1ece1e93e72c92ddc100d8dbf3a3108b35c47880a2fd9",
                 ],
                 3_024,
             ),
@@ -709,7 +711,7 @@ mod tests {
         assert_eq!(half.graph.deposit_units, 8_388_607);
         assert_eq!(
             timing.price(16_777_215, 26_280, 8_388_607),
-            20_000 + OPENING_FEE + 41_943
+            25_000 + OPENING_FEE + 41_943
         );
         assert_eq!(timing.bounds(&chosen).lock, 26_280);
         // But for those, as the fixed quote is.
@@ -886,7 +888,7 @@ mod tests {
         // No bound by her coin: announced as none, for wallets that read one.
         assert_eq!(
             (range.per_coin, range.reserve, range.fee, range.ppm_year),
-            (u32::MAX, 20_000, OPENING_FEE, 10_000)
+            (u32::MAX, 25_000, OPENING_FEE, 10_000)
         );
         assert!(timing.allows(CAP, LOCK).is_ok());
         assert!(timing.allows(67_108_863, 26_280).is_ok());

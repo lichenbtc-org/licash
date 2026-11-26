@@ -454,7 +454,7 @@ where its funding never arrived; the operator is told if the chain does not
 take one. A wallet of its own,
 funded with what the hub may lock, bounds the collateral at stake.
 `/v1/info` names its fixed terms: the cap (131,071 sat), the price a wallet
-pays to open one (the holder's 20,000 sat reserve and the hub's opening fee,
+pays to open one (the holder's 25,000 sat reserve and the hub's opening fee,
 `--contracts-fee`, 10,000 sat by default, half a year's interest at 20% on
 the 100,000 sat reserve the hub locks in every contract) and the blocks to its
 close (1,000); the openings take `/v1/contracts`. By default wallets may also

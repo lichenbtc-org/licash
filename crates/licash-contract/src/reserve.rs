@@ -230,8 +230,8 @@ mod tests {
 
     #[test]
     fn the_reserve_for_a_rate_affords_it() {
-        for id in [8, 9] {
-            for rate in [1_000, 10_000, 25_000] {
+        for id in [8, 9, 15] {
+            for rate in [1_000, 3_000, 10_000, 25_000] {
                 let alice = reserve_for(&terms(id, 0, 0), rate);
                 // Her purse is half the hub's reserve at most.
                 let g = terms(id, alice, 2 * alice);
@@ -250,6 +250,21 @@ mod tests {
         assert_eq!(reserve_for(&g, 10_000), 161_990 + 10 * 32 * 32 - 2_580);
         g.bits = 31;
         assert_eq!(reserve_for(&g, 10_000), 161_990 + 10 * 32 * 32 + 9_460);
+        // 3 sat/vB in leaf envelopes: some 22 k sat of the least cap, 26 k
+        // of the largest. A hub's 25 k affords it to a cap of 27 bits.
+        let mut g = terms(15, 0, 0);
+        g.low_bits = 9;
+        g.bits = 17;
+        assert_eq!(reserve_for(&g, 3_000), 22_248);
+        g.bits = 31;
+        assert_eq!(reserve_for(&g, 3_000), 25_860);
+        g.reserve_alice = 25_000;
+        g.reserve_hub = 100_000;
+        assert_eq!(affordable_rate_at_most(&g), 2_901);
+        g.bits = 27;
+        assert!(affordable_rate_at_most(&g) >= 3_000);
+        g.bits = 28;
+        assert!(affordable_rate_at_most(&g) < 3_000);
     }
 
     /// A quote must afford the floor on mainnet; the test networks ask none.
@@ -273,10 +288,33 @@ mod tests {
             error.to_string().contains("forced close 1.2 sat/vB"),
             "{error}"
         );
-        quote.graph.reserve_alice = reserve_for(&quote.graph, 10_000);
+        quote.graph.reserve_alice = reserve_for(&quote.graph, 3_000);
         quote.graph.reserve_hub = 2 * quote.graph.reserve_alice;
         assert!(quote.check(ChainProfile::Core30Mainnet).is_ok());
         quote.graph.reserve_alice -= 1_000;
         assert!(quote.check(ChainProfile::Core30Mainnet).is_err());
+        // In leaf envelopes, 20 000 of hers affords less than the floor
+        // still, of the least cap; 25 000 more.
+        quote.graph.id = 15;
+        quote.graph.low_bits = 9;
+        quote.graph.bits = 17;
+        quote.graph.reserve_hub = 100_000;
+        quote.graph.reserve_alice = 20_000;
+        let error = quote.check(ChainProfile::Core30Mainnet).unwrap_err();
+        assert!(
+            error.to_string().contains("forced close 2.7 sat/vB"),
+            "{error}"
+        );
+        quote.graph.reserve_alice = 25_000;
+        assert!(quote.check(ChainProfile::Core30Mainnet).is_ok());
+        // Of a cap of 27 bits at most: of 31, 2.9 sat/vB.
+        quote.graph.bits = 31;
+        let error = quote.check(ChainProfile::Core30Mainnet).unwrap_err();
+        assert!(
+            error.to_string().contains("forced close 2.9 sat/vB"),
+            "{error}"
+        );
+        quote.graph.bits = 27;
+        assert!(quote.check(ChainProfile::Core30Mainnet).is_ok());
     }
 }
