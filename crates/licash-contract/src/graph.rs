@@ -194,6 +194,7 @@ pub fn terms(g: &GraphTerms) -> Terms {
         t_close: g.close_height,
         reserve_alice: Amount::from_sat(g.reserve_alice),
         reserve_hub: Amount::from_sat(g.reserve_hub),
+        rest: 0,
     }
 }
 
