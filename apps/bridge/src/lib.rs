@@ -1,7 +1,7 @@
 //! A Licash bridge: a Licash wallet of its own that pays and takes
 //! Lightning payments for Nostr Wallet Connect clients, through a swap
 //! provider, out of accounts it keeps for their owners, who pay into and
-//! out of them in notes at its hub too ([`notes`]). Custodial: an account
+//! out of them in notes at its hub too (its `notes` module). Custodial: an account
 //! is the bridge's word for what its wallet holds for someone.
 //!
 //! An account is a key ([`licash_api::bridge::Signed`]); its owner makes

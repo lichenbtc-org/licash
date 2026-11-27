@@ -24,7 +24,7 @@ use crate::{deposit, Failure};
 /// lock it backs once locked.
 pub type Recorded = Option<Option<ProposalId>>;
 
-/// What a gateway asks of its peer, if it has one ([`pair`]).
+/// What a gateway asks of its peer, if it has one ([`coordinate`]).
 #[derive(Default)]
 pub struct Peer(OnceLock<Paired>);
 
