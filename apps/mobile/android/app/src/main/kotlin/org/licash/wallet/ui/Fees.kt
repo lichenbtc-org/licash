@@ -102,11 +102,11 @@ internal fun payoutFee(amount: ULong, fee: ULong, hub: ULong, provider: ULong, n
 }
 
 /**
- * A Lightning invoice's fee as quoted: all the hub's gateway asks, or the
- * hub's on the lock and the swap provider's, Lightning routing in it.
+ * A Lightning invoice's fee as quoted: the hub's on the lock and the swap
+ * provider's, Lightning routing in it.
  */
 internal fun invoiceFee(quote: InvoiceQuote): FeeBreakdown {
-    val provider = quote.provider ?: return FeeBreakdown(quote.amount, quote.fee)
+    val provider = quote.provider
     val parts = feeParts(quote.fee, listOf("Hub" to provider.lockFee, "Swap provider" to provider.fee))
     return if (parts.isEmpty()) FeeBreakdown(quote.amount, quote.fee)
     else FeeBreakdown(quote.amount, quote.fee, parts, explanation = "The swap provider's fee includes Lightning routing.")

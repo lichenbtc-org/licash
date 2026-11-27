@@ -1728,8 +1728,8 @@ class Engine(context: Context) {
     }
 
     /**
-     * What paying the Lightning invoice `text` costs the cheapest way: through
-     * a hub's gateway, or through a swap provider.
+     * What paying the Lightning invoice `text` costs the cheapest way:
+     * through a swap provider, as hubs pay no invoices.
      */
     suspend fun invoiceQuote(text: String): Result<InvoiceQuote> = io { local { it.invoiceQuote(text) } }
 
@@ -1737,17 +1737,13 @@ class Engine(context: Context) {
     suspend fun invoiceOffers(text: String): Result<List<InvoiceQuote>> = io { local { it.invoiceOffers(text) } }
 
     /**
-     * Pay the Lightning invoice `text` as `quote` says: through its hub's
-     * gateway, or through its provider for a lock of notes at its hub, for
-     * no more than the provider and the hub's lock fee quoted. Done, or
-     * under way.
+     * Pay the Lightning invoice `text` as `quote` says: through its provider
+     * for a lock of notes at its hub, for no more than the provider and the
+     * hub's lock fee quoted. Done, or under way.
      */
     suspend fun payInvoice(text: String, quote: InvoiceQuote): Result<Activity> = io {
         val provider = quote.provider
-        val paid = locked {
-            if (provider == null) it.payInvoiceWithin(text, quote.hub, quote.fee)
-            else it.payInvoiceVia(text, quote.hub, provider.url, provider.fee, provider.lockFee)
-        }
+        val paid = locked { it.payInvoiceVia(text, quote.hub, provider.url, provider.fee, provider.lockFee) }
         refresh()
         poke()
         paid
@@ -1771,7 +1767,7 @@ class Engine(context: Context) {
 
     /**
      * Whether a swap provider has the wallet paid over Lightning at a hub
-     * it trusts: where no hub does, [askInvoiceFor] asks one.
+     * it trusts, which [askInvoiceFor] asks: hubs make no invoices.
      */
     suspend fun providerTakesLightning(): Result<Boolean> = io { local { it.providerTakesLightning() } }
 

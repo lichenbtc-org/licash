@@ -60,15 +60,6 @@ async fn rate(chain: &Chain) -> FeeRate {
     rate
 }
 
-/// The rate [`rate`] last read, else [`RECOVERY_RATE`]: no block fetched.
-pub(super) fn last_rate() -> FeeRate {
-    let cached = *RATE.lock().unwrap_or_else(PoisonError::into_inner);
-    cached.map_or_else(
-        || FeeRate::from_sat_per_vb(RECOVERY_RATE).expect("a rate"),
-        |(_, rate)| rate,
-    )
-}
-
 /// A contract being forced closed, as the wallet last saw it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct Recovery {

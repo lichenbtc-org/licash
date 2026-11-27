@@ -75,7 +75,6 @@ internal fun shownName(announced: String): String? =
 
 internal fun about(hub: Hub): String = listOfNotNull(
     paying(hub).let { if (it == "None") "No fee" else "Fee $it" },
-    hub.lightning?.let { "Lightning" },
     hub.contracts?.let { "Protection" },
 ).joinToString(" · ")
 
@@ -135,29 +134,14 @@ internal fun HubFees(
         // What a payment costs, a section a direction: limits under each.
         Group("Paying") {
             Entry("In Licash", value = paying(hub), tag = "fee-pay")
-            val most = hub.lightningPay
-            if (hub.lightning != null || most != null) {
-                Divider()
-                Entry(
-                    "Over Lightning",
-                    value = hub.lightning?.let { charge(it.pay) } ?: "Yes",
-                    sub = most?.let { "Up to ${sat(it)}" },
-                )
-            }
         }
-        if (hub.lightning != null || hub.deposits != null) {
+        hub.deposits?.let { range ->
             Group("Receiving") {
-                hub.lightning?.let {
-                    Entry("Over Lightning", value = charge(it.receive), sub = between(it.receiveRange.min, it.receiveRange.max))
-                }
-                hub.deposits?.let { range ->
-                    if (hub.lightning != null) Divider()
-                    Entry(
-                        "On Bitcoin",
-                        value = hub.depositFee?.let { charge(it) } ?: "Yes",
-                        sub = between(range.min, range.max),
-                    )
-                }
+                Entry(
+                    "On Bitcoin",
+                    value = hub.depositFee?.let { charge(it) } ?: "Yes",
+                    sub = between(range.min, range.max),
+                )
             }
         }
         hub.contracts?.let {

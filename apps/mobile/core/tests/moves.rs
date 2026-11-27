@@ -806,7 +806,7 @@ fn via_quote(phone: &Wallet, request: &str) -> InvoiceQuote {
     let mut last = None;
     for _ in 0..50 {
         match phone.invoice_quote(request.to_owned()) {
-            Ok(quote) if quote.provider.is_some() => return quote,
+            Ok(quote) => return quote,
             other => last = Some(other),
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -837,7 +837,7 @@ fn a_phone_pays_an_invoice_through_a_provider_when_no_hub_pays_it() {
     // No hub of the phone's has a gateway: the provider pays it, for its
     // fee of 3 and the hub's 1 on the lock, from notes at the first hub.
     let quote = via_quote(&phone, &request);
-    let provider = quote.provider.clone().unwrap();
+    let provider = quote.provider.clone();
     assert_eq!((quote.hub.clone(), quote.amount), (hubs.url(0), 100));
     assert_eq!(provider.url, swaps.url());
     assert_eq!(provider.name.as_deref(), Some("provider 82"));

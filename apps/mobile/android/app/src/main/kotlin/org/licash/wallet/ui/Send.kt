@@ -435,12 +435,12 @@ fun Send(
                                 back,
                             )
                             Step.Quoting -> Middle("Getting a price…")
-                            is Step.Invoice -> Invoice(s.quote, ui.hubs.size > 1, { payInvoice(s.text, s.quote) }) {
+                            is Step.Invoice -> Invoice(s.quote, { payInvoice(s.text, s.quote) }) {
                                 if (ui.developer) {
                                     Providers {
                                         engine.invoiceOffers(s.text).map { offers ->
                                             offers.map { o ->
-                                                val through = o.provider?.let { it.name ?: host(it.url) } ?: "${name(o.hub)}'s gateway"
+                                                val through = o.provider.name ?: host(o.provider.url)
                                                 Offer(
                                                     through,
                                                     "Fees ${feeOf(o.fee, o.amount)}, from ${name(o.hub)}",
@@ -810,22 +810,22 @@ private fun Providers(load: suspend () -> Result<List<Offer>>) {
 
 /**
  * A Lightning invoice to pay: what it asks, and all it costs on top; from
- * which hub, with `several`; through which swap provider, if one, and how
- * long its sats wait should it not pay. `more` under the button.
+ * which hub, through which swap provider, and how long its sats wait should
+ * it not pay. `more` under the button.
  */
 @Composable
-private fun Invoice(quote: InvoiceQuote, several: Boolean, pay: () -> Unit, more: @Composable () -> Unit) {
+private fun Invoice(quote: InvoiceQuote, pay: () -> Unit, more: @Composable () -> Unit) {
     val provider = quote.provider
     Confirm(
         quote.amount,
         costs(quote.amount, quote.fee, "In seconds", invoiceFee(quote)) + listOfNotNull(
-            if (several || provider != null) Fact("From", name(quote.hub), "from") else null,
-            provider?.let { Fact("Through", it.name ?: host(it.url), "through") },
+            Fact("From", name(quote.hub), "from"),
+            Fact("Through", provider.name ?: host(provider.url), "through"),
         ),
         "Pay",
         pay,
         more = {
-            provider?.let {
+            provider.let {
                 Text(
                     refundWait(it.refundBlocks, LocalBlockSeconds.current),
                     modifier = Modifier.fillMaxWidth().padding(top = 12.dp).testTag("refund-wait"),

@@ -8,10 +8,6 @@ import org.junit.Test
 import org.licash.core.Contract
 import org.licash.core.ContractState
 import org.licash.core.DonationAddress
-import org.licash.core.Hub
-import org.licash.core.LightningTerms
-import org.licash.core.Range
-import org.licash.core.Rate
 
 class ReceiveTest {
     @Test
@@ -73,23 +69,10 @@ class ReceiveTest {
     }
 
     @Test
-    fun a_memo_is_offered_only_where_a_hub_says_one_in_its_invoices() {
-        val terms = LightningTerms(Rate(0uL, 0uL), Rate(0uL, 0uL), Range(1uL, 1_000uL))
-        fun hub(lightning: LightningTerms?) = Hub(
-            url = "https://hub.example", feeBase = 0uL, feePpm = 0uL, feeOutputMsat = 0uL, deposits = null,
-            silent = false, mailbox = false, lightningPay = null, lockFee = Rate(0uL, 0uL),
-            refundFee = Rate(0uL, 0uL), depositFee = null, lightning = lightning, contracts = null,
-        )
-        assertFalse(memoTaken(emptyList()))
-        assertFalse(memoTaken(listOf(hub(null), hub(terms))))
-        assertTrue(memoTaken(listOf(hub(terms), hub(terms.copy(memo = true)))))
-    }
-
-    @Test
     fun a_way_not_open_says_why() {
         assertEquals(
             listOf(
-                Way.LIGHTNING to "None of your hubs takes Lightning",
+                Way.LIGHTNING to "No provider takes Lightning now",
                 Way.SILENT to "Your hubs don't index silent payments",
                 Way.DONATIONS to "Looking for a provider…",
             ),

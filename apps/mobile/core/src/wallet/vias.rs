@@ -1,13 +1,13 @@
 //! Lightning invoices paid through swap providers announced on Nostr: the
 //! provider pays an invoice from its own node for a lock of the wallet's
 //! notes at a hub, and claims the lock with the preimage the payment buys.
-//! The app compares them with the gateways of the hubs it trusts and pays
-//! the cheapest. A payment through a provider that fails returns its notes
-//! only once its lock expires, which the quote tells.
+//! The app pays the cheapest; hubs pay no invoices. A payment through a
+//! provider that fails returns its notes only once its lock expires, which
+//! the quote tells.
 //!
 //! And invoices the wallet is paid with through providers taking them, at
-//! a hub trusted, where no hub's gateway makes them: the provider's node
-//! makes the invoice, and once paid locks its notes to the wallet.
+//! a hub trusted: the provider's node makes the invoice, and once paid
+//! locks its notes to the wallet.
 
 use licash_nostr::wallet::{
     hub_relays, invoice_providers_with, receive_providers_with, ReceiveProvider,
@@ -21,25 +21,18 @@ use crate::{Activity, InvoiceQuote, LicashError, ViaProvider};
 #[uniffi::export]
 impl Wallet {
     /// The ways to pay the Lightning invoice `text` with the notes held
-    /// now, the cheapest first: through the gateway of each hub trusted
-    /// that pays it, and through each swap provider announced on the
-    /// relays the hubs name that pays it for a lock at a hub holding
-    /// enough. Among equals a hub's gateway first, whose failed payments
-    /// return their notes at once. Refused if none can.
+    /// now, the cheapest first: through each swap provider announced on
+    /// the relays the hubs name that pays it for a lock at a hub holding
+    /// enough. Refused if none can: hubs pay no invoices.
     pub fn invoice_offers(&self, text: String) -> Result<Vec<InvoiceQuote>, LicashError> {
         let _timed = crate::log::timed("invoice_offers");
         let invoice = self.wallet.read_invoice(&text)?;
-        let (mut offers, refused) = self.gateway_offers(&invoice)?;
-        offers.extend(self.provider_offers(&invoice)?);
-        // Stable: gateways, listed first, first among equals.
+        let mut offers = self.provider_offers(&invoice)?;
         offers.sort_by_key(|o| o.fee);
-        if !offers.is_empty() {
-            return Ok(offers);
+        if offers.is_empty() {
+            return Err(LicashError::invalid(super::NO_PAYER));
         }
-        Err(match refused {
-            Some(e) => e.into(),
-            None => LicashError::invalid("no hub you trust pays Lightning invoices"),
-        })
+        Ok(offers)
     }
 
     /// Pay the Lightning invoice `text` through the swap provider at
@@ -67,37 +60,6 @@ impl Wallet {
 }
 
 impl Wallet {
-    /// What paying `invoice` costs through the gateway of each hub trusted
-    /// that pays it, and why one refused: lacking notes says the most.
-    pub(super) fn gateway_offers(
-        &self,
-        invoice: &Payable,
-    ) -> Result<(Vec<InvoiceQuote>, Option<licash_wallet::Error>), LicashError> {
-        let (mut offers, mut refused) = (Vec::new(), None::<licash_wallet::Error>);
-        for (url, info) in self.wallet.hubs()? {
-            if info.lightning.is_none() {
-                continue;
-            }
-            match self.wallet.invoice_fee(&url, &invoice.request) {
-                Ok(fee) => offers.push(InvoiceQuote {
-                    hub: url,
-                    amount: invoice.amount,
-                    fee,
-                    description: invoice.description.clone(),
-                    provider: None,
-                }),
-                Err(e)
-                    if refused.is_none()
-                        || matches!(e, licash_wallet::Error::Insufficient { .. }) =>
-                {
-                    refused = Some(e)
-                }
-                Err(_) => {}
-            }
-        }
-        Ok((offers, refused))
-    }
-
     /// What paying `invoice` costs through each swap provider announced
     /// that pays it, from each hub trusted holding at least what it asks:
     /// none if no hub names relays, or none answers.
@@ -132,13 +94,13 @@ impl Wallet {
                 amount: invoice.amount,
                 fee: p.quote.costs(),
                 description: invoice.description.clone(),
-                provider: Some(ViaProvider {
+                provider: ViaProvider {
                     url: p.url,
                     name: p.name,
                     fee: p.quote.fee,
                     lock_fee: p.quote.lock_fee,
                     refund_blocks: p.quote.refund_blocks,
-                }),
+                },
             }));
         }
         Ok(offers)
@@ -149,8 +111,8 @@ impl Wallet {
 #[uniffi::export]
 impl Wallet {
     /// Whether a swap provider announced has the wallet paid over Lightning
-    /// at a hub trusted now ([`Wallet::ask_invoice`], where no hub's gateway
-    /// does): asked of the relays the hubs name, and each provider.
+    /// at a hub trusted now ([`Wallet::ask_invoice`]): asked of the relays
+    /// the hubs name, and each provider.
     pub fn provider_takes_lightning(&self) -> Result<bool, LicashError> {
         let _timed = crate::log::timed("provider_takes_lightning");
         Ok(!self.receive_offers()?.is_empty())
@@ -182,7 +144,7 @@ impl Wallet {
     /// Ask the swap provider announced that has the wallet paid over
     /// Lightning at a hub trusted for least for an invoice paying the wallet
     /// `amount`, or, `invoiced`, asking the payer `amount`, its fee in it:
-    /// for when no hub's gateway makes it. None if no provider takes it.
+    /// None if no provider takes it.
     pub(super) fn provider_invoice(
         &self,
         amount: u64,

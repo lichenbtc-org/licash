@@ -27,7 +27,7 @@ class CoverageTest {
 
     private fun hub(terms: ContractTerms?) = Hub(
         url = one, feeBase = 0uL, feePpm = 0uL, feeOutputMsat = 0uL, deposits = null, silent = false, mailbox = false,
-        lightningPay = null, lockFee = Rate(0uL, 0uL), refundFee = Rate(0uL, 0uL), depositFee = null, lightning = null,
+        lockFee = Rate(0uL, 0uL), refundFee = Rate(0uL, 0uL), depositFee = null,
         contracts = terms,
     )
 

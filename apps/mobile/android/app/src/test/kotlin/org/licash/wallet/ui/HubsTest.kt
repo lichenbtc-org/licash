@@ -10,8 +10,6 @@ import org.licash.core.FeesRaised
 import org.licash.core.Hub
 import org.licash.core.HubRoom
 import org.licash.core.HubsFound
-import org.licash.core.LightningTerms
-import org.licash.core.Range
 import org.licash.core.Rate
 import org.licash.core.State
 
@@ -52,14 +50,12 @@ class HubsTest {
     private fun hub(
         base: ULong = 0uL,
         ppm: ULong = 0uL,
-        lightning: Boolean = false,
         contracts: Boolean = false,
         note: ULong = 0uL,
     ) = Hub(
         url = "https://hub.example", feeBase = base, feePpm = ppm, feeOutputMsat = note, deposits = null, silent = false,
         mailbox = true,
-        lightningPay = null, lockFee = Rate(0uL, 0uL), refundFee = Rate(0uL, 0uL), depositFee = null,
-        lightning = if (lightning) LightningTerms(Rate(2uL, 5_000uL), Rate(0uL, 0uL), Range(1uL, 1_000_000uL)) else null,
+        lockFee = Rate(0uL, 0uL), refundFee = Rate(0uL, 0uL), depositFee = null,
         contracts = if (contracts) ContractTerms(4_096uL, 23_000uL, 1_005u, true, null) else null,
     )
 
@@ -67,8 +63,8 @@ class HubsTest {
     fun a_hub_is_told_by_its_fee_and_what_else_it_does() {
         assertEquals("No fee", about(hub()))
         assertEquals("Fee 0.5%", about(hub(ppm = 5_000uL)))
-        assertEquals("Fee 1 sat + 0.5% · Lightning", about(hub(base = 1uL, ppm = 5_000uL, lightning = true)))
-        assertEquals("No fee · Lightning · Protection", about(hub(lightning = true, contracts = true)))
+        assertEquals("Fee 1 sat + 0.5%", about(hub(base = 1uL, ppm = 5_000uL)))
+        assertEquals("No fee · Protection", about(hub(contracts = true)))
     }
 
     @Test

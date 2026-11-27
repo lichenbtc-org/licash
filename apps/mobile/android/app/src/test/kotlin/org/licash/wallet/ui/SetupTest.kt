@@ -18,8 +18,8 @@ class SetupTest {
     private fun hub() = Hub(
         url = "https://hub.example", feeBase = 0uL, feePpm = 0uL, feeOutputMsat = 0uL, deposits = null, silent = false,
         mailbox = false,
-        lightningPay = null, lockFee = Rate(0uL, 0uL), refundFee = Rate(0uL, 0uL), depositFee = null,
-        lightning = null, contracts = null,
+        lockFee = Rate(0uL, 0uL), refundFee = Rate(0uL, 0uL), depositFee = null,
+        contracts = null,
     )
 
     private fun contract(createdAt: Long, state: ContractState) = Contract(

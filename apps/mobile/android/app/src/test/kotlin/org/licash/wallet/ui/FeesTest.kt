@@ -86,11 +86,10 @@ class FeesTest {
     }
 
     @Test
-    fun an_invoice_through_a_provider_splits_its_fee_and_through_a_gateway_does_not() {
-        val gateway = InvoiceQuote(hub = "https://hub.example", amount = 1_000uL, fee = 5uL, description = null, provider = null)
-        assertTrue(invoiceFee(gateway).components.isEmpty())
+    fun an_invoice_through_a_provider_splits_its_fee() {
         val provider = ViaProvider(url = "https://swaps.example", name = null, fee = 12uL, lockFee = 1uL, refundBlocks = 200u)
-        val via = invoiceFee(gateway.copy(fee = 13uL, provider = provider))
+        val quote = InvoiceQuote(hub = "https://hub.example", amount = 1_000uL, fee = 13uL, description = null, provider = provider)
+        val via = invoiceFee(quote)
         assertEquals(listOf("Hub" to 1uL, "Swap provider" to 12uL), via.components)
         assertTrue(via.explanation.contains("routing"))
     }

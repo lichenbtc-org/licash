@@ -47,7 +47,6 @@ import org.licash.core.Code
 import org.licash.core.Contract
 import org.licash.core.DonationAddress
 import org.licash.core.ExtraCode
-import org.licash.core.Hub
 import org.licash.core.LightningInvoice
 import org.licash.core.State
 import org.licash.wallet.Engine
@@ -137,7 +136,7 @@ internal fun closedWays(
     when {
         lightning -> null
         lookingForLightning -> Way.LIGHTNING to "Looking for a provider…"
-        else -> Way.LIGHTNING to "None of your hubs takes Lightning"
+        else -> Way.LIGHTNING to "No provider takes Lightning now"
     },
     (Way.SILENT to "Your hubs don't index silent payments").takeIf { !silent },
     when {
@@ -168,9 +167,6 @@ internal fun donationWords(address: DonationAddress): String {
 /** The most characters of an invoice's memo, as the hub takes it. */
 internal const val MAX_MEMO = 100
 
-/** Whether a hub among `hubs` makes invoices saying a memo to their payer. */
-internal fun memoTaken(hubs: List<Hub>): Boolean = hubs.any { it.lightning?.memo == true }
-
 /** What is typed as a memo: its words, one space apart, none if blank. */
 internal fun memoOf(typed: String): String? =
     typed.split(Regex("\\s+")).filter { it.isNotEmpty() }.joinToString(" ").take(MAX_MEMO).ifEmpty { null }
@@ -180,7 +176,7 @@ internal fun memoOf(typed: String): String? =
  * wallet gets of it: in words, those differing from the amount only.
  * `by` made it: the hub, or a provider.
  */
-internal fun invoiceWords(amount: ULong, asks: ULong, gets: ULong, by: String = "the hub"): String? = listOfNotNull(
+internal fun invoiceWords(amount: ULong, asks: ULong, gets: ULong, by: String = "the provider"): String? = listOfNotNull(
     "The payer pays ${sat(asks)}".takeIf { asks != amount },
     "You get ${sat(gets)}, $by's fee taken".takeIf { gets != asks },
 ).joinToString("\n").ifEmpty { null }
@@ -236,19 +232,17 @@ fun Receive(engine: Engine, back: () -> Unit) {
     var copied by remember { mutableStateOf(false) }
     var choosing by rememberSaveable { mutableStateOf(false) }
     val ui by engine.ui.collectAsState()
-    val hubsLightning = ui.hubs.any { it.lightning != null }
-    // Where no hub takes Lightning, a provider's node may make the invoice:
-    // looked for once, out of sight.
+    // A provider's node makes the invoice, hubs making none: looked for
+    // once, out of sight.
     var providerLightning by remember { mutableStateOf(false) }
     var lookingForLightning by remember { mutableStateOf(false) }
-    LaunchedEffect(ui.hubs, hubsLightning) {
-        if (hubsLightning) return@LaunchedEffect
+    LaunchedEffect(ui.hubs) {
         lookingForLightning = true
         providerLightning = engine.providerTakesLightning().getOrDefault(false)
         lookingForLightning = false
     }
-    val takesLightning = hubsLightning || providerLightning
-    val invoicedBy = if (hubsLightning) "the hub" else "the provider"
+    val takesLightning = providerLightning
+    val invoicedBy = "the provider"
     val ways = ways(takesLightning, ui.hubs.any { it.silent }, donations != null, address != null)
     // Picked for the amount, unless another way was asked for.
     var chosen by rememberSaveable { mutableStateOf<Way?>(null) }
@@ -503,7 +497,7 @@ fun Receive(engine: Engine, back: () -> Unit) {
                     Spacer(Modifier.height(32.dp))
                     AmountField(typed, { typed = it }) { done() }
                     Spacer(Modifier.height(16.dp))
-                    if (invoicing && (memoTaken(ui.hubs) || !hubsLightning)) {
+                    if (invoicing) {
                         MemoField(typedMemo, invoicedBy, { typedMemo = it }) { done() }
                     }
                 }

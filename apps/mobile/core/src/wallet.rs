@@ -19,9 +19,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     chain::Chain, Activity, Balance, ChainError, ChainSource, Code, ContractTerms, Details,
-    FoundHub, Holding, Hub, HubsFound, InvoiceQuote, Kind, LicashError, LightningInvoice,
-    LightningTerms, Linking, Network, NoteLine, Notes, NotesOf, NotesPaid, Onchain, Paid, PaidTo,
-    PayOffer, PayQuote, Range, Rate, Scan, Scanned, State, TorClient,
+    FoundHub, Holding, Hub, HubsFound, InvoiceQuote, Kind, LicashError, LightningInvoice, Linking,
+    Network, NoteLine, Notes, NotesOf, NotesPaid, Onchain, Paid, PaidTo, PayOffer, PayQuote, Range,
+    Rate, Scan, Scanned, State, TorClient,
 };
 
 /// The rate deposits are paid at, in sat/vB: above what nodes relay.
@@ -699,49 +699,21 @@ impl Wallet {
     }
 
     /// What paying the Lightning invoice `text` costs the cheapest way,
-    /// with the notes held now: through the gateway of a hub trusted, or
-    /// through a swap provider ([`Wallet::invoice_offers`]).
+    /// with the notes held now: through a swap provider
+    /// ([`Wallet::invoice_offers`]).
     pub fn invoice_quote(&self, text: String) -> Result<InvoiceQuote, LicashError> {
         let _timed = crate::log::timed("invoice_quote");
         let offers = self.invoice_offers(text)?;
         let best = offers.into_iter().next();
-        best.ok_or_else(|| LicashError::invalid("no hub you trust pays Lightning invoices"))
+        best.ok_or_else(|| LicashError::invalid(NO_PAYER))
     }
 
-    /// Pay the Lightning invoice `text` through `hub`: done, or under way
-    /// until [`Wallet::resume`] finds it paid or refunded.
-    pub fn pay_invoice(&self, text: String, hub: String) -> Result<Activity, LicashError> {
-        let _timed = crate::log::timed("pay_invoice");
-        let invoice = self.wallet.read_invoice(&text)?;
-        let pay = self.wallet.pay_invoice(&hub, &invoice.request);
-        let lock = self.operation(pay)?;
-        Ok(lightning_activity(&lock, &invoice.request))
-    }
-
-    /// [`Wallet::pay_invoice`], refused as [`LicashError::FeeRose`],
-    /// nothing paid, if its hub now asks more than `max_fee`, its quote's
-    /// fee ([`Wallet::invoice_offers`]).
-    pub fn pay_invoice_within(
-        &self,
-        text: String,
-        hub: String,
-        max_fee: u64,
-    ) -> Result<Activity, LicashError> {
-        let _timed = crate::log::timed("pay_invoice_within");
-        let invoice = self.wallet.read_invoice(&text)?;
-        let pay = self
-            .wallet
-            .pay_invoice_within(&hub, &invoice.request, Some(max_fee));
-        let lock = self.operation(pay)?;
-        Ok(lightning_activity(&lock, &invoice.request))
-    }
-
-    /// Ask the hub trusted taking `amount` over Lightning for least for an
-    /// invoice paying the wallet `amount` in notes, its fee on top for the
-    /// payer. Followed by [`Wallet::follow_invoice`] while shown, and by
-    /// [`Wallet::resume`]: its notes are taken once it is paid. Saying
-    /// `memo` to its payer, if given, at a hub that puts one in its
-    /// invoices: which reads it too.
+    /// Ask the swap provider announced that has the wallet paid over
+    /// Lightning at a hub trusted for least for an invoice paying the
+    /// wallet `amount` in notes, its fee on top for the payer. Followed by
+    /// [`Wallet::follow_invoice`] while shown, and by [`Wallet::resume`]:
+    /// its notes are taken once it is paid. Saying `memo` to its payer, if
+    /// given: which the provider reads too.
     pub fn ask_invoice(
         &self,
         amount: u64,
@@ -749,39 +721,18 @@ impl Wallet {
     ) -> Result<LightningInvoice, LicashError> {
         let _timed = crate::log::timed("ask_invoice");
         let memo = said(memo)?;
-        let (mut best, mut any): (Option<(u64, String)>, bool) = (None, false);
-        for (url, info) in self.wallet.hubs()? {
-            let Some(lightning) = takes_invoice(&info, memo.is_some()) else {
-                continue;
-            };
-            any = true;
-            if !(lightning.min_receive..=lightning.max_receive).contains(&amount) {
-                continue;
-            }
-            let fee = lightning.receive.due(amount);
-            if best.as_ref().is_none_or(|(least, _)| fee < *least) {
-                best = Some((fee, url));
-            }
+        match self.provider_invoice(amount, false, memo.as_deref())? {
+            Some(asked) => self.invoice_now(asked),
+            None => Err(LicashError::invalid(format!(
+                "no swap provider takes {amount} sat over Lightning at a hub you trust now"
+            ))),
         }
-        if let Some((_, url)) = best {
-            return self.invoice_now(self.invoice_at(&url, amount, memo.as_deref()));
-        }
-        // No hub's gateway makes it: a provider's node, then.
-        if !any {
-            if let Some(asked) = self.provider_invoice(amount, false, memo.as_deref())? {
-                return self.invoice_now(asked);
-            }
-        }
-        Err(LicashError::invalid(match any {
-            true => format!("no hub you trust takes {amount} sat over Lightning"),
-            false => no_invoices(memo.is_some()),
-        }))
     }
 
     /// [`Wallet::ask_invoice`], for an invoice asking the payer `invoiced`,
-    /// the hub's fee in it, as a shop asks a price: the wallet gets that
-    /// less the fee, at the hub trusted leaving the most. A sat short,
-    /// rarely, where no amount and its fee rounded up come to it exactly.
+    /// the provider's fee in it, as a shop asks a price: the wallet gets
+    /// that less the fee. A sat short, rarely, where no amount and its fee
+    /// rounded up come to it exactly.
     pub fn ask_invoice_for(
         &self,
         invoiced: u64,
@@ -789,33 +740,13 @@ impl Wallet {
     ) -> Result<LightningInvoice, LicashError> {
         let _timed = crate::log::timed("ask_invoice_for");
         let memo = said(memo)?;
-        let (mut best, mut any): (Option<(u64, String)>, bool) = (None, false);
-        for (url, info) in self.wallet.hubs()? {
-            let Some(lightning) = takes_invoice(&info, memo.is_some()) else {
-                continue;
-            };
-            any = true;
-            let amount = before_fee(&lightning.receive, invoiced);
-            if amount == 0 || !(lightning.min_receive..=lightning.max_receive).contains(&amount) {
-                continue;
-            }
-            if best.as_ref().is_none_or(|(most, _)| amount > *most) {
-                best = Some((amount, url));
-            }
+        match self.provider_invoice(invoiced, true, memo.as_deref())? {
+            Some(asked) => self.invoice_now(asked),
+            None => Err(LicashError::invalid(format!(
+                "no swap provider takes an invoice of {invoiced} sat over Lightning at a hub \
+                 you trust now"
+            ))),
         }
-        if let Some((amount, url)) = best {
-            return self.invoice_now(self.invoice_at(&url, amount, memo.as_deref()));
-        }
-        // No hub's gateway makes it: a provider's node, then.
-        if !any {
-            if let Some(asked) = self.provider_invoice(invoiced, true, memo.as_deref())? {
-                return self.invoice_now(asked);
-            }
-        }
-        Err(LicashError::invalid(match any {
-            true => format!("no hub you trust takes an invoice of {invoiced} sat over Lightning"),
-            false => no_invoices(memo.is_some()),
-        }))
     }
 
     /// Take on the invoice of `hash`, as [`Wallet::ask_invoice`] asked for
@@ -2139,19 +2070,9 @@ fn hub(url: &str, info: &licash_api::Info) -> Hub {
         }),
         silent: info.tweaks.is_some(),
         mailbox: !info.relays.is_empty(),
-        lightning_pay: info.lightning.as_ref().map(|l| l.max_pay),
         lock_fee: rate(info.fees.lock),
         refund_fee: rate(info.fees.refund),
         deposit_fee: info.deposits.as_ref().map(|d| rate(d.fee)),
-        lightning: info.lightning.as_ref().map(|l| LightningTerms {
-            pay: rate(l.pay),
-            receive: rate(l.receive),
-            receive_range: Range {
-                min: l.min_receive,
-                max: l.max_receive,
-            },
-            memo: takes_invoice(info, true).is_some(),
-        }),
         // Of its least contract, all of it hers, over the fewest blocks.
         contracts: info.contracts.map(|c| ContractTerms {
             cap: u64::from(c.range.min_cap),
@@ -2181,22 +2102,9 @@ fn said(memo: Option<String>) -> Result<Option<String>, LicashError> {
         .transpose()
 }
 
-/// What the hub of `info` takes over Lightning, if it makes invoices, and
-/// puts a memo in them where `memo`.
-fn takes_invoice(info: &licash_api::Info, memo: bool) -> Option<&licash_api::Lightning> {
-    let says = |f: &String| f == licash_api::FEATURE_MEMO;
-    (!memo || info.features.iter().any(says))
-        .then_some(info.lightning.as_ref())
-        .flatten()
-}
-
-/// Why no hub trusted makes the invoice: none makes any, or none says a memo.
-fn no_invoices(memo: bool) -> String {
-    match memo {
-        true => "no hub you trust puts a memo in its invoices: ask without one".into(),
-        false => "no hub you trust takes payments over Lightning".into(),
-    }
-}
+/// Why no way to pay an invoice was found.
+pub(crate) const NO_PAYER: &str =
+    "no swap provider pays Lightning invoices from a hub you trust now";
 
 /// The line of the history of `received`, saying what its `note` says.
 fn received_activity(received: &licash_wallet::Received, note: Option<&PaymentNote>) -> Activity {

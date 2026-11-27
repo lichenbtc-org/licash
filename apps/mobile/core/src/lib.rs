@@ -183,17 +183,12 @@ pub struct Hub {
     pub silent: bool,
     /// Whether it names relays for mailboxes.
     pub mailbox: bool,
-    /// The most a Lightning invoice it pays may ask, in sat, if it pays
-    /// them.
-    pub lightning_pay: Option<u64>,
     /// Its fees on a lock, which holds notes until a condition is met (as
     /// paying a Lightning invoice does), and on refunding one.
     pub lock_fee: Rate,
     pub refund_fee: Rate,
     /// On top of the notes moving Bitcoin into them makes, if it does.
     pub deposit_fee: Option<Rate>,
-    /// Paying and being paid over Lightning, if it does.
-    pub lightning: Option<LightningTerms>,
     /// The recovery contracts it opens now, if it does.
     pub contracts: Option<ContractTerms>,
 }
@@ -463,21 +458,6 @@ pub struct NoteOptimization {
     pub fee: u64,
     pub notes_before: u64,
     pub notes_after: u64,
-}
-
-/// What a hub charges over Lightning, and what it takes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct LightningTerms {
-    /// On top of an invoice it pays, routing included.
-    pub pay: Rate,
-    /// On top of what an invoice it makes pays the wallet: the payer's.
-    pub receive: Rate,
-    /// What an invoice it makes may pay the wallet: at least and at most.
-    pub receive_range: Range,
-    /// Whether an invoice it makes says a memo of the wallet's to its
-    /// payer ([`crate::Wallet::ask_invoice`]).
-    #[uniffi(default = false)]
-    pub memo: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
@@ -761,16 +741,16 @@ pub struct Notes {
     pub count: u64,
 }
 
-/// A Lightning invoice to pay through `hub`: `amount` it asks, and `fee`,
-/// all paying it costs on top, with the notes held now. Paid by `hub`'s
-/// gateway, or by `provider` for a lock of notes at `hub`.
+/// A Lightning invoice to pay from notes at `hub`: `amount` it asks, and
+/// `fee`, all paying it costs on top, with the notes held now. Paid by
+/// `provider` for a lock of notes at `hub`: hubs pay no invoices.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct InvoiceQuote {
     pub hub: String,
     pub amount: u64,
     pub fee: u64,
     pub description: Option<String>,
-    pub provider: Option<ViaProvider>,
+    pub provider: ViaProvider,
 }
 
 /// The wallet's static address of donations ([`crate::Wallet::
