@@ -656,6 +656,18 @@ pub(crate) fn incoming(c: &Connection, id: i64) -> Result<u64, Error> {
     Ok(incoming as u64)
 }
 
+/// What the payments of account `id` under way took from its balance, and
+/// may return to it should they fail or cost less.
+pub(crate) fn outgoing(c: &Connection, id: i64) -> Result<u64, Error> {
+    let outgoing: i64 = c.query_row(
+        "SELECT COALESCE(SUM(reserved), 0) FROM bridge_payments
+         WHERE account = ?1 AND state = 'pending'",
+        [id],
+        |r| r.get(0),
+    )?;
+    Ok(outgoing as u64)
+}
+
 /// How many invoices of account `id`'s address, or its top-ups (of no
 /// connection), are pending and unexpired at `now`.
 pub(crate) fn unpaid_addressed(c: &Connection, id: i64, now: i64) -> Result<u32, Error> {

@@ -24,7 +24,7 @@ mod store;
 pub use api::{router, MAX_SERVING};
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
@@ -167,6 +167,45 @@ pub struct Bridge<T> {
     /// What its provider last said it takes to have it paid at its hub,
     /// once asked ([`Bridge::ask_provider`]).
     offer: Mutex<Option<ReceiveOffer>>,
+    /// What the invoices being made now, not recorded yet, would credit
+    /// each account, by its id: counted toward its cap meanwhile.
+    invoicing: Mutex<HashMap<i64, u64>>,
+}
+
+/// An invoice of `amount` to account `id` being made, counted toward its
+/// cap ([`Bridge::admit_credit`]) until recorded or given up.
+struct Invoicing<'a> {
+    of: &'a Mutex<HashMap<i64, u64>>,
+    id: i64,
+    amount: u64,
+}
+
+impl Invoicing<'_> {
+    fn uncount(&self, invoicing: &mut HashMap<i64, u64>) {
+        if let Some(making) = invoicing.get_mut(&self.id) {
+            *making = making.saturating_sub(self.amount);
+            if *making == 0 {
+                invoicing.remove(&self.id);
+            }
+        }
+    }
+
+    /// Record it by `record`, no longer counted as being made at once: no
+    /// admission meanwhile counts it twice, or not at all.
+    fn record<R>(self, record: impl FnOnce() -> Result<R, Error>) -> Result<R, Error> {
+        let mut invoicing = self.of.lock().unwrap_or_else(PoisonError::into_inner);
+        let recorded = record();
+        self.uncount(&mut invoicing);
+        drop(invoicing);
+        std::mem::forget(self);
+        recorded
+    }
+}
+
+impl Drop for Invoicing<'_> {
+    fn drop(&mut self) {
+        self.uncount(&mut self.of.lock().unwrap_or_else(PoisonError::into_inner));
+    }
 }
 
 /// What an invoice paying the bridge may ask, and through whom.
@@ -255,6 +294,7 @@ impl<T: Transport> Bridge<T> {
             paying: Mutex::new(HashSet::new()),
             notes: tokio::sync::Mutex::new(()),
             offer: Mutex::new(None),
+            invoicing: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1105,14 +1145,7 @@ impl<T: Transport> Bridge<T> {
                 return Err(Error::Restricted("this connection only pays".into()));
             }
         }
-        if let Some(max) = self.config.max_balance {
-            let (balance, incoming) = self
-                .store
-                .read(|c| Ok((store::account(c, id)?.balance, store::incoming(c, id)?)))?;
-            if balance.saturating_add(incoming).saturating_add(amount) > max {
-                return Err(Error::Quota(format!("an account holds {max} msat at most")));
-            }
-        }
+        let invoicing = self.admit_credit(id, amount)?;
         let memo = description
             .filter(|_| description_hash.is_none())
             .filter(|d| licash_api::memo(d).is_ok_and(|memo| memo == *d));
@@ -1156,9 +1189,45 @@ impl<T: Transport> Bridge<T> {
             expires_at: created + invoice.expiry_time().as_secs() as i64,
             settled_at: None,
         };
-        self.store.write(|tx| store::insert_receipt(tx, &receipt))?;
+        let record = || self.store.write(|tx| store::insert_receipt(tx, &receipt));
+        match invoicing {
+            Some(invoicing) => invoicing.record(record)?,
+            None => record()?,
+        }
         tracing::info!(hash = %hex::encode(receipt.hash), amount, "invoice made");
         Ok(receipt)
+    }
+
+    /// Admit an invoice of `amount` msat more to account `id` within the
+    /// bridge's cap, if it has one: what the account holds, what its open
+    /// invoices and those being made would credit it, and what its payments
+    /// under way may return to it, `amount` with them, at most
+    /// `max_balance`. Counted as being made until recorded or given up.
+    fn admit_credit(&self, id: i64, amount: u64) -> Result<Option<Invoicing<'_>>, Error> {
+        let Some(max) = self.config.max_balance else {
+            return Ok(None);
+        };
+        let mut invoicing = self
+            .invoicing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let held = self.store.read(|c| {
+            let balance = store::account(c, id)?.balance;
+            let incoming = store::incoming(c, id)?;
+            let outgoing = store::outgoing(c, id)?;
+            Ok(balance.saturating_add(incoming).saturating_add(outgoing))
+        })?;
+        let making = invoicing.get(&id).copied().unwrap_or(0);
+        if held.saturating_add(making).saturating_add(amount) > max {
+            return Err(Error::Quota(format!("an account holds {max} msat at most")));
+        }
+        let counted = invoicing.entry(id).or_default();
+        *counted = counted.saturating_add(amount);
+        Ok(Some(Invoicing {
+            of: &self.invoicing,
+            id,
+            amount,
+        }))
     }
 
     /// Take the invoice of `hash` on: claim its payment, crediting its

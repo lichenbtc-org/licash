@@ -471,6 +471,94 @@ async fn an_open_bridge_registers_anyone_within_its_limit() {
     assert_eq!((balance(&net, &alice), balance(&net, &bob)), (14_000, 0));
 }
 
+/// The hub's router, each request with a body held until a second one
+/// comes, or a while: requests made at once reach it at once.
+#[derive(Clone)]
+struct Gated(Local, Arc<(std::sync::Mutex<usize>, tokio::sync::Notify)>);
+
+impl Transport for Gated {
+    fn request(
+        &self,
+        url: &str,
+        body: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = Result<Response, String>> + Send {
+        let (this, url) = (self.clone(), url.to_owned());
+        async move {
+            if body.is_some() {
+                let (count, both) = &*this.1;
+                let notified = both.notified();
+                let arrived = {
+                    let mut count = count.lock().unwrap();
+                    *count += 1;
+                    *count
+                };
+                if arrived >= 2 {
+                    both.notify_waiters();
+                } else {
+                    let _ = tokio::time::timeout(Duration::from_millis(500), notified).await;
+                }
+            }
+            this.0.request(&url, body).await
+        }
+    }
+}
+
+/// Invoices asked at once are admitted within the most an account holds,
+/// as one after the other: the second waits for none of the first's round
+/// trips to its hub to be counted.
+#[tokio::test]
+async fn invoices_asked_at_once_are_admitted_within_the_most_an_account_holds() {
+    let net = Net::with(Config {
+        max_balance: Some(50_000),
+        ..Config::default()
+    })
+    .await;
+    let owner = net.owner(0).await;
+    let path = net.dir.path().join("bridge.sqlite");
+    let gate = Arc::new((std::sync::Mutex::new(0), tokio::sync::Notify::new()));
+    let wallet = Wallet::open(&path, Gated(Local(net.app.clone(), None), gate)).unwrap();
+    let gated = Bridge::open(wallet, net.bridge.config().clone()).unwrap();
+    let (one, two) = tokio::join!(gated.top_up(&owner, 30_000), gated.top_up(&owner, 30_000));
+    let refused = [&one, &two]
+        .into_iter()
+        .filter(|r| matches!(r, Err(Error::Quota(_))))
+        .count();
+    assert_eq!(
+        (refused, one.is_ok() || two.is_ok()),
+        (1, true),
+        "{one:?} {two:?}"
+    );
+    // Refused, it no longer counts; recorded, the other counts what it
+    // credits, 29 sat, the hub's 1 sat less: 19 more fit, 3 then do not.
+    gated.top_up(&owner, 20_000).await.unwrap();
+    let over = gated.top_up(&owner, 3_000).await;
+    assert!(matches!(over, Err(Error::Quota(_))), "{over:?}");
+}
+
+/// What a payment under way took from an account may come back to it,
+/// should it fail: counted toward the most it holds, as an open invoice.
+#[tokio::test]
+async fn a_payment_under_way_counts_toward_the_most_an_account_holds() {
+    let net = Net::with(Config {
+        max_balance: Some(50_000),
+        ..Config::default()
+    })
+    .await;
+    let owner = net.owner(0).await;
+    let request = net.node.invoice(30_000, [12; 32], 18, Outcome::Hang);
+    let db = rusqlite::Connection::open(net.dir.path().join("bridge.sqlite")).unwrap();
+    db.execute(
+        "INSERT INTO bridge_payments (hash, account, connection, invoice, amount, reserved,
+            state, started_at, created_at)
+         VALUES (?1, 1, NULL, ?2, 30000, 30000, 'pending', ?3, ?3)",
+        rusqlite::params![[12u8; 32], request, licash_store::now()],
+    )
+    .unwrap();
+    let refused = net.bridge.top_up(&owner, 30_000).await;
+    assert!(matches!(refused, Err(Error::Quota(_))), "{refused:?}");
+    net.bridge.top_up(&owner, 20_000).await.unwrap();
+}
+
 #[tokio::test]
 async fn nwc_pays_within_its_connections_budget_in_either_cipher() {
     let net = Net::new(false).await;

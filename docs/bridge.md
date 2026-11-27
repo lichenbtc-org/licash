@@ -57,7 +57,8 @@ owner's restored or new wallet.
 With `--open` anyone registers an account with their wallet's key: a
 provider's bridge. Limits bound it:
 
-- `--max-balance` sat any account holds, invoices still open counted;
+- `--max-balance` sat any account holds, counting its invoices still open
+  or being made, and its payments under way, which may come back to it;
 - `--max-payment` sat any one payment pays;
 - `--max-accounts` accounts in all;
 - `--registrations-per-hour` new accounts in any hour (60 by default).
