@@ -347,10 +347,42 @@ struct Answered {
     by_time: BTreeSet<(Timestamp, EventId)>,
 }
 
+/// The requests answered since the bridge was opened, kept across
+/// restarts of [`run`] while it is: none made before then is answered, as
+/// a process before may have answered it, remembering so alone.
+pub(crate) struct Answering {
+    since: Timestamp,
+    answered: Mutex<Answered>,
+}
+
+impl Answering {
+    pub(crate) fn new() -> Self {
+        Self {
+            since: Timestamp::now(),
+            answered: Mutex::default(),
+        }
+    }
+
+    /// Note the request `id` of `created_at` answered `now`, of a live
+    /// connection if `live`: only those are remembered, as another's is
+    /// refused anyway.
+    fn admit(&self, id: EventId, created_at: Timestamp, now: Timestamp, live: bool) -> Admission {
+        if created_at < self.since {
+            return Admission::Before;
+        }
+        if !live {
+            return Admission::First;
+        }
+        (self.answered.lock().unwrap_or_else(PoisonError::into_inner)).admit(id, created_at, now)
+    }
+}
+
 /// Whether to answer a request.
 #[derive(Debug, PartialEq, Eq)]
 enum Admission {
     First,
+    /// Made before the bridge was opened.
+    Before,
     /// Answered already.
     Again,
     /// [`REMEMBERED`] are kept: not answered, rather than one forgotten.
@@ -403,7 +435,6 @@ pub async fn run<T: Transport + 'static>(bridge: Arc<Bridge<T>>) -> anyhow::Resu
     let mut notifications = client.notifications();
     client.subscribe(filter).await?;
     tracing::info!(nostr = %me.to_hex(), relays = relays.len(), "serving NWC");
-    let answered = Arc::new(Mutex::new(Answered::default()));
     let publishing = Arc::new(Mutex::new(HashSet::new()));
     let mut published = tokio::time::Instant::now();
     let mut tick = tokio::time::interval(Duration::from_secs(5));
@@ -433,20 +464,17 @@ pub async fn run<T: Transport + 'static>(bridge: Arc<Bridge<T>>) -> anyhow::Resu
         if !addressed(&bridge, &event, now) {
             continue;
         }
-        // Remembered if of a live connection: another's is refused anyway,
-        // and so needs no remembering.
-        if bridge.link(&event.pubkey.to_bytes()).is_ok() {
-            let admitted = answered
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .admit(event.id, event.created_at, now);
-            match admitted {
-                Admission::First => {}
-                Admission::Again => continue,
-                Admission::Full => {
-                    tracing::warn!("{REMEMBERED} NWC requests answered lately: one not answered");
-                    continue;
-                }
+        let live = bridge.link(&event.pubkey.to_bytes()).is_ok();
+        match (bridge.answering()).admit(event.id, event.created_at, now, live) {
+            Admission::First => {}
+            Admission::Again => continue,
+            Admission::Before => {
+                tracing::debug!(id = %event.id, "an NWC request made before the bridge was opened");
+                continue;
+            }
+            Admission::Full => {
+                tracing::warn!("{REMEMBERED} NWC requests answered lately: one not answered");
+                continue;
             }
         }
         let (bridge, client) = (bridge.clone(), client.clone());
@@ -549,6 +577,35 @@ mod tests {
         assert_eq!(answered.admit(id(2), ahead, last + 1), Admission::Again);
         assert!(!answered.ids.contains(&id(1)));
         assert_eq!(answered.by_time.len(), 1);
+    }
+
+    /// None made before the bridge was opened is answered, and one
+    /// answered stays so however often the service starts again, while the
+    /// bridge is open: what it remembers lives as long.
+    #[test]
+    fn a_request_made_before_the_bridge_was_opened_is_not_answered() {
+        let answering = Answering::new();
+        let since = answering.since;
+        let before = Timestamp::from_secs(since.as_secs() - 1);
+        assert_eq!(
+            answering.admit(id(1), before, since, true),
+            Admission::Before
+        );
+        assert_eq!(
+            answering.admit(id(1), before, since, false),
+            Admission::Before
+        );
+        assert_eq!(answering.admit(id(2), since, since, true), Admission::First);
+        assert_eq!(answering.admit(id(2), since, since, true), Admission::Again);
+        // Another's connection: answered with an error, not remembered.
+        assert_eq!(
+            answering.admit(id(3), since, since, false),
+            Admission::First
+        );
+        assert_eq!(
+            answering.admit(id(3), since, since, false),
+            Admission::First
+        );
     }
 
     #[test]

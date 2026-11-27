@@ -170,6 +170,8 @@ pub struct Bridge<T> {
     /// What the invoices being made now, not recorded yet, would credit
     /// each account, by its id: counted toward its cap meanwhile.
     invoicing: Mutex<HashMap<i64, u64>>,
+    /// The NWC requests answered since it was opened ([`nwc::run`]).
+    answering: nwc::Answering,
 }
 
 /// An invoice of `amount` to account `id` being made, counted toward its
@@ -295,6 +297,7 @@ impl<T: Transport> Bridge<T> {
             notes: tokio::sync::Mutex::new(()),
             offer: Mutex::new(None),
             invoicing: Mutex::new(HashMap::new()),
+            answering: nwc::Answering::new(),
         })
     }
 
@@ -384,6 +387,11 @@ impl<T: Transport> Bridge<T> {
 
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// The NWC requests it answered since it was opened.
+    pub(crate) fn answering(&self) -> &nwc::Answering {
+        &self.answering
     }
 
     /// The keys its NWC service answers as.

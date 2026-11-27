@@ -129,7 +129,10 @@ clock, and each request of a live connection once: it remembers what it
 answered for those 5 minutes, up to 65,536 requests, and answers none past
 that until older ones age out, rather than forgetting one that could be
 replayed. Requests of no live connection are answered with an error and
-not remembered.
+not remembered. It remembers them only while it runs, so it answers no
+request made before it started, which a run before may have answered: a
+client whose clock is behind may see its first requests after a restart
+go unanswered, and asks again.
 
 ## When the hub stops cooperating
 
