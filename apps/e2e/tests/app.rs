@@ -732,7 +732,8 @@ async fn bridged(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     phone.fill_id("app-name", "Zapper").await?;
     phone.tap_id("connect").await?;
     phone.tap_id("copy-uri").await?;
-    phone.tagged("copy-uri", "Copied", 10).await?;
+    // A button's label is its own view, untagged.
+    phone.wait("Copied", 10).await?;
     phone.tap_id("connected-done").await?;
     phone.by_id("bridge-app", 30).await?;
     phone.back().await?;
