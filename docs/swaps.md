@@ -177,6 +177,20 @@ it. A provider with donations under way refuses to start without `--lnurl-url`
 and `--lnd`. The provider must stay up while donations are under way: down
 past an HTLC's expiry, it may have paid the payee and lose the donation.
 
+When `--lnurl-url` is an origin with no path, over `https://` (or `http://`
+for an onion service or on regtest), the provider also serves each code's
+donations at a Lightning Address (LUD-16), `NAME@HOST`, and says that
+domain under `donations.names` in its info. A wallet registers its code
+(`POST /v1/names` with `{"code": CODE}`), answered `{"name": NAME}`: 16 hex
+digits of a hash of the code, made by the provider itself, so that no one
+registers a name paying another wallet. Registering again is answered the
+same. `GET /.well-known/lnurlp/NAME` and its `/callback` then answer as the
+code's LNURL does, the metadata naming the address too (`text/identifier`).
+Names are kept in the provider's database; one source registers at most 8
+new ones an hour, and 100,000 in all, past which wallets show their LNURL
+instead. The reverse proxy in front of it must route `/.well-known/lnurlp/`
+to it; the provider logs at start which domain it serves, or why none.
+
 With `--lnd` and `--receive`, it also takes payments over Lightning for
 wallets, as a hub's gateway does, so that a wallet can be paid over
 Lightning at a hub without one. Its info names the terms under `receive`.

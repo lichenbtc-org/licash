@@ -622,3 +622,103 @@ async fn a_wallet_finds_its_static_donation_address_at_a_provider_taking_them() 
         "{refused:?}"
     );
 }
+
+/// A code's Lightning Address: its name registered by its wallet, made of
+/// the code by the provider, kept, and paid as its LNURL is, the invoice
+/// committing to the address too.
+#[tokio::test]
+async fn a_lightning_address_of_donations_is_a_codes_own_name() {
+    let mut eco = Eco::new().await;
+    let code: licash_wallet::LicashCode = eco.code.parse().unwrap();
+    let name = licash_wallet::donation_name(&code);
+    let donations = eco.provider().info().unwrap().donations.unwrap();
+    assert_eq!(donations.names.as_deref(), Some("swaps.test"));
+    assert_eq!(eco.provider().names_domain().as_deref(), Some("swaps.test"));
+    // Unknown until registered.
+    let unknown = eco.provider().named(&name).unwrap_err();
+    assert_eq!(unknown.code, Code::Invalid);
+    assert_eq!(eco.provider().register_name(&eco.code, None).unwrap(), name);
+    // Again, as written in upper case too: the same, kept.
+    let upper = eco.code.to_uppercase();
+    assert_eq!(eco.provider().register_name(&upper, None).unwrap(), name);
+    eco.restart();
+    let (named, metadata) = eco.provider().named(&name.to_uppercase()).unwrap();
+    assert_eq!(named, eco.code);
+    assert_eq!(
+        metadata,
+        licash_swaps::named_metadata(&format!("{name}@swaps.test"))
+    );
+    let request = eco
+        .provider()
+        .donate_committing(&named, 100_000, &metadata, None)
+        .await
+        .unwrap();
+    let invoice: Bolt11Invoice = request.parse().unwrap();
+    let committed = sha256::Hash::hash(metadata.as_bytes());
+    assert_eq!(
+        invoice.description(),
+        Bolt11InvoiceDescriptionRef::Hash(&lightning_invoice::Sha256(committed))
+    );
+    // Not a code: refused, nothing registered.
+    assert!(eco
+        .provider()
+        .register_name("licash1nonsense", None)
+        .is_err());
+}
+
+/// New names are bounded by source: past those, unavailable to it, others
+/// not, and a name registered already is answered all the same.
+#[tokio::test]
+async fn a_source_registers_few_new_names() {
+    let eco = Eco::new().await;
+    let source = [9u8; 16];
+    let net = ChainProfile::Core30DefaultRegtest;
+    let code = |seed: u8| {
+        let owner = licash::address::OwnerKeys::from_seed(&[seed; 32]).unwrap();
+        let payee: licash_wallet::LicashCode = eco.code.parse().unwrap();
+        licash_wallet::LicashCode {
+            network: net,
+            address: owner.address(),
+            ..payee
+        }
+        .to_string()
+    };
+    for seed in 0..licash_swaps::PER_SOURCE as u8 {
+        eco.provider()
+            .register_name(&code(seed), Some(&source))
+            .unwrap();
+    }
+    let past = eco
+        .provider()
+        .register_name(&code(200), Some(&source))
+        .unwrap_err();
+    assert_eq!(past.code, Code::Unavailable);
+    eco.provider()
+        .register_name(&code(0), Some(&source))
+        .unwrap();
+    eco.provider()
+        .register_name(&code(200), Some(&[8u8; 16]))
+        .unwrap();
+}
+
+/// A provider whose public URL has a path serves no Lightning Addresses:
+/// its codes' LNURLs only.
+#[tokio::test]
+async fn a_provider_under_a_path_serves_no_names() {
+    let eco = Eco::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let wallet = Wallet::create(
+        &dir.path().join("wallet.sqlite"),
+        &[0x51; 32],
+        ChainProfile::Core30DefaultRegtest,
+        Link(eco.net.clone()),
+    )
+    .unwrap();
+    let provider = Provider::create(wallet, Config::default())
+        .unwrap()
+        .take_donations(eco.node.clone(), TERMS, "https://swaps.test/donate")
+        .unwrap();
+    assert_eq!(provider.info().unwrap().donations.unwrap().names, None);
+    let refused = provider.register_name(&eco.code, None).unwrap_err();
+    assert_eq!(refused.code, Code::Declined);
+}

@@ -88,7 +88,8 @@ pub use bridges::{AddedBridge, BridgeRules, BridgeTopUp};
 pub use claims::{ClaimNote, ClaimSlot, FundedNote, LockClaim, OwedLock, SlotPays};
 pub use closes::ClosePayment;
 pub use code::{
-    ContractSecrets, DonationAddress, HubId, LicashCode, PaymentCode, CODE_HUBS, MAX_HUBS,
+    donation_name, ContractSecrets, DonationAddress, HubId, LicashCode, PaymentCode, CODE_HUBS,
+    MAX_HUBS,
 };
 pub use codes::{CodeActivity, CodesCollected, ExtraCode, MAX_LABEL};
 pub use coins::MAX_INPUTS;

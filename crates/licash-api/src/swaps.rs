@@ -87,6 +87,28 @@ pub const DONATE: &str = "/v1/lnurlp/{code}";
 /// its amount in millisatoshis as `?amount=`.
 pub const DONATE_CALLBACK: &str = "/v1/lnurlp/{code}/callback";
 
+/// Where a wallet registers the name of its Lightning Address of donations
+/// at a provider serving them ([`Donations::names`]): [`NameRequest`],
+/// answered [`Named`].
+pub const NAMES: &str = "/v1/names";
+/// Where a provider serves the LNURL-pay request (LUD-16) of the Lightning
+/// Address `{name}@` its [`Donations::names`], and its invoices.
+pub const NAMED: &str = "/.well-known/lnurlp/{name}";
+pub const NAMED_CALLBACK: &str = "/.well-known/lnurlp/{name}/callback";
+
+/// A wallet's code, to be paid donations at the Lightning Address of the
+/// name made of it ([`NAMES`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NameRequest {
+    pub code: String,
+}
+
+/// The name a code's Lightning Address of donations is under, registered.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Named {
+    pub name: String,
+}
+
 /// The URL of [`DONATE`] for `code` at the provider whose public URL is
 /// `base` ([`Donations::url`]).
 pub fn donation_url(base: &str, code: &str) -> String {
@@ -234,6 +256,11 @@ pub struct Donations {
     /// it holds at the payee's hub, too.
     pub min: u64,
     pub max: u64,
+    /// The domain of the Lightning Addresses of donations it serves
+    /// ([`NAMES`]), `host` or `host:port`, if it serves them: unknown to a
+    /// provider of an older version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub names: Option<String>,
 }
 
 /// What a provider takes over Lightning for a wallet that asks

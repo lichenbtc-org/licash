@@ -150,7 +150,7 @@ pub(crate) struct Receiver {
     node: Arc<dyn Node>,
     terms: DonationTerms,
     /// The provider's public URL, where payers reach it.
-    url: String,
+    pub(crate) url: String,
     /// What the operator was alerted of, once each.
     alerted: Mutex<HashSet<String>>,
 }
@@ -196,6 +196,7 @@ impl<T: Transport> Provider<T> {
             url: url.trim_end_matches('/').to_owned(),
             alerted: Mutex::default(),
         });
+        self.keep_names()?;
         Ok(self)
     }
 
@@ -214,6 +215,7 @@ impl<T: Transport> Provider<T> {
                 fee: r.terms.fee,
                 min: r.terms.min,
                 max: r.terms.max,
+                names: crate::names_domain(&r.url, self.wallet.network()),
             })
     }
 
@@ -248,6 +250,19 @@ impl<T: Transport> Provider<T> {
         &self,
         code: &str,
         msat: u64,
+        source: Option<&[u8]>,
+    ) -> Result<String, Problem> {
+        self.donate_committing(code, msat, METADATA, source).await
+    }
+
+    /// A donation as [`Provider::donate`] makes it, committing to
+    /// `metadata` as its pay request showed it: [`crate::named_metadata`]
+    /// of a Lightning Address.
+    pub async fn donate_committing(
+        &self,
+        code: &str,
+        msat: u64,
+        metadata: &str,
         source: Option<&[u8]>,
     ) -> Result<String, Problem> {
         let receiver = self.receiver()?;
@@ -304,7 +319,7 @@ impl<T: Transport> Provider<T> {
             })
             .map_err(unavailable)?
             .map_or(Ok(()), |busy| Err(unavailable(busy)))?;
-        let description = sha256::Hash::hash(METADATA.as_bytes()).to_byte_array();
+        let description = sha256::Hash::hash(metadata.as_bytes()).to_byte_array();
         let made = receiver
             .node
             .hold(
@@ -596,7 +611,7 @@ impl<T: Transport> Provider<T> {
     }
 
     /// The Licash code `text`, of the provider's network.
-    fn payee(&self, text: &str) -> Result<LicashCode, Problem> {
+    pub(crate) fn payee(&self, text: &str) -> Result<LicashCode, Problem> {
         let code: LicashCode = text
             .parse()
             .map_err(|_| Problem::invalid("not a Licash code"))?;

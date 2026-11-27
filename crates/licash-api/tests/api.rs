@@ -873,6 +873,7 @@ fn a_provider_taking_donations_says_where_payers_reach_it() {
             fee: Fee { base: 2, ppm: 5000 },
             min: 100,
             max: 1_000_000,
+            names: None,
         }),
         ..info
     };
@@ -891,6 +892,46 @@ fn a_provider_taking_donations_says_where_payers_reach_it() {
         (swaps::DONATE, swaps::DONATE_CALLBACK),
         ("/v1/lnurlp/{code}", "/v1/lnurlp/{code}/callback")
     );
+}
+
+#[test]
+fn a_provider_says_the_domain_of_the_lightning_addresses_it_serves() {
+    use licash_api::swaps;
+    use serde_json::json;
+
+    let donations = json!({"url": "https://swaps.example", "fee": {"base": 2, "ppm": 5000},
+                           "min": 100, "max": 1_000_000});
+    // As a provider of an older version answers: none.
+    let older: swaps::Donations = serde_json::from_value(donations.clone()).unwrap();
+    assert_eq!(older.names, None);
+    let serving = swaps::Donations {
+        names: Some("swaps.example".into()),
+        ..older
+    };
+    let mut expected = donations;
+    expected["names"] = json!("swaps.example");
+    assert_eq!(serde_json::to_value(&serving).unwrap(), expected);
+    assert_eq!(
+        serde_json::from_value::<swaps::Donations>(expected).unwrap(),
+        serving
+    );
+    assert_eq!(
+        (swaps::NAMES, swaps::NAMED, swaps::NAMED_CALLBACK),
+        (
+            "/v1/names",
+            "/.well-known/lnurlp/{name}",
+            "/.well-known/lnurlp/{name}/callback"
+        )
+    );
+    let asked = swaps::NameRequest {
+        code: "licash1abc".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&asked).unwrap(),
+        json!({"code": "licash1abc"})
+    );
+    let named: swaps::Named = serde_json::from_value(json!({"name": "0123456789abcdef"})).unwrap();
+    assert_eq!(named.name, "0123456789abcdef");
 }
 
 #[test]

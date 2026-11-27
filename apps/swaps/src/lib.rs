@@ -160,12 +160,19 @@ fn paths<T: Transport + 'static, C: Chain + Send + 'static>(
 /// [`swaps::DONATE`] answers the pay request of a code, at the provider's
 /// public URL, [`swaps::DONATE_CALLBACK`] a donation's invoice. Answered
 /// as LNURL asks, `{"status": "ERROR", "reason": ...}` when refused, to
-/// any origin.
+/// any origin. And the Lightning Addresses of codes (LUD-16), if it serves
+/// them ([`Provider::names_domain`]): [`swaps::NAMES`] registers a code's
+/// name, [`swaps::NAMED`] and [`swaps::NAMED_CALLBACK`] answer as the
+/// code's LNURL does, committing to the address too.
 fn lnurl<T: Transport + 'static>(provider: Arc<Provider<T>>) -> Router {
     Router::new()
         .route(swaps::DONATE, get(pay_request::<T>))
         .route(swaps::DONATE_CALLBACK, get(donate::<T>))
+        .route(swaps::NAMES, post(register_name::<T>))
+        .route(swaps::NAMED, get(named_pay_request::<T>))
+        .route(swaps::NAMED_CALLBACK, get(donate_named::<T>))
         .with_state(provider)
+        .layer(DefaultBodyLimit::max(BODY_LIMIT))
 }
 
 /// An answer of LNURL: `body`, or why not.
@@ -211,6 +218,65 @@ async fn donate<T: Transport + 'static>(
     };
     let source = source.as_ref().map(AdmissionSource::as_bytes);
     let invoice = provider.donate(&code, msat, source).await;
+    lnurl_answer(invoice.map(|pr| json!({ "pr": pr, "routes": [] })))
+}
+
+async fn register_name<T: Transport + 'static>(
+    State(provider): State<Arc<Provider<T>>>,
+    Admission(source): Admission,
+    body: Result<Json<swaps::NameRequest>, JsonRejection>,
+) -> Answer<swaps::Named> {
+    let Json(request) = body?;
+    let source = source.as_ref().map(AdmissionSource::as_bytes);
+    let name = provider
+        .register_name(&request.code, source)
+        .inspect_err(|p| {
+            tracing::debug!(code = ?p.code, message = %p.message, "name declined");
+        })?;
+    Ok(Json(swaps::Named { name }))
+}
+
+async fn named_pay_request<T: Transport + 'static>(
+    State(provider): State<Arc<Provider<T>>>,
+    Path(name): Path<String>,
+) -> Response {
+    let request = provider.named(&name).and_then(|(code, metadata)| {
+        let (min, max) = provider.donation_range(&code)?;
+        let declined = || Problem::new(Code::Declined, "the provider takes no donations");
+        let url = provider.donations().ok_or_else(declined)?.url;
+        let name = name.to_ascii_lowercase();
+        Ok(json!({
+            "tag": "payRequest",
+            "callback": format!("{}/.well-known/lnurlp/{name}/callback", url.trim_end_matches('/')),
+            "minSendable": min * 1000,
+            "maxSendable": max * 1000,
+            "metadata": metadata,
+        }))
+    });
+    lnurl_answer(request)
+}
+
+async fn donate_named<T: Transport + 'static>(
+    State(provider): State<Arc<Provider<T>>>,
+    Path(name): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+    admission: Result<Admission, licash_serve::Malformed>,
+) -> Response {
+    let source = match admission {
+        Ok(Admission(source)) => source,
+        Err(licash_serve::Malformed(problem)) => return lnurl_answer(Err(problem)),
+    };
+    let Some(msat) = query.get("amount").and_then(|a| a.parse::<u64>().ok()) else {
+        return lnurl_answer(Err(Problem::invalid("an amount in millisatoshis")));
+    };
+    let (code, metadata) = match provider.named(&name) {
+        Ok(named) => named,
+        Err(problem) => return lnurl_answer(Err(problem)),
+    };
+    let source = source.as_ref().map(AdmissionSource::as_bytes);
+    let invoice = provider
+        .donate_committing(&code, msat, &metadata, source)
+        .await;
     lnurl_answer(invoice.map(|pr| json!({ "pr": pr, "routes": [] })))
 }
 

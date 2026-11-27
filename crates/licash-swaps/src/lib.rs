@@ -47,6 +47,7 @@ mod deposits;
 mod donations;
 mod invoices;
 mod issue;
+mod names;
 mod payouts;
 mod receives;
 mod store;
@@ -82,6 +83,7 @@ pub use donations::{
 pub use invoices::MIN_SLACK;
 pub use issue::Issuer;
 use issue::{Issue, Issued};
+pub use names::{named_metadata, names_domain, MAX_NAMES};
 pub use payouts::{Chain, PayoutLimits, NO_SHOW_VSIZE, PAYOUT_ROOM};
 pub use receives::{Receipt, ReceiptState, ReceiveTerms, RECEIVE_BLOCKS, RECEIVE_EXPIRY};
 use store::{now, Store};

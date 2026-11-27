@@ -305,6 +305,16 @@ pub struct DonationAddress {
     pub info: licash_api::swaps::Info,
 }
 
+/// The name of the Lightning Address of donations to the wallet of `code`
+/// at a provider serving them ([`licash_api::swaps::NAMES`]): 16 hex digits
+/// of a hash of its text as written, so that it names that code only, and
+/// both the wallet and the provider make it.
+pub fn donation_name(code: &LicashCode) -> String {
+    use bitcoin::hashes::{sha256, Hash};
+    let named = format!("licash donation name\0{code}");
+    hex::encode(&sha256::Hash::hash(named.as_bytes()).as_byte_array()[..8])
+}
+
 impl LicashCode {
     /// The static LNURL of donations to this code's wallet through the
     /// provider whose public URL is `base` ([`licash_api::swaps::Donations`]):
@@ -677,6 +687,34 @@ impl<T: Transport> Wallet<T> {
             donations,
             info,
         })
+    }
+
+    /// Register the Lightning Address of donations to `code`, this
+    /// wallet's, at the provider at `provider` serving them under `domain`
+    /// ([`licash_api::swaps::Donations::names`]): `name@domain`, its name
+    /// [`donation_name`]. Again and again, as the provider keeps it already:
+    /// refused if it answers another name.
+    pub async fn register_donation_name(
+        &self,
+        provider: &str,
+        code: &LicashCode,
+        domain: &str,
+    ) -> Result<String, Error> {
+        let provider = crate::hub_url(provider)?;
+        let asked = licash_api::swaps::NameRequest {
+            code: code.to_string(),
+        };
+        let named: licash_api::swaps::Named = self
+            .post(&provider, licash_api::swaps::NAMES, &asked)
+            .await?;
+        let name = donation_name(code);
+        if named.name != name {
+            return Err(Error::Invalid(format!(
+                "{provider} named the address of donations {}, not {name}",
+                named.name
+            )));
+        }
+        Ok(format!("{name}@{}", domain.to_ascii_lowercase()))
     }
 
     /// The secret key of the wallet's mailbox, which opens what payers

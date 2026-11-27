@@ -1034,7 +1034,16 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             let donating = donations.terms()?;
             let provider = match (&donating, node) {
                 (Some((url, terms)), Some(node)) => {
-                    provider.take_donations(node, terms.clone(), url)?
+                    let provider = provider.take_donations(node, terms.clone(), url)?;
+                    match provider.names_domain() {
+                        Some(domain) => tracing::info!(%domain, "serving Lightning Addresses"),
+                        None => tracing::info!(
+                            %url,
+                            "no Lightning Addresses: --lnurl-url is not an https:// origin \
+                             without a path (http:// for an onion or on regtest)"
+                        ),
+                    }
+                    provider
                 }
                 (Some(_), None) => anyhow::bail!("--lnurl-url needs --lnd"),
                 (None, _) => {

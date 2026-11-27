@@ -533,6 +533,23 @@ fn the_static_lnurl_of_a_code_encodes_its_donation_url() {
     assert_eq!(code.lnurl("https://swaps.example"), lnurl);
 }
 
+#[test]
+fn the_name_of_a_codes_lightning_address_is_its_own_however_written() {
+    let code = licash(REGTEST, MAX_HUBS);
+    let name = licash_wallet::donation_name(&code);
+    // 16 hex digits: a Lightning Address's name, short.
+    assert_eq!(name.len(), 16);
+    assert!(name
+        .bytes()
+        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    // Read back from its text in upper case, as a QR code holds it: the same.
+    let upper: LicashCode = code.to_string().to_uppercase().parse().unwrap();
+    assert_eq!(licash_wallet::donation_name(&upper), name);
+    // Another code: another name.
+    let other = licash(REGTEST, 1);
+    assert_ne!(licash_wallet::donation_name(&other), name);
+}
+
 #[tokio::test]
 async fn a_code_given_out_for_donations_stays_while_it_pays_the_wallet() {
     let net = Net::new();

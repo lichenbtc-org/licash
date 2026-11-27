@@ -543,6 +543,78 @@ async fn donations_over_lnurl_answer_as_lnurl_asks() {
 }
 
 #[tokio::test]
+async fn a_codes_lightning_address_is_registered_and_answered_through_the_api() {
+    let dir = tempfile::tempdir().unwrap();
+    let wallet = Wallet::create(
+        &dir.path().join("wallet.sqlite"),
+        &[5; 32],
+        ChainProfile::Core30DefaultRegtest,
+        Offline,
+    )
+    .unwrap();
+    let code = a_code(&wallet);
+    let name = licash_wallet::donation_name(&code.parse().unwrap());
+    let provider = Provider::create(wallet, Config::default())
+        .unwrap()
+        .take_donations(
+            Arc::new(Fake::new()),
+            licash_swaps::DonationTerms::default(),
+            "https://swaps.test/",
+        )
+        .unwrap();
+    let router = licash_swaps_service::router(Arc::new(provider), Default::default());
+    let (_, info) = call(&router, swaps::SWAPS_INFO, None).await;
+    let info: serde_json::Value = serde_json::from_slice(&info).unwrap();
+    assert_eq!(info["donations"]["names"], "swaps.test", "{info}");
+    let lnurl = |path: String| {
+        let router = router.clone();
+        async move {
+            let (status, body) = call(&router, &path, None).await;
+            assert_eq!(status, StatusCode::OK);
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        }
+    };
+    // Unknown until registered.
+    let answer = lnurl(format!("/.well-known/lnurlp/{name}")).await;
+    assert_eq!(answer["status"], "ERROR", "{answer}");
+    assert!(
+        answer["reason"].as_str().unwrap().contains("no such"),
+        "{answer}"
+    );
+    let body = serde_json::to_string(&swaps::NameRequest { code: code.clone() }).unwrap();
+    let (status, named) = call(&router, swaps::NAMES, Some(&body)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&named)
+    );
+    let named: swaps::Named = serde_json::from_slice(&named).unwrap();
+    assert_eq!(named.name, name);
+    // Answered as the code's LNURL is: here, holding nothing at its hub.
+    for path in [
+        format!("/.well-known/lnurlp/{}", name.to_uppercase()),
+        format!("/.well-known/lnurlp/{name}/callback?amount=100000"),
+    ] {
+        let answer = lnurl(path).await;
+        assert!(
+            answer["reason"]
+                .as_str()
+                .unwrap()
+                .contains("holds too little"),
+            "{answer}"
+        );
+    }
+    // Not a code.
+    let body = serde_json::to_string(&swaps::NameRequest {
+        code: "nonsense".into(),
+    })
+    .unwrap();
+    let (status, _) = call(&router, swaps::NAMES, Some(&body)).await;
+    assert!(status.is_client_error(), "{status}");
+}
+
+#[tokio::test]
 async fn receipts_over_lightning_are_asked_and_followed_through_the_api() {
     let dir = tempfile::tempdir().unwrap();
     let wallet = Wallet::create(
