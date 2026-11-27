@@ -326,6 +326,10 @@ impl Openings {
                         .base()
                         .ok_or_else(|| Refused::unavailable("F before Base"))?;
                     self.room_for(&id, base_cycles(base))?;
+                    let p = base.parts();
+                    let hers = u64::from(p.graph.deposit_units) * p.graph.unit_sats;
+                    let lent = u64::from(p.cap).saturating_sub(hers);
+                    self.lends(&id, u32::try_from(lent).unwrap_or(u32::MAX))?;
                     let funded = self.fund(deposit, &coin, outputs).await;
                     let (funding, prevouts) = funded.map_err(Refused::unavailable)?;
                     let coins: Vec<OutPoint> = funding

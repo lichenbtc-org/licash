@@ -315,6 +315,20 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The states of the openings but `except` the hub may have locked
+    /// its own bitcoin in, the mock authority's too: funded or signed, of
+    /// this format, not given up nor ended. What it lent them counts
+    /// against what it lends ([`super::terms::Lending`]).
+    pub fn lent_to(&self, except: &[u8; 32]) -> Result<Vec<Vec<u8>>> {
+        let mut stmt = self.0.prepare(
+            "SELECT state FROM openings
+             WHERE (irrevocable = 1 OR length(coins) > 0) AND abandoned = 0
+               AND format = ?1 AND id != ?2 AND id NOT IN (SELECT id FROM opening_ended)",
+        )?;
+        let rows = stmt.query_map(params![FORMAT, except], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Opening `id`'s contract ended at block `height`: nothing of the
     /// hub's left in it to play.
     pub fn end(&self, id: &[u8; 32], height: u32) -> Result<()> {

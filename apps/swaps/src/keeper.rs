@@ -727,12 +727,8 @@ impl<T: Transport + 'static> Keeper<T> {
                 .map(|b| b.available)
                 .sum();
             // As it last said, else as the wallet keeps it.
-            let range = (self.ranges.get(&url).copied()).or_else(|| {
-                stored
-                    .get(&url)
-                    .and_then(|i| i.contracts)
-                    .and_then(|c| c.range)
-            });
+            let range = (self.ranges.get(&url).copied())
+                .or_else(|| stored.get(&url).and_then(|i| i.contracts).map(|c| c.range));
             hubs.push(Hub {
                 exposure: self.provider.exposure(&url)?,
                 sizes: range.and_then(|r| Sizes::of(r, largest)),
@@ -796,7 +792,7 @@ impl<T: Transport + 'static> Keeper<T> {
         match wallet.hub_info(&hub.url).await {
             Ok(info) => {
                 self.answered.insert(hub.url.clone(), now);
-                match info.contracts.and_then(|c| c.range) {
+                match info.contracts.map(|c| c.range) {
                     Some(range) => self.ranges.insert(hub.url.clone(), range),
                     None => self.ranges.remove(&hub.url),
                 };
@@ -959,20 +955,16 @@ impl<T: Transport + 'static> Keeper<T> {
         }
         let info = wallet.hub_info(hub).await?;
         let offered = (info.contracts).ok_or_else(|| anyhow!("{hub} opens no contracts now"))?;
-        let (blocks, cap) = match offered.range {
-            Some(range) => {
-                let largest = holder::coins(wallet, &self.wallet_file)?
-                    .first()
-                    .map_or(0, |c| c.value);
-                let sizes = Sizes::of(range, largest)
-                    .ok_or_else(|| anyhow!("no free coin pays for a contract at {hub}"))?;
-                (
-                    range.max_blocks,
-                    Some(cap.clamp(sizes.least, sizes.most.max(sizes.least))),
-                )
-            }
-            None => (offered.blocks, None),
-        };
+        let range = offered.range;
+        let largest = holder::coins(wallet, &self.wallet_file)?
+            .first()
+            .map_or(0, |c| c.value);
+        let sizes = Sizes::of(range, largest)
+            .ok_or_else(|| anyhow!("no free coin pays for a contract at {hub}"))?;
+        let (blocks, cap) = (
+            range.max_blocks,
+            Some(cap.clamp(sizes.least, sizes.most.max(sizes.least))),
+        );
         let ask = Ask {
             blocks,
             max_price,

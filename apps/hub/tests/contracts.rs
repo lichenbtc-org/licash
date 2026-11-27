@@ -82,6 +82,26 @@ fn deposits_for(
 }
 
 /// As [`hub`], holders choosing their terms within `range`, if any.
+/// The terms a test's hub offers: `range`, else a hub's by default but at
+/// no interest, as the fixed terms tests opened on before hubs offered
+/// none: a contract's price its reserve and the hub's fee alone.
+fn terms(range: Option<Range>) -> Range {
+    range.unwrap_or(Range {
+        ppm_year: 0,
+        ..licash_contracts::hub::terms::RANGE
+    })
+}
+
+/// A test's hub lends all of any contract its wallet funds, as hubs did
+/// before their operators bounded what they lend: holders fund their
+/// part of a contract, the hub the rest.
+fn lends_all(openings: &Openings) {
+    openings.lend(licash_contracts::hub::terms::Lending {
+        per_contract: u32::MAX,
+        total: u64::MAX,
+    });
+}
+
 async fn hub_with(rt: &Regtest, dir: &Path, range: Option<Range>) -> Result<(String, Source)> {
     let (url, source, _) = hub_serving(rt, dir, range).await?;
     Ok((url, source))
@@ -132,9 +152,10 @@ async fn serve(
         Some(rate) => estimating(source.clone(), rate).await?,
         None => source.clone(),
     };
-    let openings = Openings::with_wallet(dir, chain, source.clone(), keyset, range);
+    let openings = Openings::with_wallet(dir, chain, source.clone(), keyset, terms(range));
     let openings = openings.await?;
     openings.charge_opening(OPENING_FEE);
+    lends_all(&openings);
     witnessed(&openings, &hub).await?;
     let deposits = deposits_for(&hub, &source, dir, &openings)?;
     // An opening takes a deposit of the hub's for her reserve, which it
@@ -388,21 +409,23 @@ async fn a_hub_learns_what_its_contracts_wallet_holds() -> Result<()> {
     let source: Source = url.parse()?;
     let keyset = hub.info().keysets[0].clone();
     let range = Range {
+        min_cap: licash_contracts::hub::terms::CAP,
         max_cap: licash_contracts::hub::terms::MAX_CAP,
         max_blocks: 5_000,
         ppm_year: 10_000,
         ppm_year_funded: 0,
     };
-    let openings =
-        Openings::with_wallet(dir.path(), source.clone(), source, keyset, Some(range)).await?;
-    // Its confirmed balance, as the node's wallet says it now.
+    let openings = Openings::with_wallet(dir.path(), source.clone(), source, keyset, range).await?;
+    lends_all(&openings);
+    // Its confirmed balance, as the node's wallet says it now: all of it
+    // lent but its reserve and margin, 150 000 sat on regtest.
     let balance = openings.learn_funds().await?;
-    ensure!(balance > 0, "{balance}");
-    let fundable = licash_contracts::hub::terms::fundable(balance).context("none funded")?;
-    let advertised = openings.advertise().range.context("no range")?.max_cap;
+    ensure!(balance > 150_000, "{balance}");
+    let lends = openings.advertise().funds.context("no lending said")?;
+    let most = u64::from(licash_contracts::hub::terms::MAX_CAP);
     ensure!(
-        advertised == fundable,
-        "{advertised} advertised, {fundable} funded"
+        u64::from(lends) == (balance - 150_000).min(most),
+        "{lends} lent of {balance}"
     );
     Ok(())
 }
@@ -638,7 +661,8 @@ async fn a_wallet_opens_contracts_at_a_hub_and_sees_them_confirm() -> Result<()>
     )?;
     let info = wallet.add_hub(&url).await?;
     let offered = info.contracts.context("no contracts in the hub's info")?;
-    ensure!(offered.mock && offered.cap == 131_071 && offered.price == 28_000);
+    let range = offered.range;
+    ensure!(offered.mock && range.min_cap == 131_071 && range.reserve + range.fee == 28_000);
     // With none open and its wallet funded, its info says it has room
     // for one: what a wallet chooses a hub by before paying a deposit.
     ensure!(
@@ -782,7 +806,8 @@ async fn a_hub_opens_contracts_on_its_newest_lock_checkpoint() -> Result<()> {
     licash_hub_service::open_on_lock_checkpoints(&openings, hub.clone());
     let chain = Node(source.clone());
     // Following no chain yet: no offer.
-    ensure!(openings.offer(None, 0).await.is_err());
+    let cap = licash_contracts::hub::terms::CAP;
+    ensure!(openings.offer(cap, 1_000, 0).await.is_err());
     // Following one, it proves its identity: a wallet adds it.
     while !watch::step(&hub, &source).await? {}
     let seed = [7; 32];
@@ -794,7 +819,7 @@ async fn a_hub_opens_contracts_on_its_newest_lock_checkpoint() -> Result<()> {
     while !watch::step(&hub, &source).await? {}
     ensure!(newest(&hub) == Some(first.commitment()));
     let tip = rt.height()?;
-    let offer = openings.offer(None, 0).await;
+    let offer = openings.offer(cap, 1_000, 0).await;
     let offer = offer.map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let at = offer.quote.chain.checkpoint.clone();
     let bury = Policy::default().timing.bury;
@@ -813,6 +838,7 @@ async fn a_wallet_opens_a_contract_of_terms_it_chose_on_a_small_coin() -> Result
     let rt = Regtest::start_standard()?;
     let dir = tempfile::tempdir()?;
     let range = Range {
+        min_cap: licash_contracts::hub::terms::CAP,
         max_cap: 50_000_000,
         max_blocks: 5_000,
         ppm_year: 10_000,
@@ -830,32 +856,37 @@ async fn a_wallet_opens_a_contract_of_terms_it_chose_on_a_small_coin() -> Result
         Http::new(None)?,
     )?;
 
-    // Its fixed terms, as apps installed open on, and the range beside.
+    // The range she chooses in.
     let info = wallet.add_hub(&url).await?;
     let offered = info.contracts.context("no contracts in the hub's info")?;
-    let chosen = offered.range.context("no range in the hub's info")?;
+    let chosen = offered.range;
     // No bound on the cap by her coin, announced as none.
     ensure!((chosen.min_blocks, chosen.max_blocks, chosen.per_coin) == (200, 5_000, u32::MAX));
-    // Its fixed terms priced by the same formula: 1% a year of their cap.
-    let fixed_price = chosen.price(131_071, 1_000, 0);
-    ensure!(fixed_price == 28_000 + 24, "{fixed_price}");
-    ensure!(offered.cap == 131_071 && offered.price == fixed_price && offered.blocks == 1_000);
+    ensure!(chosen.min_cap == 131_071);
+    // The least cap over 1 000 blocks: 1% a year of it over the fee.
+    let least_price = chosen.price(131_071, 1_000, 0);
+    ensure!(least_price == 28_000 + 24, "{least_price}");
     // 2^21 - 1 sat over 2 000 blocks: 1% a year of it over the fixed fee.
     let price = chosen.price(2_097_151, 2_000, 0);
     ensure!(price == 28_000 + 798, "{price}");
 
     // Asked of terms she chose: those exactly, a graph as wide as them.
-    let offer = holder::offer(&wallet, &url, Some((2_097_151, 2_000)), 0).await?;
+    let offer = holder::offer(&wallet, &url, (2_097_151, 2_000), 0).await?;
     ensure!(offer.quote.cap == 2_097_151 && offer.bounds.lock == 2_000);
     ensure!(offer.quote.graph.bits == 21 && offer.price() == price);
-    // Out of its range, or half asked: refused.
-    let refused = holder::offer(&wallet, &url, Some((131_071, 199)), 0).await;
+    // Out of its range, or half asked: refused. Asked of no terms:
+    // refused, the hub quoting none of its own.
+    let refused = holder::offer(&wallet, &url, (131_071, 199), 0).await;
     let refused = refused.err().context("offered 199 blocks")?;
     ensure!(format!("{refused:#}").contains("status 400"), "{refused:#}");
     let half = format!("{url}{}?cap=5000", licash_contracts::QUOTE);
     let half = wallet.transport().request(&half, None).await;
     let half = half.map_err(anyhow::Error::msg)?;
     ensure!(half.status == 400, "{}", half.status);
+    let none = format!("{url}{}", licash_contracts::QUOTE);
+    let none = wallet.transport().request(&none, None).await;
+    let none = none.map_err(anyhow::Error::msg)?;
+    ensure!(none.status == 400, "{}", none.status);
 
     // Two small coins, each paying a price and her part of a contract in
     // the notes a claim names.
@@ -890,11 +921,10 @@ async fn a_wallet_opens_a_contract_of_terms_it_chose_on_a_small_coin() -> Result
     ensure!(first.price <= price);
     ensure!((first.close_height, first.assert_height) == (tip + 2_000, tip + 1_834));
 
-    // Of the fixed terms beside it, on her other coin, as an app
-    // installed asks.
+    // The least cap beside it, on her other coin, asking none.
     let fixed = Ask {
         blocks: 300,
-        max_price: fixed_price,
+        max_price: least_price,
         cap: None,
         inbound: 0,
         deposit: None,
@@ -2123,6 +2153,7 @@ async fn with_notes<T: licash_wallet::Transport>(seed: [u8; 32], transport: T) -
     let dir = tempfile::tempdir()?;
     let at = dir.path().join("hub");
     let range = Range {
+        min_cap: licash_contracts::hub::terms::CAP,
         max_cap: licash_contracts::hub::terms::MAX_CAP,
         max_blocks: 5_000,
         ppm_year: 10_000,
@@ -2707,9 +2738,10 @@ async fn hub_answering_following(
         false => outage::reached(source.clone()).await?,
     };
     let wallet = outage::reached(source.clone()).await?;
-    let openings = Openings::with_wallet(dir, chain, wallet, keyset, range);
+    let openings = Openings::with_wallet(dir, chain, wallet, keyset, terms(range));
     let openings = openings.await?;
     openings.charge_opening(OPENING_FEE);
+    lends_all(&openings);
     witnessed(&openings, &hub).await?;
     // Its ledger against holders' claims, as the hub service's.
     licash_hub_service::answer_from(&openings, hub.clone());
@@ -3020,6 +3052,7 @@ async fn a_holder_recovers_her_cap_of_notes_beyond_it_from_a_hub_that_answered()
     let dir = tempfile::tempdir()?;
     let at = dir.path().join("hub");
     let range = Range {
+        min_cap: licash_contracts::hub::terms::CAP,
         max_cap: 50_000_000,
         max_blocks: 5_000,
         ppm_year: 10_000,
@@ -3273,6 +3306,7 @@ struct StaleCopy<T: licash_wallet::Transport> {
 
 /// The terms a [`StaleCopy`]'s holder chooses within.
 const STALE_RANGE: Range = Range {
+    min_cap: licash_contracts::hub::terms::CAP,
     max_cap: 50_000_000,
     max_blocks: 5_000,
     ppm_year: 10_000,
@@ -3604,6 +3638,7 @@ async fn a_force_close_claims_an_unsettled_locks_refund_once_expired_at_depth() 
     let dir = tempfile::tempdir()?;
     let at = dir.path().join("hub");
     let range = Range {
+        min_cap: licash_contracts::hub::terms::CAP,
         max_cap: 50_000_000,
         max_blocks: 5_000,
         ppm_year: 10_000,
@@ -3762,6 +3797,7 @@ async fn uncertified_refund(
     let dir = tempfile::tempdir()?;
     let at = dir.path().join("hub");
     let range = Range {
+        min_cap: licash_contracts::hub::terms::CAP,
         max_cap: 50_000_000,
         max_blocks: 5_000,
         ppm_year: 10_000,
@@ -3955,6 +3991,7 @@ async fn a_force_close_claims_the_notes_of_a_payment_its_hub_never_released() ->
     let dir = tempfile::tempdir()?;
     let at = dir.path().join("hub");
     let range = Range {
+        min_cap: licash_contracts::hub::terms::CAP,
         max_cap: 50_000_000,
         max_blocks: 5_000,
         ppm_year: 10_000,
@@ -4072,6 +4109,7 @@ async fn a_force_close_claims_a_lock_paying_her_once_activated_at_depth() -> Res
     let dir = tempfile::tempdir()?;
     let at = dir.path().join("hub");
     let range = Range {
+        min_cap: licash_contracts::hub::terms::CAP,
         max_cap: 50_000_000,
         max_blocks: 5_000,
         ppm_year: 10_000,
@@ -4229,6 +4267,7 @@ async fn an_activation_whose_block_leaves_the_chain_is_found_again_and_claimed()
     let dir = tempfile::tempdir()?;
     let at = dir.path().join("hub");
     let range = Range {
+        min_cap: licash_contracts::hub::terms::CAP,
         max_cap: 50_000_000,
         max_blocks: 5_000,
         ppm_year: 10_000,
@@ -5754,9 +5793,9 @@ async fn restarted(s: &Stale) -> Result<Arc<Openings>> {
     let source: Source = url.parse()?;
     let keyset = s.hub.info().keysets[0].clone();
     let dir = s._dir.path().join("hub");
-    let openings =
-        Openings::with_wallet(&dir, source.clone(), source, keyset, Some(STALE_RANGE)).await?;
+    let openings = Openings::with_wallet(&dir, source.clone(), source, keyset, STALE_RANGE).await?;
     openings.charge_opening(OPENING_FEE);
+    lends_all(&openings);
     witnessed(&openings, &s.hub).await?;
     licash_hub_service::answer_from(&openings, s.hub.clone());
     Ok(openings)
@@ -6324,9 +6363,9 @@ async fn restored(rt: &Regtest, dir: &Path) -> Result<(Arc<Hub>, Arc<Openings>)>
     );
     let source: Source = url.parse()?;
     let keyset = hub.info().keysets[0].clone();
-    let openings =
-        Openings::with_wallet(dir, source.clone(), source, keyset, Some(STALE_RANGE)).await?;
+    let openings = Openings::with_wallet(dir, source.clone(), source, keyset, STALE_RANGE).await?;
     openings.charge_opening(OPENING_FEE);
+    lends_all(&openings);
     witnessed(&openings, &hub).await?;
     licash_hub_service::answer_from(&openings, hub.clone());
     Ok((hub, openings))
@@ -6471,9 +6510,9 @@ async fn copy_answering(rt: &Regtest, dir: &Path, hub: Arc<Hub>) -> Result<Arc<O
     );
     let source: Source = url.parse()?;
     let keyset = hub.info().keysets[0].clone();
-    let openings =
-        Openings::with_wallet(dir, source.clone(), source, keyset, Some(STALE_RANGE)).await?;
+    let openings = Openings::with_wallet(dir, source.clone(), source, keyset, STALE_RANGE).await?;
     openings.charge_opening(OPENING_FEE);
+    lends_all(&openings);
     witnessed_alike(&openings, &hub).await?;
     licash_hub_service::answer_from(&openings, hub);
     Ok(openings)
@@ -7186,12 +7225,13 @@ async fn hub_taking_deposits(
     let source: Source = url.parse()?;
     let keyset = hub.info().keysets[0].clone();
     let range = Range {
+        min_cap: licash_contracts::hub::terms::CAP,
         max_cap: 50_000_000,
         max_blocks: 5_000,
         ppm_year: 10_000,
         ppm_year_funded: 0,
     };
-    let openings = Openings::with_wallet(dir, source.clone(), source.clone(), keyset, Some(range));
+    let openings = Openings::with_wallet(dir, source.clone(), source.clone(), keyset, range);
     let config = deposit::Config {
         max: 2_000_000,
         ..deposit::Config::new(bitcoin::ScriptBuf::new_op_return([]))
@@ -7202,6 +7242,7 @@ async fn hub_taking_deposits(
     let deposits = Arc::new(deposits);
     let openings = openings.await?;
     openings.charge_opening(OPENING_FEE);
+    lends_all(&openings);
     witnessed(&openings, &hub).await?;
     licash_hub_service::close_with_deposits(&openings, deposits.clone());
     // On its lock checkpoints, issuing her funded notes and answering
@@ -7261,11 +7302,12 @@ async fn a_holder_funds_part_of_her_contract_and_is_issued_its_notes_once_f_is_b
     // Her coin is spent whole: a contract of her part, what the price leaves
     // of it, and of what the hub adds to make a cap, its interest on that
     // only.
-    let range = (info.contracts.and_then(|c| c.range)).context("no range")?;
-    let quote = holder::offer(&wallet, &url, None, 0).await?;
+    let contracts = info.contracts.context("no contracts")?;
+    let range = contracts.range;
+    let quote = holder::least_offer(&wallet, &url, &range, 300).await?;
     let (denominations, notes) = holder::funding_notes(&quote.quote);
     let fitted = holder::fit(
-        &holder::Pricing::Range(&range),
+        &holder::Pricing::of(&contracts),
         300,
         1_000_000,
         330,
@@ -7432,6 +7474,7 @@ async fn her_exit_needs_consent_then_forces_closed_what_it_could_not_pay_out() -
     let dir = tempfile::tempdir()?;
     let at = dir.path().join("hub");
     let range = Range {
+        min_cap: licash_contracts::hub::terms::CAP,
         max_cap: 50_000_000,
         max_blocks: 5_000,
         ppm_year: 10_000,
@@ -7523,6 +7566,7 @@ async fn her_exit_tries_to_pay_out_before_forcing_closed() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let at = dir.path().join("hub");
     let range = Range {
+        min_cap: licash_contracts::hub::terms::CAP,
         max_cap: 50_000_000,
         max_blocks: 5_000,
         ppm_year: 10_000,

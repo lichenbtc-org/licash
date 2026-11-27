@@ -208,8 +208,8 @@ pub struct Openings {
     folds: Mutex<HashMap<[u8; 32], dispute::PendingFold>>,
     /// The responder's health, told the operator as it changes.
     vigil: Mutex<vigil::Vigil>,
-    /// What the node's wallet last said it holds, in sat: the most it
-    /// funds an F with ([`Timing::fundable`]). None until it says.
+    /// What the node's wallet last said it holds, in sat: what it lends
+    /// from ([`Timing::lendable`]). None until it says.
     funds: Mutex<Option<u64>>,
     /// Whom the hub writes each one-time answer to before it signs it
     /// ([`Openings::witnessed_by`]): until told, it signs no contract.
@@ -372,14 +372,14 @@ impl Openings {
     /// wallet of the node `source` names (its JSON-RPC), as
     /// [`Openings::with_wallet`].
     pub async fn new(data: &Path, source: Source, keyset: Keyset) -> Result<Arc<Self>> {
-        Self::with_wallet(data, source.clone(), source, keyset, None).await
+        Self::with_wallet(data, source.clone(), source, keyset, terms::RANGE).await
     }
 
     /// The openings in `data` on the chain `source` follows, opened under
     /// `keyset` and funded by the node's wallet `wallet` names (its
     /// JSON-RPC, as `http://host:port/wallet/NAME`), which may be another
     /// node's on the same network. Holders choose their terms within
-    /// `range`, if any, else open on its fixed ones. Refused on a network
+    /// `range`. Refused on a network
     /// the hub has no terms or programs for: [`Timing::of`],
     /// [`crate::trust`].
     pub async fn with_wallet(
@@ -387,7 +387,7 @@ impl Openings {
         source: Source,
         wallet: Source,
         keyset: Keyset,
-        range: Option<Range>,
+        range: Range,
     ) -> Result<Arc<Self>> {
         let profile: ChainProfile = source.profile().await?;
         let trust = crate::trust(profile)?;
@@ -593,6 +593,14 @@ impl Openings {
         Ok(())
     }
 
+    /// Lend holders as much as `lending` says, of the contracts opening
+    /// from now on ([`Timing::with_lending`]): none but what rounds a
+    /// holder's part up to a cap unless told.
+    pub fn lend(&self, lending: terms::Lending) {
+        let mut timing = self.timing.write().unwrap_or_else(|e| e.into_inner());
+        *timing = timing.with_lending(lending);
+    }
+
     /// Quote graphs that carry claims in nulldata outputs from now on
     /// ([`Timing::with_nulldata`]), not in leaf envelopes: those open
     /// already keep theirs.
@@ -711,23 +719,17 @@ impl Openings {
     /// The hub's offer now, checkpointed at the block the ledger would
     /// take as its newest lock checkpoint ([`Openings::checkpoints_with`]),
     /// kept as one once a contract opens on it, else at its tip: its
-    /// quote of `cap` sat over `blocks` she chose, if within its terms,
-    /// else its fixed one; `funded` sat of it hers, the rest the hub's.
-    /// Unavailable while it admits no new opening.
-    pub async fn offer(&self, chosen: Option<(u32, u32)>, funded: u32) -> Result<Offer, Refused> {
-        let (cap, blocks) = chosen.unwrap_or((terms::CAP, self.timing().lock()));
+    /// quote of `cap` sat over `blocks` she chose, within its terms,
+    /// `funded` sat of it hers, the rest lent by the hub. Unavailable
+    /// while it admits no new opening, or lends less now.
+    pub async fn offer(&self, cap: u32, blocks: u32, funded: u32) -> Result<Offer, Refused> {
         self.timing().allows(cap, blocks).map_err(Refused::bad)?;
         if funded > cap {
             return Err(Refused::bad(format!(
                 "{funded} sat funded, more than the {cap} sat contract"
             )));
         }
-        let most = self.most_funded(terms::MAX_CAP);
-        if cap - funded > most {
-            return Err(Refused::unavailable(format!(
-                "the hub's wallet funds {most} sat of a contract at most now"
-            )));
-        }
+        self.lends(&[0; 32], cap - funded)?;
         // Unavailable now if an opening on it would be (503): she waits
         // before asking for a deposit for her reserve, of which a coin has
         // only so many attempts ([`licash_wallet::CLOSE_ATTEMPTS`]).
@@ -743,15 +745,14 @@ impl Openings {
         Ok(Offer { quote, bounds })
     }
 
-    /// What the hub's info says of its contracts: its fixed terms, as
-    /// apps installed open on, and those holders may choose, if any.
-    /// Its range's largest cap, as much as its wallet funds now; its
-    /// prices as surcharged now, at the highest step once full or if its
-    /// load is unknown. And whether a wallet finds room there now, to
-    /// choose a hub by before paying a deposit: what its wallet funds
-    /// (`funds`), of the caps it offers and no more of its balance than
-    /// those tell, and whether a new opening is refused now (`full`), as
-    /// `run::admits` and `Openings::step_now` refuse one.
+    /// What the hub's info says of its contracts: the terms holders
+    /// choose among, its prices as surcharged now, at the highest step
+    /// once full or if its load is unknown. And whether a wallet finds
+    /// room there now, to choose a hub by before paying a deposit: what it
+    /// lends of one contract (`funds`), of the caps it offers and no more
+    /// of its balance than those tell, and whether a new opening is
+    /// refused now (`full`), as `run::admits` and `Openings::step_now`
+    /// refuse one, or its wallet holds too little for its reserve.
     pub fn advertise(&self) -> licash_api::Contracts {
         let step = match self.load() {
             Ok(load) => load.step,
@@ -760,23 +761,17 @@ impl Openings {
                 None
             }
         };
-        let full = step.is_none() || run::admits(&self.store()).is_err();
-        let timing = self.timing().at_step(step.unwrap_or(terms::MAX_STEP));
-        let offered = timing.range();
-        let most = offered.map_or(terms::CAP, |r| r.max_cap);
-        let known = self.funds().is_some();
-        let range = offered.map(|mut r| {
-            r.max_cap = self.most_funded(r.max_cap).max(r.min_cap);
-            r
+        let lends = self.lendable(&[0; 32]).unwrap_or_else(|e| {
+            tracing::warn!("what the hub lends: {e:#}");
+            None
         });
+        let full = step.is_none() || lends.is_none() || run::admits(&self.store()).is_err();
+        let timing = self.timing().at_step(step.unwrap_or(terms::MAX_STEP));
+        let range = timing.range();
         licash_api::Contracts {
-            cap: terms::CAP,
-            price: timing.price(terms::CAP, timing.lock(), 0),
-            reserve: terms::RESERVE_ALICE,
-            blocks: timing.lock(),
             mock: self.trust.mock,
             range,
-            funds: known.then(|| self.most_funded(most)),
+            funds: Some(lends.unwrap_or(0).min(range.max_cap)),
             full,
         }
     }
@@ -816,12 +811,32 @@ impl Openings {
         Ok(coins)
     }
 
-    /// `most`, or less if the node's wallet, as it last said, funds no F
-    /// of a cap so large: none if it funds none. As `most` if not known.
-    fn most_funded(&self, most: u32) -> u32 {
-        match self.funds() {
-            Some(balance) => self.timing().fundable(balance).unwrap_or(0).min(most),
-            None => most,
+    /// The most the hub lends of one more contract's cap now, besides
+    /// opening `except`'s ([`Timing::lendable`]): what it lent its other
+    /// live contracts counted, and its wallet's balance as it last said.
+    /// None if that is too little for its reserve.
+    fn lendable(&self, except: &[u8; 32]) -> Result<Option<u32>> {
+        let mut lent = 0u64;
+        for state in self.store().lent_to(except)? {
+            let peek = Hub::peek(&state).context("a contract the hub lent to is unread")?;
+            let p = peek.base.parts();
+            let funded = u64::from(p.graph.deposit_units) * p.graph.unit_sats;
+            lent = lent.saturating_add(u64::from(p.cap).saturating_sub(funded));
+        }
+        Ok(self.timing().lendable(self.funds(), lent))
+    }
+
+    /// Refused 503 unless the hub lends `asked` sat of one more contract's
+    /// cap now, besides opening `except`'s ([`Openings::lendable`]).
+    fn lends(&self, except: &[u8; 32], asked: u32) -> Result<(), Refused> {
+        match self.lendable(except).map_err(Refused::unavailable)? {
+            Some(most) if asked <= most => Ok(()),
+            Some(most) => Err(Refused::unavailable(format!(
+                "the hub lends {most} sat of a contract at most now, not {asked}: fund more of it"
+            ))),
+            None => Err(Refused::unavailable(
+                "the hub's wallet holds too little for its reserve in another contract: later",
+            )),
         }
     }
 
@@ -843,11 +858,14 @@ impl Openings {
             .unwrap_or_else(PoisonError::into_inner)
             .replace(balance);
         let timing = self.timing();
-        let cap = timing.fundable(balance);
-        if before.map(|b| timing.fundable(b)) != Some(cap) {
-            match cap {
-                Some(cap) => tracing::info!(balance, cap, "the contracts' wallet funds caps up to"),
-                None => tracing::warn!(balance, "the contracts' wallet funds no contract"),
+        let lends = timing.lendable(Some(balance), 0);
+        if before.map(|b| timing.lendable(Some(b), 0)) != Some(lends) {
+            match lends {
+                Some(sat) => tracing::info!(balance, sat, "the contracts' wallet lends up to"),
+                None => tracing::warn!(
+                    balance,
+                    "the contracts' wallet holds too little for a reserve"
+                ),
             }
         }
         Ok(balance)
@@ -1280,8 +1298,8 @@ impl IntoResponse for Answer {
     }
 }
 
-/// The hub's quote, of the terms she chose (`?cap=SAT&blocks=N`, both or
-/// neither), else its fixed one, `funded=SAT` of it hers if asked.
+/// The hub's quote, of the terms she chose (`?cap=SAT&blocks=N`),
+/// `funded=SAT` of it hers if asked.
 async fn quote(
     State(openings): State<Arc<Openings>>,
     Query(asked): Query<HashMap<String, String>>,
@@ -1292,13 +1310,13 @@ async fn quote(
             .transpose()
             .map_err(|e| Refused::bad(format!("{name}: {e}")))
     };
-    let chosen = match (number("cap")?, number("blocks")?) {
-        (Some(cap), Some(blocks)) => Some((cap, blocks)),
-        (None, None) => None,
-        _ => return Err(Refused::bad("a cap and blocks, both or neither")),
+    let (Some(cap), Some(blocks)) = (number("cap")?, number("blocks")?) else {
+        return Err(Refused::bad(
+            "a cap and blocks: the hub quotes the terms chosen",
+        ));
     };
     let funded = number("funded")?.unwrap_or(0);
-    Ok(openings.offer(chosen, funded).await?.encode())
+    Ok(openings.offer(cap, blocks, funded).await?.encode())
 }
 
 async fn funded(
@@ -1587,7 +1605,7 @@ mod tests {
             payout: std::sync::OnceLock::new(),
             keyset,
             trust: crate::trust(profile).unwrap(),
-            timing: std::sync::RwLock::new(Timing::of(profile, None).unwrap()),
+            timing: std::sync::RwLock::new(Timing::of(profile, terms::RANGE).unwrap()),
             busy: Mutex::new(HashSet::new()),
             heavy: Arc::new(tokio::sync::Semaphore::new(HEAVY)),
             funding: tokio::sync::Mutex::new(()),
@@ -1662,71 +1680,69 @@ mod tests {
         assert!(!openings.newly_failing(&b, "no node"));
     }
 
+    /// What it lends of one contract now is said beside its range, for a
+    /// wallet to fit its coin to before paying a deposit: none by default
+    /// but what rounds a holder's part up to a cap; as much as its
+    /// operator lets it, less what it lent its live contracts, and no more
+    /// than its wallet holds past its reserve or than its largest cap. Its
+    /// range is the operator's whatever its wallet holds: a holder funds
+    /// her own part. Full once its wallet holds too little for its reserve.
     #[test]
-    fn its_range_is_as_large_as_its_wallet_funds() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut openings = test_openings(dir.path());
-        let range = Range {
-            max_cap: 100_000_000,
-            max_blocks: 52_560,
-            ppm_year: 10_000,
-            ppm_year_funded: 0,
-        };
-        *openings.timing.get_mut().unwrap() =
-            Timing::of(ChainProfile::Core30DefaultRegtest, Some(range)).unwrap();
-        let max = |o: &Openings| o.advertise().range.unwrap().max_cap;
-        // Not known yet: as the operator set it.
-        assert_eq!(max(&openings), 100_000_000);
-        // All of its balance but its reserve and margin, 150 000 sat.
-        *openings.funds.lock().unwrap() = Some(50_000_000);
-        assert_eq!(max(&openings), 49_850_000);
-        *openings.funds.lock().unwrap() = Some(1_000_000);
-        assert_eq!(max(&openings), 850_000);
-        // None funded: its least, and opening one is refused.
-        *openings.funds.lock().unwrap() = Some(200_000);
-        assert_eq!(max(&openings), terms::CAP);
-        assert_eq!(openings.most_funded(terms::CAP), 0);
-    }
-
-    /// What its wallet funds now is said beside its range, for a wallet to
-    /// tell a hub with no room before paying a deposit: unknown until
-    /// asked, none once short of the least, and never more of its balance
-    /// than the largest cap it offers tells.
-    #[test]
-    fn its_info_says_what_its_wallet_funds_now_and_no_more_than_it_offers() {
+    fn its_info_says_what_it_lends_now_and_no_more_than_it_offers() {
         use licash_api::Room;
         let dir = tempfile::tempdir().unwrap();
-        let mut openings = test_openings(dir.path());
-        // Fixed terms only: all of its one cap, or none.
-        assert_eq!(openings.advertise().funds, None);
-        assert_eq!(openings.advertise().room(), Room::Open);
-        *openings.funds.lock().unwrap() = Some(10_000_000);
-        assert_eq!(openings.advertise().funds, Some(terms::CAP));
-        *openings.funds.lock().unwrap() = Some(200_000);
-        assert_eq!(openings.advertise().funds, Some(0));
-        assert_eq!(openings.advertise().room(), Room::Unfunded);
-
-        let range = Range {
-            max_cap: 100_000_000,
-            max_blocks: 52_560,
-            ppm_year: 10_000,
-            ppm_year_funded: 0,
+        let openings = test_openings(dir.path());
+        let said = |o: &Openings| {
+            let c = o.advertise();
+            (c.funds, c.room(), c.range.max_cap)
         };
-        *openings.timing.get_mut().unwrap() =
-            Timing::of(ChainProfile::Core30DefaultRegtest, Some(range)).unwrap();
-        *openings.funds.lock().unwrap() = None;
-        let said = |o: &Openings| (o.advertise().funds, o.advertise().room());
-        assert_eq!(said(&openings), (None, Room::Open));
-        *openings.funds.lock().unwrap() = Some(200_000);
-        assert_eq!(said(&openings), (Some(0), Room::Unfunded));
-        // Its range still reads as one: wallets before this check it.
-        let advertised = openings.advertise().range.unwrap();
-        assert_eq!(advertised.max_cap, advertised.min_cap);
+        let most = terms::RANGE.max_cap;
+        assert_eq!(said(&openings), (Some(511), Room::Unfunded, most));
+        assert!(openings.lends(&[0; 32], 511).is_ok());
+        assert!(openings.lends(&[0; 32], 512).is_err());
+
+        openings.lend(terms::Lending {
+            per_contract: 1_000_000,
+            total: 1_100_000,
+        });
+        assert_eq!(said(&openings), (Some(1_000_000), Room::Open, most));
+        // All of its balance but its reserve and margin, 150 000 sat.
         *openings.funds.lock().unwrap() = Some(1_000_000);
-        assert_eq!(said(&openings), (Some(850_000), Room::Open));
-        // Ten bitcoin: the most it offers, not what it holds.
+        assert_eq!(said(&openings), (Some(850_000), Room::Open, most));
+        // Short of its reserve: full, its range as offered.
+        *openings.funds.lock().unwrap() = Some(149_999);
+        assert_eq!(said(&openings), (Some(0), Room::Full, most));
+        assert!(openings.lends(&[0; 32], 0).is_err());
         *openings.funds.lock().unwrap() = Some(1_000_000_000);
-        assert_eq!(said(&openings), (Some(100_000_000), Room::Open));
+        assert_eq!(said(&openings).0, Some(1_000_000));
+
+        // A contract it lent to counts, until it ends; given up, or
+        // short of its F, it is lent nothing.
+        let parts = Hub::peek(funded()).unwrap().base.parts().clone();
+        let lent = parts.cap - parts.graph.deposit_units;
+        let store = openings.store();
+        let id = [1; 32];
+        store
+            .insert(&id, 0, true, &deposit(1), &[0; 32], funded())
+            .unwrap();
+        drop(store);
+        assert_eq!(said(&openings).0, Some(1_000_000));
+        openings
+            .store()
+            .save(&id, 0, true, &[0; 32], funded())
+            .unwrap();
+        assert_eq!(said(&openings).0, Some(1_100_000 - lent));
+        assert!(openings.lends(&id, 1_000_000).is_ok());
+        assert!(openings.lends(&[0; 32], 1_100_000 - lent + 1).is_err());
+        openings.store().end(&id, 100).unwrap();
+        assert_eq!(said(&openings).0, Some(1_000_000));
+
+        // Ten bitcoin lent of one: the most it offers, not what it holds.
+        openings.lend(terms::Lending {
+            per_contract: u32::MAX,
+            total: u64::MAX,
+        });
+        assert_eq!(said(&openings).0, Some(most));
         assert!(!openings.advertise().full);
     }
 
@@ -1739,7 +1755,7 @@ mod tests {
         let openings = test_openings(dir.path());
         assert_eq!(openings.load().unwrap().max, MAX_LIVE);
         openings.limit_live(8);
-        let price = |o: &Openings| o.advertise().price;
+        let price = |o: &Openings| o.advertise().range.fee;
         let mut prices = vec![price(&openings)];
         for n in 0..8u8 {
             let store = openings.store();
@@ -1761,7 +1777,7 @@ mod tests {
             );
         }
         let fee = terms::OPENING_FEE;
-        let at = |m: u64| terms::RESERVE_ALICE + fee * m;
+        let at = |m: u64| fee * m;
         assert_eq!(prices, [1, 1, 1, 1, 2, 4, 8, 16, 16].map(at), "{prices:?}");
         let load = openings.load().unwrap();
         assert_eq!((load.live, load.max, load.step), (8, 8, None));
@@ -1820,9 +1836,10 @@ mod tests {
         let largest = run::base_cycles(&base);
         // Estimated from its quote before her Base is, no less.
         let p = base.parts();
-        let mut quote = openings
-            .timing()
-            .quote(p.keyset.clone(), p.chain.checkpoint.clone());
+        let timing = openings.timing();
+        let r = timing.range();
+        let (keyset, checkpoint) = (p.keyset.clone(), p.chain.checkpoint.clone());
+        let mut quote = timing.quote_for(keyset, checkpoint, r.min_cap, r.min_blocks, 0);
         // The fixture's own limits, its header budget (the hub's quotes
         // reach past their lock, which the fixture's does not), and its
         // graph's id (the program it is proven with sets the cycles of a
@@ -1886,7 +1903,7 @@ mod tests {
         // Terms of a longer window since (Mutinynet's 2,880 blocks to
         // assert in) leave these contracts theirs: no more room than
         // before, where that window alone would hold them all.
-        let longer = Timing::of(ChainProfile::Mutinynet, None).unwrap();
+        let longer = Timing::of(ChainProfile::Mutinynet, terms::RANGE).unwrap();
         let theirs = terms::proof_blocks_of(&base);
         assert!(longer.proof_blocks() > 100 * theirs);
         let before = std::mem::replace(&mut *openings.timing.write().unwrap(), longer);
@@ -1977,7 +1994,7 @@ mod tests {
         assert!(why.contains("under way"), "{why}");
         // Said in its info, for a wallet to choose another hub by.
         assert!(openings.advertise().full);
-        let Err(quoted) = openings.offer(None, 0).await else {
+        let Err(quoted) = openings.offer(terms::CAP, 200, terms::CAP).await else {
             panic!("quoted with no room");
         };
         assert_eq!(quoted.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);

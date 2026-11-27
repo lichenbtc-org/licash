@@ -1015,30 +1015,21 @@ impl ReceiveStatus {
 /// now: the terms an opening binds are those of its quote then.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Contracts {
-    /// The most notes a contract on the advertised terms protects, in sat.
-    /// See [`Self::range`] for other terms the hub may offer.
-    pub cap: u32,
-    /// What opening one costs its holder, in sat, from her deposit: her
-    /// reserve, returned as it closes, and the hub's fee.
-    pub price: u64,
-    /// Her reserve, of `price`.
-    pub reserve: u64,
-    /// Blocks from its opening to its close, at most.
-    pub blocks: u32,
     /// Under the mock authority, for regtest only: anyone "proves"
     /// anything, and a contract protects nothing.
     pub mock: bool,
-    /// The terms a holder may ask for instead of `cap` over `blocks`, if
-    /// the hub lets her choose: none from a hub offering only those, as
-    /// older hubs do.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub range: Option<ContractRange>,
-    /// The most of a contract's cap the hub's wallet funds now, in sat, of
-    /// those it offers: none if not known, as from hubs before any said.
+    /// The caps and durations a holder chooses her contract's among, and
+    /// what each costs.
+    pub range: ContractRange,
+    /// The most of one contract's cap the hub lends now, in sat: the part
+    /// of it its holder does not fund. None if not known. Below
+    /// [`MIN_REST`], the hub lends none but what rounds her part up to a
+    /// cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub funds: Option<u32>,
     /// Whether it refuses new openings now: as many live or under way as
-    /// it takes. Not said by hubs before any did: read as not.
+    /// it takes, or its wallet short of its own reserve for one more. Not
+    /// said while it opens them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub full: bool,
 }
@@ -1048,23 +1039,23 @@ pub struct Contracts {
 /// offer is what binds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Room {
-    /// It opens them, as far as it says: also what a hub saying nothing
-    /// of it reads as.
+    /// It opens them, and lends to them, as far as it says: also what a
+    /// hub saying nothing of it reads as.
     Open,
     /// It refuses new openings now ([`Contracts::full`]).
     Full,
-    /// Its wallet funds none of even the smallest contract now: only one
-    /// its holder funds whole opens there.
+    /// It lends nothing now: only a contract its holder funds whole, but
+    /// for what rounds her part up to a cap, opens there.
     Unfunded,
 }
 
 impl Room {
-    /// Of a hub saying it is `full` or not, funding `funds` sat at most
-    /// if it says, the smallest contract it opens of `least` sat.
-    pub fn of(full: bool, funds: Option<u32>, least: u32) -> Self {
+    /// Of a hub saying it is `full` or not, lending `funds` sat of a
+    /// contract at most if it says.
+    pub fn of(full: bool, funds: Option<u32>) -> Self {
         match funds {
             _ if full => Self::Full,
-            Some(funds) if funds < least => Self::Unfunded,
+            Some(funds) if funds < MIN_REST => Self::Unfunded,
             _ => Self::Open,
         }
     }
@@ -1073,8 +1064,7 @@ impl Room {
 impl Contracts {
     /// Whether the hub has room for a new contract now, as it says.
     pub fn room(&self) -> Room {
-        let least = self.range.map_or(self.cap, |r| r.min_cap);
-        Room::of(self.full, self.funds, least)
+        Room::of(self.full, self.funds)
     }
 }
 

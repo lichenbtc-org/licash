@@ -135,7 +135,7 @@ pub async fn open(
     let offered = info
         .contracts
         .with_context(|| format!("{hub} opens no contracts"))?;
-    let blocks = asked.blocks.unwrap_or(offered.blocks);
+    let blocks = asked.blocks.unwrap_or(offered.range.min_blocks);
     let ask = Ask {
         blocks,
         max_price: asked.max_price.unwrap_or(u64::MAX),
@@ -152,9 +152,8 @@ pub async fn open(
     let progress = !json && std::io::stderr().is_terminal();
     let contract = told(opening, progress).await?;
     // Its terms as they came of her coin: the cap and her part.
-    let chosen = offered.range.map(|_| contract.cap);
     let funded = u32::try_from(contract.funded).unwrap_or(u32::MAX);
-    let terms = Terms::of(hub, &offered, chosen, Some(blocks), funded)?;
+    let terms = Terms::of(hub, &offered, Some(contract.cap), Some(blocks), funded)?;
     let mut value = contract_json(&contract);
     value["terms"] = terms.json();
     let day = wallet.network().blocks_a_day();
@@ -267,7 +266,7 @@ pub async fn open_paid(
         .contracts
         .with_context(|| format!("{hub} opens no contracts"))?;
     let ask = Ask {
-        blocks: asked.blocks.unwrap_or(offered.blocks),
+        blocks: asked.blocks.unwrap_or(offered.range.min_blocks),
         max_price: asked.max_price.unwrap_or(u64::MAX),
         cap: asked.cap,
         inbound: asked.inbound,
@@ -349,7 +348,8 @@ pub fn terms(
     if let Some(why) = why {
         lines.push_str(&format!("\nroom         none: {why}"));
     }
-    if let Some(range) = offered.range {
+    {
+        let range = offered.range;
         value["min_cap"] = json!(range.min_cap);
         value["max_cap"] = json!(range.max_cap);
         value["min_blocks"] = json!(range.min_blocks);
@@ -385,7 +385,7 @@ fn room(offered: &licash_api::Contracts) -> (&'static str, Option<&'static str>)
         licash_api::Room::Unfunded => (
             "unfunded",
             Some(
-                "this hub funds none of a contract right now, only one you fund whole opens there",
+                "this hub lends none of a contract right now, only one you fund whole opens there",
             ),
         ),
     }
@@ -394,15 +394,15 @@ fn room(offered: &licash_api::Contracts) -> (&'static str, Option<&'static str>)
 /// A contract's terms and what opening it costs, itemized: the hub's
 /// opening fee, its interest by the year on the part it funds and on
 /// hers, her reserve (returned as it closes) and her part (issued back to
-/// her as notes). Of a hub offering fixed terms only, its fee in one.
+/// her as notes).
 struct Terms {
     cap: u32,
     blocks: u32,
     funded: u32,
     reserve: u64,
     price: u64,
-    /// The fee itemized, of a hub that lets holders choose.
-    fee: Option<(licash_api::ContractRange, licash_api::ContractFee)>,
+    /// The fee itemized.
+    fee: (licash_api::ContractRange, licash_api::ContractFee),
 }
 
 /// Refused unless `funded` sat of a contract of `cap` sat are within it.
@@ -424,29 +424,10 @@ impl Terms {
         blocks: Option<u32>,
         funded: u32,
     ) -> anyhow::Result<Self> {
-        // Its fixed terms are priced over its blocks, whatever the close
-        // she wants.
-        let blocks = match cap {
-            Some(_) => blocks.unwrap_or(offered.blocks),
-            None => offered.blocks,
-        };
-        let Some(range) = offered.range else {
-            anyhow::ensure!(
-                cap.is_none(),
-                "{hub} offers no contracts but of {} sat",
-                crate::say::grouped(offered.cap.into()),
-            );
-            funds_at_most(funded, offered.cap)?;
-            return Ok(Self {
-                cap: offered.cap,
-                blocks,
-                funded,
-                reserve: offered.reserve,
-                price: offered.price,
-                fee: None,
-            });
-        };
-        let cap = cap.unwrap_or(offered.cap);
+        // The least it offers unless she chose.
+        let range = offered.range;
+        let blocks = blocks.unwrap_or(range.min_blocks);
+        let cap = cap.unwrap_or(range.min_cap);
         anyhow::ensure!(
             range.allows_cap(cap),
             "{hub} offers no contracts of {} sat: choose one of {} to {} sat{}",
@@ -465,7 +446,7 @@ impl Terms {
             funded,
             reserve: range.reserve,
             price: range.price(cap, blocks, funded),
-            fee: Some((range, range.fee(cap, blocks, funded))),
+            fee: (range, range.fee(cap, blocks, funded)),
         })
     }
 
@@ -479,13 +460,12 @@ impl Terms {
             "price": self.price,
             "pays": self.price + u64::from(self.funded),
         });
-        if let Some((range, fee)) = self.fee {
-            value["opening_fee"] = json!(fee.opening);
-            value["ppm_year"] = json!(range.ppm_year);
-            value["interest"] = json!(fee.interest);
-            value["ppm_year_funded"] = json!(range.ppm_year_funded);
-            value["interest_funded"] = json!(fee.interest_funded);
-        }
+        let (range, fee) = self.fee;
+        value["opening_fee"] = json!(fee.opening);
+        value["ppm_year"] = json!(range.ppm_year);
+        value["interest"] = json!(fee.interest);
+        value["ppm_year_funded"] = json!(range.ppm_year_funded);
+        value["interest_funded"] = json!(fee.interest_funded);
         value
     }
 
@@ -514,25 +494,21 @@ impl Terms {
             ),
         ];
         let fee = self.price - self.reserve;
-        match self.fee {
-            Some((range, f)) => {
-                lines.push(format!("opening fee  {}", sat(f.opening)));
-                lines.push(format!(
-                    "interest     {}, {} a year on the hub's {}",
-                    sat(f.interest),
-                    percent(range.ppm_year.into()),
-                    grouped(hubs.into())
-                ));
-                if self.funded > 0 {
-                    lines.push(format!(
-                        "interest     {}, {} a year on your {}",
-                        sat(f.interest_funded),
-                        percent(range.ppm_year_funded.into()),
-                        grouped(self.funded.into())
-                    ));
-                }
-            }
-            None => lines.push(format!("hub's fee    {}", sat(fee))),
+        let (range, f) = self.fee;
+        lines.push(format!("opening fee  {}", sat(f.opening)));
+        lines.push(format!(
+            "interest     {}, {} a year on the hub's {}",
+            sat(f.interest),
+            percent(range.ppm_year.into()),
+            grouped(hubs.into())
+        ));
+        if self.funded > 0 {
+            lines.push(format!(
+                "interest     {}, {} a year on your {}",
+                sat(f.interest_funded),
+                percent(range.ppm_year_funded.into()),
+                grouped(self.funded.into())
+            ));
         }
         lines.push(format!(
             "reserve      {}, returned as it closes",
@@ -635,7 +611,7 @@ pub fn unprotected(wallet: &Wallet<Http>, path: &Path) -> anyhow::Result<Vec<Unp
         let Some(terms) = &info.contracts else {
             continue;
         };
-        let smallest = u64::from(terms.range.map_or(terms.cap, |r| r.min_cap));
+        let smallest = u64::from(terms.range.min_cap);
         let held: u64 = wallet
             .balance()?
             .iter()
@@ -978,14 +954,10 @@ mod tests {
     use super::*;
     use licash::spend::ChainProfile;
 
-    fn offered(range: Option<licash_api::ContractRange>) -> licash_api::Contracts {
+    fn offered() -> licash_api::Contracts {
         licash_api::Contracts {
-            cap: 131_071,
-            price: 23_002,
-            reserve: 20_000,
-            blocks: 1_000,
             mock: true,
-            range,
+            range: range(),
             funds: None,
             full: false,
         }
@@ -1008,14 +980,7 @@ mod tests {
 
     #[test]
     fn a_co_funded_contract_is_itemized_its_interest_on_each_part() {
-        let t = Terms::of(
-            "hub",
-            &offered(Some(range())),
-            Some(262_143),
-            Some(52_560),
-            62_143,
-        )
-        .unwrap();
+        let t = Terms::of("hub", &offered(), Some(262_143), Some(52_560), 62_143).unwrap();
         // 2% of the hub's 200 000 and 0.5% of her 62 143, over a year.
         let value = t.json();
         assert_eq!(value["opening_fee"], 3_000);
@@ -1040,9 +1005,8 @@ mod tests {
     }
 
     #[test]
-    fn more_funded_than_a_fixed_contract_holds_is_refused() {
-        let offered = offered(None);
-        let over = Terms::of("hub", &offered, None, None, offered.cap + 1);
+    fn more_funded_than_the_least_contract_holds_is_refused() {
+        let over = Terms::of("hub", &offered(), None, None, 131_072);
         let e = over.err().expect("refused").to_string();
         assert!(e.contains("more than the contract's"), "{e}");
     }
@@ -1050,67 +1014,51 @@ mod tests {
     #[test]
     fn a_hub_with_no_room_is_said_before_a_coin_is_sent() {
         // Saying nothing of it, as hubs before any did, or with room: no line.
-        assert_eq!(room(&offered(None)), ("open", None));
+        assert_eq!(room(&offered()), ("open", None));
         let full = licash_api::Contracts {
             full: true,
-            ..offered(Some(range()))
+            ..offered()
         };
         let (word, why) = room(&full);
         assert_eq!(word, "full");
         assert!(why.unwrap().contains("another hub"));
         let short = licash_api::Contracts {
-            funds: Some(131_070),
-            ..offered(Some(range()))
+            funds: Some(511),
+            ..offered()
         };
         let (word, why) = room(&short);
         assert_eq!(word, "unfunded");
         assert!(why.unwrap().contains("you fund whole"));
         let funded = licash_api::Contracts {
-            funds: Some(131_071),
-            ..offered(Some(range()))
+            funds: Some(512),
+            ..offered()
         };
         assert_eq!(room(&funded), ("open", None));
     }
 
     #[test]
-    fn fixed_terms_are_priced_over_the_hubs_blocks_and_only_caps_are_chosen() {
-        let fixed = Terms::of("hub", &offered(Some(range())), None, Some(300), 0).unwrap();
-        assert_eq!((fixed.cap, fixed.blocks), (131_071, 1_000));
-        assert_eq!(fixed.price, range().price(131_071, 1_000, 0));
-        let any = Terms::of("hub", &offered(Some(range())), Some(200_000), Some(300), 0);
+    fn the_least_terms_are_priced_unless_chosen() {
+        let least = Terms::of("hub", &offered(), None, None, 0).unwrap();
+        assert_eq!((least.cap, least.blocks), (131_071, 300));
+        assert_eq!(least.price, range().price(131_071, 300, 0));
+        let longer = Terms::of("hub", &offered(), None, Some(1_000), 0).unwrap();
+        assert_eq!((longer.cap, longer.blocks), (131_071, 1_000));
+        let any = Terms::of("hub", &offered(), Some(200_000), Some(300), 0);
         assert_eq!(any.unwrap().cap, 200_000);
         // A rest of under 512 sat past 2^17 - 1: the next cap up said.
-        let odd = Terms::of("hub", &offered(Some(range())), Some(131_100), Some(300), 0);
+        let odd = Terms::of("hub", &offered(), Some(131_100), Some(300), 0);
         let odd = format!("{:#}", odd.err().unwrap());
         assert!(
             odd.contains("131,071 to 1,048,575 sat, such as 131,583"),
             "{odd}"
         );
-        let over = Terms::of("hub", &offered(Some(range())), Some(131_071), None, 131_072);
+        let over = Terms::of("hub", &offered(), Some(131_071), None, 131_072);
         assert!(over.is_err());
-        // A hub of fixed terms only: its fee in one.
-        let only = Terms::of("hub", &offered(None), None, None, 0).unwrap();
-        assert!(
-            only.lines(144).contains("hub's fee    3,002 sat"),
-            "{}",
-            only.lines(144)
-        );
-        // Her part of its one contract changes its price not at all.
-        let part = Terms::of("hub", &offered(None), None, None, 1).unwrap();
-        assert_eq!((part.price, part.funded), (only.price, 1));
-        assert!(Terms::of("hub", &offered(None), Some(131_071), Some(9), 0).is_err());
     }
 
     #[test]
     fn a_contracts_length_is_told_in_the_days_of_its_network() {
-        let t = Terms::of(
-            "hub",
-            &offered(Some(range())),
-            Some(131_071),
-            Some(5_760),
-            0,
-        )
-        .unwrap();
+        let t = Terms::of("hub", &offered(), Some(131_071), Some(5_760), 0).unwrap();
         let (bitcoin, mutinynet) = (ChainProfile::Core30Signet, ChainProfile::Mutinynet);
         assert!(t
             .lines(bitcoin.blocks_a_day())

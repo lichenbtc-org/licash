@@ -2152,12 +2152,15 @@ fn hub(url: &str, info: &licash_api::Info) -> Hub {
             },
             memo: takes_invoice(info, true).is_some(),
         }),
+        // Of its least contract, all of it hers, over the fewest blocks.
         contracts: info.contracts.map(|c| ContractTerms {
-            cap: u64::from(c.cap),
-            price: c.price,
-            blocks: c.blocks,
+            cap: u64::from(c.range.min_cap),
+            price: c
+                .range
+                .price(c.range.min_cap, c.range.min_blocks, c.range.min_cap),
+            blocks: c.range.min_blocks,
             mock: c.mock,
-            range: c.range.map(Into::into),
+            range: Some(c.range.into()),
             funds: c.funds.map(u64::from),
             full: c.full,
         }),

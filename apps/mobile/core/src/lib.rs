@@ -203,19 +203,20 @@ pub struct Hub {
 /// `cap`: if the hub fails them, the wallet recovers them from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ContractTerms {
-    /// The most of the notes at the hub one protects, in sat.
+    /// The least of the notes at the hub one protects, in sat: its
+    /// range's least cap.
     pub cap: u64,
-    /// What opening one costs, in sat, paid from a coin on Bitcoin.
+    /// What opening the least one costs, in sat, paid from a coin on
+    /// Bitcoin, all of it hers: its reserve and the hub's fee.
     pub price: u64,
-    /// Blocks from opening one to its close, at most.
+    /// Blocks from opening the least one to its close: its range's fewest.
     pub blocks: u32,
     /// Under the mock authority, for regtest only: such a contract
     /// protects nothing.
     pub mock: bool,
-    /// The caps and durations the wallet may choose instead, if the hub
-    /// lets it.
+    /// The caps and durations the wallet chooses among: always said.
     pub range: Option<ContractRange>,
-    /// The most of a contract's cap the hub funds now, in sat, as it last
+    /// The most of a contract's cap the hub lends now, in sat, as it last
     /// said: none if it did not, as hubs before any did.
     #[uniffi(default = None)]
     pub funds: Option<u64>,
@@ -243,8 +244,7 @@ pub enum HubRoom {
 #[uniffi::export]
 pub fn contract_room(terms: ContractTerms) -> HubRoom {
     let sat = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
-    let least = terms.range.map_or(terms.cap, |r| r.min_cap);
-    match licash_api::Room::of(terms.full, terms.funds.map(sat), sat(least)) {
+    match licash_api::Room::of(terms.full, terms.funds.map(sat)) {
         licash_api::Room::Open => HubRoom::Open,
         licash_api::Room::Full => HubRoom::Full,
         licash_api::Room::Unfunded => HubRoom::Unfunded,
@@ -392,7 +392,10 @@ pub fn contract_fit(
     let notes = usize::try_from(notes).unwrap_or(usize::MAX);
     let range = range.api();
     let fitted = licash_contracts::holder::fit(
-        &licash_contracts::holder::Pricing::Range(&range),
+        &licash_contracts::holder::Pricing {
+            range: &range,
+            lends: None,
+        },
         blocks,
         coin,
         dust,

@@ -192,34 +192,56 @@ struct Chain {
         requires = "contracts"
     )]
     contracts_proof_scale: f64,
-    /// Let holders choose a contract's cap up to this many sat, taken
-    /// down to a size (2^n - 1 sat, 131 071 the least), and how long it
-    /// lasts up to `--contracts-max-blocks`, besides the fixed terms
-    /// (131 071 sat over 1 000 blocks, 4 752 on Mutinynet): a holder's
-    /// deposit funds a contract of its own part by default, any larger one
-    /// she asks the hub funding the rest of it, at `--contracts-rate`.
-    /// Advertised as no more than the hub's wallet funds.
+    /// The most sat a contract protects, its cap, taken down to one a
+    /// payout pays exactly. Holders choose theirs from
+    /// `--contracts-min-cap` to this, and how long it lasts up to
+    /// `--contracts-max-blocks`; a holder's deposit funds her part, the
+    /// hub lending the rest as `--contracts-lend` lets it, at
+    /// `--contracts-rate`.
     #[arg(
         long = "contracts-max-cap",
         value_name = "SAT",
         env = "LICASH_HUB_CONTRACTS_MAX_CAP",
-        default_value_t = 33_554_431,
+        default_value_t = licash_contracts::hub::terms::RANGE.max_cap,
         requires = "contracts"
     )]
     contracts_max_cap: u32,
-    /// Offer the fixed terms only, at their price, with no interest:
-    /// holders choose no cap or duration (`--contracts-max-cap` and the
-    /// rates unused).
+    /// The least sat a contract protects: 131 071 at least, taken up to a
+    /// cap a payout pays exactly.
     #[arg(
-        long = "contracts-fixed-only",
-        env = "LICASH_HUB_CONTRACTS_FIXED_ONLY",
-        value_parser = clap::builder::BoolishValueParser::new(),
+        long = "contracts-min-cap",
+        value_name = "SAT",
+        env = "LICASH_HUB_CONTRACTS_MIN_CAP",
+        default_value_t = licash_contracts::hub::terms::CAP,
         requires = "contracts"
     )]
-    contracts_fixed_only: bool,
-    /// The most blocks a contract a holder chooses lasts: the fixed
-    /// terms' at least (4 752 on Mutinynet). By default a year of
-    /// Bitcoin's blocks (about 18 days of Mutinynet's).
+    contracts_min_cap: u32,
+    /// The most the hub lends of one contract's cap, in sat: the part its
+    /// holder does not fund, which the hub locks in it from its wallet
+    /// besides its reserve and earns `--contracts-rate` on. None by default
+    /// but the few sat (511 at most) that round a holder's part up to a
+    /// cap: holders fund their own contracts.
+    #[arg(
+        long = "contracts-lend",
+        value_name = "SAT",
+        env = "LICASH_HUB_CONTRACTS_LEND",
+        default_value_t = 0,
+        requires = "contracts"
+    )]
+    contracts_lend: u32,
+    /// The most the hub lends of all its live contracts' caps together, in
+    /// sat: none by default.
+    #[arg(
+        long = "contracts-lend-total",
+        value_name = "SAT",
+        env = "LICASH_HUB_CONTRACTS_LEND_TOTAL",
+        default_value_t = 0,
+        requires = "contracts"
+    )]
+    contracts_lend_total: u64,
+    /// The most blocks a contract a holder chooses lasts: its network's
+    /// fewest at least (1 296 on Bitcoin's, 4 032 on Mutinynet). By default
+    /// a year of Bitcoin's blocks (about 18 days of Mutinynet's).
     #[arg(
         long = "contracts-max-blocks",
         value_name = "BLOCKS",
@@ -228,8 +250,8 @@ struct Chain {
         requires = "contracts"
     )]
     contracts_max_blocks: u32,
-    /// What a contract costs over the fixed price, in millionths of the
-    /// part of its cap the hub funds for each year it lasts (52 560
+    /// What a contract costs over the hub's fee, in millionths of the
+    /// part of its cap the hub lends for each year it lasts (52 560
     /// blocks, Mutinynet's 1 051 200): 200 000 is 20% a year, the price of
     /// the hub's own bitcoin locked. Its reserve and fee are not counted.
     #[arg(
@@ -250,9 +272,9 @@ struct Chain {
         requires = "contracts"
     )]
     contracts_rate_funded: u32,
-    /// The hub's fee for opening a contract, in sat, of its fixed terms
-    /// and those chosen alike, besides the holder's reserve and the rate
-    /// on its part: what it charges for what it brings. Past half its
+    /// The hub's fee for opening a contract, in sat, besides the holder's
+    /// reserve and the rate on its part: what it charges for what it
+    /// brings. Past half its
     /// most contracts live, it doubles at each eighth more.
     #[arg(
         long = "contracts-fee",
@@ -398,15 +420,23 @@ impl WitnessArgs {
 }
 
 impl Chain {
-    /// The contract terms holders may choose, unless the operator offers
-    /// the fixed terms only.
-    fn range(&self) -> Option<licash_contracts::hub::terms::Range> {
-        (!self.contracts_fixed_only).then_some(licash_contracts::hub::terms::Range {
+    /// The contract terms holders choose among.
+    fn range(&self) -> licash_contracts::hub::terms::Range {
+        licash_contracts::hub::terms::Range {
+            min_cap: self.contracts_min_cap,
             max_cap: self.contracts_max_cap,
             max_blocks: self.contracts_max_blocks,
             ppm_year: self.contracts_rate,
             ppm_year_funded: self.contracts_rate_funded,
-        })
+        }
+    }
+
+    /// What the hub lends its holders.
+    fn lending(&self) -> licash_contracts::hub::terms::Lending {
+        licash_contracts::hub::terms::Lending {
+            per_contract: self.contracts_lend,
+            total: self.contracts_lend_total,
+        }
     }
 
     fn source(&self, policy: &Policy) -> anyhow::Result<Option<(Source, ChainProfile, Duration)>> {
@@ -1316,6 +1346,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             let contracting = chain.contracts;
             let response_poll = Duration::from_secs(chain.chain_poll);
             let range = chain.range();
+            let lending = chain.lending();
             let max_live = chain.contracts_max_live;
             let proof_scale = chain.contracts_proof_scale;
             let work_depth = chain.contracts_work_depth;
@@ -1507,6 +1538,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                             .context("--contracts-payout-wallet")?;
                     }
                     openings.limit_live(max_live);
+                    openings.lend(lending);
                     openings.charge_opening(opening_fee);
                     if let Some(depth) = work_depth {
                         openings.ask_work(depth).context("--contracts-work-depth")?;
@@ -2526,42 +2558,50 @@ mod tests {
         assert_eq!(days(&["--swaps-contract-proof-days", "9"]), 9);
     }
 
-    /// Contracts are of terms holders choose by default, a deposit
-    /// funding the smallest it fits and the hub the rest at 20% a year;
-    /// the fixed terms alone only if asked.
+    /// Contracts are of terms holders choose, a deposit funding her part,
+    /// the hub lending none of the rest by default, at 20% a year of what
+    /// it lends.
     #[test]
-    fn contracts_are_chosen_within_a_range_at_twenty_percent_unless_fixed_only() {
+    fn contracts_are_chosen_within_a_range_at_twenty_percent_lent_none() {
         let range = |args: &[&str]| {
             let cli = Cli::try_parse_from([&["licash-hub", "run"], args].concat()).unwrap();
             match cli.command {
-                Command::Run { chain, .. } => chain.range(),
+                Command::Run { chain, .. } => (chain.range(), chain.lending()),
                 _ => unreachable!(),
             }
         };
-        let chosen = range(&["--contracts"]).unwrap();
+        let chosen = range(&["--contracts"]).0;
         assert_eq!(
             (
+                chosen.min_cap,
                 chosen.max_cap,
                 chosen.max_blocks,
                 chosen.ppm_year,
                 chosen.ppm_year_funded
             ),
-            (33_554_431, licash_api::YEAR_BLOCKS, 200_000, 0)
+            (131_071, 33_554_431, licash_api::YEAR_BLOCKS, 200_000, 0)
         );
+        assert_eq!(range(&["--contracts"]).1, Default::default());
         // Without contracts, the defaults are not an error.
-        assert!(range(&[]).is_some());
-        assert!(range(&["--contracts", "--contracts-fixed-only"]).is_none());
-        let set = range(&[
+        range(&[]);
+        let (set, lends) = range(&[
             "--contracts",
+            "--contracts-min-cap",
+            "1048575",
             "--contracts-max-cap",
             "2097151",
             "--contracts-rate",
             "10000",
+            "--contracts-lend",
+            "500000",
+            "--contracts-lend-total",
+            "5000000",
         ]);
         assert_eq!(
-            set.map(|r| (r.max_cap, r.ppm_year)),
-            Some((2_097_151, 10_000))
+            (set.min_cap, set.max_cap, set.ppm_year),
+            (1_048_575, 2_097_151, 10_000)
         );
+        assert_eq!((lends.per_contract, lends.total), (500_000, 5_000_000));
         // Set without contracts: refused, as before.
         let refused = Cli::try_parse_from(["licash-hub", "run", "--contracts-max-cap", "2097151"]);
         assert!(refused.is_err());

@@ -65,34 +65,28 @@ impl Wallet {
         let (hub, terms) = self.contracting_hub(&hub)?;
         let trust = licash_contracts::trust(self.wallet.network());
         let trust = trust.map_err(|e| LicashError::invalid(format!("{e:#}")))?;
-        let offer = holder::offer(&self.wallet, &hub, None, 0);
+        let range = terms.range;
+        let coins = holder::coins(&self.wallet, self.wallet.path()).map_err(failed)?;
+        let largest = coins.first().map(|c| c.value);
+        let (suggested_cap, suggested_blocks) = suggested(&range, largest);
+        // Its least contract over the suggested blocks, all of it hers.
+        let offer = holder::least_offer(&self.wallet, &hub, &range, suggested_blocks);
         let offer = self.operation(offer).map_err(unavailable)?;
         let price = offer.price();
-        let coins = holder::coins(&self.wallet, self.wallet.path()).map_err(failed)?;
         let blocks = offer.bounds.lock;
         let after_assert = holder::after_assert(&offer.quote);
-        let largest = coins.first().map(|c| c.value);
         let (denominations, funded_notes) = holder::funding_notes(&offer.quote);
-        // The coin that would pay it: the smallest a contract at its fixed
-        // terms takes whole.
-        let pricing = holder::Pricing::Fixed {
-            cap: offer.quote.cap,
-            price,
-        };
+        // The coin that would pay one: the smallest a contract takes whole.
         let coin = holder::smallest_fit(
             coins.clone(),
-            &pricing,
+            &holder::Pricing::of(&terms),
             blocks,
             offer.quote.graph.dust,
             (&denominations, funded_notes),
-            0,
+            range.min_cap,
             0,
         )
         .map(|(coin, _)| coin);
-        let (suggested_cap, suggested_blocks) = match &terms.range {
-            Some(range) => suggested(range, largest),
-            None => (offer.quote.cap, blocks),
-        };
         Ok(ContractQuote {
             hub,
             price,
@@ -102,7 +96,7 @@ impl Wallet {
             mock: trust.mock,
             coin: coin.map(|c| c.value),
             download: upload(offer.quote.recipe.kept),
-            range: terms.range.map(Into::into),
+            range: Some(range.into()),
             after_assert,
             coins: coins
                 .iter()
@@ -148,7 +142,7 @@ impl Wallet {
             .hubs()?
             .into_iter()
             .filter(|(url, _)| !busy.contains(&url.trim_end_matches('/')))
-            .filter_map(|(url, info)| Some((url, info.contracts?.range?)))
+            .filter_map(|(url, info)| Some((url, info.contracts?.range)))
             .filter(|(_, range)| check_range(range).is_ok())
             .collect();
         for hub in best(&hubs, coin) {
@@ -177,8 +171,8 @@ impl Wallet {
     ) -> Result<Contract, LicashError> {
         let (hub, terms) = self.contracting_hub(&hub)?;
         let ask = Ask {
-            blocks: blocks.unwrap_or(terms.blocks),
-            max_price: max_price.unwrap_or(terms.price),
+            blocks: blocks.unwrap_or(terms.range.min_blocks),
+            max_price: max_price.unwrap_or(u64::MAX),
             cap: None,
             inbound: 0,
             deposit: None,
@@ -208,13 +202,7 @@ impl Wallet {
         max_price: u64,
         coin: Option<String>,
     ) -> Result<Contract, LicashError> {
-        let (hub, terms) = self.contracting_hub(&hub)?;
-        if terms.range.is_none() {
-            return Err(LicashError::invalid(format!(
-                "{hub} offers contracts of {} sat over {} blocks only",
-                terms.cap, terms.blocks
-            )));
-        }
+        let (hub, _) = self.contracting_hub(&hub)?;
         let cap = u32::try_from(cap)
             .map_err(|_| LicashError::invalid(format!("a cap of {cap} sat: too large")))?;
         let _contracting = self
@@ -262,7 +250,7 @@ impl Wallet {
             .map(|c| u32::try_from(c).map_err(|_| LicashError::invalid(format!("a cap of {c}"))))
             .transpose()?;
         let ask = Ask {
-            blocks: blocks.unwrap_or(terms.blocks),
+            blocks: blocks.unwrap_or(terms.range.min_blocks),
             max_price: u64::MAX,
             cap,
             inbound: 0,
@@ -411,9 +399,7 @@ impl Wallet {
         };
         match info.contracts {
             Some(terms) => {
-                if let Some(range) = &terms.range {
-                    check_range(range)?;
-                }
+                check_range(&terms.range)?;
                 Ok((hub.to_owned(), terms))
             }
             None => Err(LicashError::invalid(format!("{hub} opens no contracts"))),
@@ -635,7 +621,7 @@ fn suggested(range: &licash_api::ContractRange, coin: Option<u64>) -> (u32, u32)
 fn absorbing(range: &licash_api::ContractRange, blocks: u32, coin: u64) -> Option<holder::Fit> {
     let wide: Vec<u64> = (0..32).map(|i| 1u64 << i).collect();
     holder::fit(
-        &holder::Pricing::Range(range),
+        &holder::Pricing { range, lends: None },
         blocks,
         coin,
         330,

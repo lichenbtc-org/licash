@@ -1,6 +1,6 @@
 //! The hub's terms for contracts, on each network it offers them on.
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{ensure, Result};
 use licash::base::{Base, ChainTerms, Fees, GraphTerms, Limits, Recipe};
 use licash::chain::Checkpoint;
 use licash::note::Keyset;
@@ -10,9 +10,6 @@ use licash::recovery::{
 use licash::spend::ChainProfile;
 use licash_contract::graph::RETURNING;
 use licash_contract::opening::{Bounds, Floors, Quote};
-
-/// The most blocks the hub's collateral is locked for.
-pub const LOCK: u32 = 1_000;
 
 /// The headers a contract's budget reaches past its close, beyond the blocks
 /// its collateral is locked for. Her request is spent by the hub's
@@ -28,8 +25,8 @@ pub fn lock_of(quote: &Quote) -> u32 {
     quote.chain.max_headers.saturating_sub(HEADER_SLACK)
 }
 
-/// The notes a contract of the fixed terms protects, in sat: the least
-/// cap ([`licash_api::MIN_CAP`]).
+/// The fewest notes a contract protects, in sat: the least cap
+/// ([`licash_api::MIN_CAP`]), and a hub's least by default.
 pub const CAP: u32 = licash_api::MIN_CAP;
 
 /// The holder's reserve, from her deposit: of the widest filing, a forced
@@ -98,20 +95,32 @@ pub fn quote_ceiling() -> f64 {
 /// ([`licash_api::MAX_CAP`]).
 pub const MAX_CAP: u32 = licash_api::MAX_CAP;
 
-/// The largest cap a hub's wallet funds with `balance` sat on regtest and
-/// signet, whose reserve is [`RESERVE_HUB`]: [`Timing::fundable`] there.
-pub fn fundable(balance: u64) -> Option<u32> {
-    fundable_with(balance, RESERVE_HUB)
+/// The terms a hub offers unless its operator says otherwise: caps up to
+/// 33 554 431 sat over a year of Bitcoin's blocks at most, at 20% a year
+/// of the part it lends, none of the part its holder funds.
+pub const RANGE: Range = Range {
+    min_cap: CAP,
+    max_cap: (1 << 25) - 1,
+    max_blocks: licash_api::YEAR_BLOCKS,
+    ppm_year: 200_000,
+    ppm_year_funded: 0,
+};
+
+/// What the hub lends its holders, in sat, as its operator sets it: the
+/// part of a contract's cap she does not fund, which the hub locks in it
+/// besides its reserve. None by default: holders fund their contracts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Lending {
+    /// The most of one contract's cap.
+    pub per_contract: u32,
+    /// The most of all its live contracts' together.
+    pub total: u64,
 }
 
-/// The largest cap a wallet funds with `balance` sat, the hub's reserve
-/// `reserve_hub`: its graph's payout, which pays exactly the cap
-/// ([`licash_api::is_cap`]); that reserve; and `FUNDING_MARGIN`. None if
-/// not even the least is funded.
-fn fundable_with(balance: u64, reserve_hub: u64) -> Option<u32> {
-    let left = balance.checked_sub(reserve_hub + FUNDING_MARGIN)?;
-    licash_api::cap_at_most(left)
-}
+/// What the hub lends a contract whatever it lends, in sat: what rounds
+/// its holder's part up to a cap ([`licash_api::cap_at_least`]), under
+/// the least output of a payout ([`licash_api::MIN_REST`]).
+pub const ROUNDING: u32 = licash_api::MIN_REST - 1;
 
 /// The blocks the hub's prover has for a proof of an exit of a contract
 /// of `base`, as [`Timing::proof_blocks`] of the terms it opened on: a
@@ -151,11 +160,9 @@ struct Network {
     /// network's floor of work: the response buried, then its proof made
     /// and its assertion confirmed.
     assert_window: u16,
-    /// The fewest blocks a contract chosen lasts: the holder's deadlines
-    /// leave time to recover in after a quote a few blocks old.
+    /// The fewest blocks a contract lasts: the holder's deadlines leave
+    /// time to recover in after a quote a few blocks old.
     min_blocks: u32,
-    /// The blocks the fixed terms last.
-    lock: u32,
     /// The hub's reserve in F, from its wallet.
     reserve_hub: u64,
     /// The most notes a contract protects, in sat.
@@ -171,7 +178,6 @@ const REGTEST: Network = Network {
     response_window: 2,
     assert_window: 12,
     min_blocks: 200,
-    lock: LOCK,
     reserve_hub: RESERVE_HUB,
     max_cap: MAX_CAP,
 };
@@ -190,7 +196,6 @@ const SIGNET: Network = Network {
     response_window: 12,
     assert_window: 48,
     min_blocks: 576,
-    lock: LOCK,
     reserve_hub: RESERVE_HUB,
     max_cap: MAX_CAP,
 };
@@ -206,7 +211,7 @@ const SIGNET: Network = Network {
 /// 6 blocks deep, as its floors ask. Nine days at least: the holder's
 /// deadlines 456 blocks before the close, the three days to respond,
 /// contest and assert before them, and the 302 blocks a request waits
-/// after the quote. Two weeks, the fixed terms.
+/// after the quote.
 const MAINNET: Network = Network {
     challenge_window: 288,
     answer_window: 144,
@@ -215,7 +220,6 @@ const MAINNET: Network = Network {
     response_window: 144,
     assert_window: 144,
     min_blocks: 1_296,
-    lock: 2_016,
     reserve_hub: RESERVE_HUB_MAINNET,
     max_cap: MAX_CAP_MAINNET,
 };
@@ -225,8 +229,8 @@ impl Network {
     /// network but regtest, but for what its quicker blocks cannot hold.
     /// The hub's proof takes as long in hours there, so its assert window
     /// is as many times the blocks as its day has more of them (20), the
-    /// one window counted in time; the fewest blocks a contract lasts and
-    /// the fixed terms' are as many blocks more. As deep as signet, and no
+    /// one window counted in time; the fewest blocks a contract lasts are
+    /// as many blocks more. As deep as signet, and no
     /// bound on the cap by a reserve whose floor is Bitcoin's alone.
     fn mutinynet() -> Self {
         let quicker =
@@ -237,41 +241,44 @@ impl Network {
             depth: SIGNET.depth,
             assert_window,
             min_blocks: MAINNET.min_blocks + longer,
-            lock: MAINNET.lock + longer,
             max_cap: MAX_CAP,
             ..MAINNET
         }
     }
 }
 
-/// The caps and durations a hub lets holders choose besides its fixed
-/// terms ([`CAP`] sat over [`LOCK`] blocks), as its operator sets them.
+/// The caps and durations holders choose their contracts' among, as the
+/// hub's operator sets them: its network's fewest blocks to `max_blocks`,
+/// and `min_cap` to `max_cap` sat.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Range {
-    /// The most a contract protects, in sat: [`CAP`] to [`MAX_CAP`],
+    /// The least a contract protects, in sat: [`CAP`] at least, taken up
+    /// to a cap ([`licash_api::cap_at_least`]).
+    pub min_cap: u32,
+    /// The most a contract protects, in sat: `min_cap` to [`MAX_CAP`],
     /// taken down to a cap ([`licash_api::cap_at_most`]).
     pub max_cap: u32,
-    /// The most blocks one lasts: [`LOCK`] at least.
+    /// The most blocks one lasts: its network's fewest at least.
     pub max_blocks: u32,
     /// Millionths of the part of its cap the hub funds a contract costs
-    /// for each year it lasts, over the fixed price
-    /// ([`licash_api::rate`]), of the fixed terms too.
+    /// for each year it lasts, over its opening fee
+    /// ([`licash_api::rate`]).
     pub ppm_year: u32,
     /// Millionths of the part its holder funds herself, likewise.
     pub ppm_year_funded: u32,
 }
 
 /// The hub's timing on a network: the windows, delays and depths of its
-/// quote, and its bounds; the terms holders may choose, if any.
+/// quote, and its bounds; the terms holders choose among.
 #[derive(Clone, Copy, Debug)]
 pub struct Timing {
     profile: ChainProfile,
     /// Its windows, depths and reserve on that network.
     on: Network,
-    /// The terms holders may choose, if any.
-    range: Option<Range>,
-    /// The step of the hub's surcharge: its fee, of its fixed terms and
-    /// rate alike, `2^step` times its own.
+    /// The terms holders choose among.
+    range: Range,
+    /// The step of the hub's surcharge: its fee and rates alike, `2^step`
+    /// times its own.
     step: u32,
     /// Blocks of work its statement reads on top of her request's
     /// response, at least the network's floor ([`Timing::with_work_depth`]).
@@ -285,6 +292,8 @@ pub struct Timing {
     /// Whether it quotes graphs whose `assert` carries π2 and π3 beside π1
     /// ([`Timing::with_pair`]).
     pair: bool,
+    /// What it lends ([`Timing::with_lending`]).
+    lending: Lending,
 }
 
 /// The most blocks of work a hub may ask for beyond its network's floor:
@@ -296,33 +305,41 @@ impl Timing {
     /// network's ([`MAINNET`]) or Mutinynet's, which are that network's
     /// ([`Network::mutinynet`]). Terms alone open no contract: none opens
     /// on a network without a program trusted there ([`crate::trust`]), as
-    /// Bitcoin's has none yet. Holders choose their terms within `range`,
-    /// if any, the fixed terms among them.
-    pub fn of(profile: ChainProfile, range: Option<Range>) -> Result<Self> {
+    /// Bitcoin's has none yet. Holders choose their terms within `range`.
+    pub fn of(profile: ChainProfile, range: Range) -> Result<Self> {
         let on = match profile {
             ChainProfile::Core30DefaultRegtest => REGTEST,
             ChainProfile::Core30Signet => SIGNET,
             ChainProfile::Core30Mainnet => MAINNET,
             ChainProfile::Mutinynet => Network::mutinynet(),
         };
-        if let Some(r) = range {
-            ensure!(
-                (CAP..=on.max_cap).contains(&r.max_cap),
-                "a contract's cap of {} sat at most: not {CAP} to {} on {profile}",
-                r.max_cap,
-                on.max_cap
-            );
-            ensure!(
-                r.max_blocks >= on.lock,
-                "contracts of {} blocks at most: not {} at least",
-                r.max_blocks,
-                on.lock
-            );
-        }
-        let range = range.map(|r| Range {
-            max_cap: licash_api::cap_at_most(u64::from(r.max_cap)).unwrap_or(CAP),
+        let r = range;
+        ensure!(
+            (CAP..=on.max_cap).contains(&r.max_cap),
+            "a contract's cap of {} sat at most: not {CAP} to {} on {profile}",
+            r.max_cap,
+            on.max_cap
+        );
+        let max_cap = licash_api::cap_at_most(u64::from(r.max_cap)).unwrap_or(CAP);
+        let min_cap = licash_api::cap_at_least(u64::from(r.min_cap.max(CAP)));
+        let min_cap = min_cap.filter(|&c| r.min_cap >= CAP && c <= max_cap);
+        let min_cap = min_cap.ok_or_else(|| {
+            anyhow::anyhow!(
+                "a contract's cap of {} sat at least: not {CAP} to its most, {max_cap}",
+                r.min_cap
+            )
+        })?;
+        ensure!(
+            r.max_blocks >= on.min_blocks,
+            "contracts of {} blocks at most: not {} at least",
+            r.max_blocks,
+            on.min_blocks
+        );
+        let range = Range {
+            min_cap,
+            max_cap,
             ..r
-        });
+        };
         Ok(Self {
             profile,
             on,
@@ -332,7 +349,13 @@ impl Timing {
             opening_fee: OPENING_FEE,
             nulldata: false,
             pair: false,
+            lending: Lending::default(),
         })
+    }
+
+    /// These terms, the hub lending its holders as much as `lending` says.
+    pub fn with_lending(self, lending: Lending) -> Self {
+        Self { lending, ..self }
     }
 
     /// These terms, quoting graphs that carry her claim and the hub's
@@ -354,9 +377,9 @@ impl Timing {
         Self { pair: true, ..self }
     }
 
-    /// These terms, the hub's own fee for an opening `fee` sat, of the
-    /// fixed terms and those chosen alike: what it charges for what it
-    /// brings, its part of the cap priced by its rate besides.
+    /// These terms, the hub's own fee for an opening `fee` sat: what it
+    /// charges for what it brings, its part of the cap priced by its rate
+    /// besides.
     pub fn with_opening_fee(self, fee: u64) -> Self {
         Self {
             opening_fee: fee,
@@ -377,10 +400,17 @@ impl Timing {
             "{depth} blocks of work: not {floor} to {}",
             floor + MAX_EXTRA_WORK
         );
-        Ok(Self {
+        let deeper = Self {
             work_depth: depth,
             ..self
-        })
+        };
+        ensure!(
+            deeper.range.max_blocks >= deeper.min_blocks(),
+            "{depth} blocks of work: contracts of {} blocks at most, not {} at least",
+            deeper.range.max_blocks,
+            deeper.min_blocks()
+        );
+        Ok(deeper)
     }
 
     /// Blocks of work asked beyond the network's floor.
@@ -401,10 +431,21 @@ impl Timing {
         self.on.min_blocks + self.extra_work()
     }
 
-    /// The largest cap the hub's wallet funds with `balance` sat, its
-    /// reserve its network's: none if not even the least is funded.
-    pub fn fundable(&self, balance: u64) -> Option<u32> {
-        fundable_with(balance, self.on.reserve_hub)
+    /// The most the hub lends of one more contract's cap, in sat, having
+    /// lent its live contracts `lent`, its wallet holding `balance` if
+    /// known: what its lending leaves, what its wallet holds past its
+    /// reserve and a margin for fees, and what rounds a holder's part up
+    /// to a cap ([`ROUNDING`]) whatever its lending. None if its wallet
+    /// holds too little for its reserve: it opens none.
+    pub fn lendable(&self, balance: Option<u64>, lent: u64) -> Option<u32> {
+        let left = self.lending.total.saturating_sub(lent);
+        let lends = left.min(u64::from(self.lending.per_contract));
+        let lends = lends.max(u64::from(ROUNDING)).min(u64::from(MAX_CAP));
+        let lends = match balance {
+            Some(b) => lends.min(b.checked_sub(self.on.reserve_hub + FUNDING_MARGIN)?),
+            None => lends,
+        };
+        Some(u32::try_from(lends).unwrap_or(MAX_CAP))
     }
 
     /// These terms, the hub's fee surcharged `step` steps
@@ -427,10 +468,11 @@ impl Timing {
         self.opening_fee.saturating_mul(u64::from(self.surcharge()))
     }
 
-    /// The terms holders may choose, if any, as the hub's info says them.
-    pub fn range(&self) -> Option<licash_api::ContractRange> {
-        self.range.map(|r| licash_api::ContractRange {
-            min_cap: CAP,
+    /// The terms holders choose among, as the hub's info says them.
+    pub fn range(&self) -> licash_api::ContractRange {
+        let r = self.range;
+        licash_api::ContractRange {
+            min_cap: r.min_cap,
             max_cap: r.max_cap,
             min_blocks: self.min_blocks(),
             max_blocks: r.max_blocks,
@@ -442,39 +484,14 @@ impl Timing {
             ppm_year: r.ppm_year.saturating_mul(self.surcharge()),
             ppm_year_funded: r.ppm_year_funded.saturating_mul(self.surcharge()),
             year_blocks: self.profile.blocks_a_year(),
-        })
-    }
-
-    /// The pricing of the hub's terms, chosen or fixed alike: its range's,
-    /// or, offering the fixed terms only, its fixed fee and no interest.
-    fn pricing(&self) -> licash_api::ContractRange {
-        self.range().unwrap_or(licash_api::ContractRange {
-            min_cap: CAP,
-            max_cap: CAP,
-            min_blocks: self.on.lock,
-            max_blocks: self.on.lock,
-            per_coin: 1,
-            reserve: RESERVE_ALICE,
-            fee: self.opening_fee(),
-            ppm_year: 0,
-            ppm_year_funded: 0,
-            year_blocks: self.profile.blocks_a_year(),
-        })
-    }
-
-    /// Refused unless a holder may ask for `cap` sat over `blocks`: the
-    /// fixed terms, or terms within the hub's range, its cap any it
-    /// pays exactly ([`licash_api::is_cap`]).
-    pub fn allows(&self, cap: u32, blocks: u32) -> Result<()> {
-        if (cap, blocks) == (CAP, self.on.lock) {
-            return Ok(());
         }
-        let Some(range) = self.range() else {
-            bail!(
-                "the hub offers contracts of {CAP} sat over {} blocks only",
-                self.on.lock
-            );
-        };
+    }
+
+    /// Refused unless a holder may ask for `cap` sat over `blocks`: terms
+    /// within the hub's range, its cap any it pays exactly
+    /// ([`licash_api::is_cap`]).
+    pub fn allows(&self, cap: u32, blocks: u32) -> Result<()> {
+        let range = self.range();
         ensure!(
             range.allows_cap(cap),
             "a cap of {cap} sat: not one of {} to {} (its payout's rest, past 2^n - 1 sat, \
@@ -493,18 +510,18 @@ impl Timing {
     }
 
     /// What the hub's opening fee is for `cap` sat over `blocks`,
-    /// `funded` of them funded by its holder: the fixed one, and its
+    /// `funded` of them funded by its holder: its opening fee, and its
     /// rates by the year on its part and on hers, all surcharged at its
     /// step, as its info says them ([`licash_api::ContractRange::fee`]).
     fn fee(&self, cap: u32, blocks: u32, funded: u32) -> u64 {
-        self.pricing().fee(cap, blocks, funded).total()
+        self.range().fee(cap, blocks, funded).total()
     }
 
     /// What opening a contract of `cap` sat over `blocks`, `funded` of
     /// them hers, costs its holder, from her deposit: her reserve and the
     /// hub's fee.
     pub fn price(&self, cap: u32, blocks: u32, funded: u32) -> u64 {
-        self.pricing().price(cap, blocks, funded)
+        self.range().price(cap, blocks, funded)
     }
 
     /// How far beyond `quote` a holder may ask: the close its headers
@@ -538,20 +555,6 @@ impl Timing {
         proof_blocks(self.assert_window(), self.work_depth)
     }
 
-    /// The hub's fixed quote on `keyset` at `checkpoint`, of [`CAP`] sat
-    /// over the blocks its fixed terms last ([`Timing::lock`]): the one
-    /// asked for without terms.
-    pub fn quote(&self, keyset: Keyset, checkpoint: Checkpoint) -> Quote {
-        self.quote_for(keyset, checkpoint, CAP, self.on.lock, 0)
-    }
-
-    /// The blocks the fixed terms last: [`LOCK`] on regtest and signet, two
-    /// weeks on Bitcoin's network, and on Mutinynet the blocks more its
-    /// proof's window has.
-    pub fn lock(&self) -> u32 {
-        self.on.lock
-    }
-
     /// The id of the graphs it quotes: those of the compact filing if the
     /// program contracts open under decides it, else the last before.
     fn graph_id(&self) -> u32 {
@@ -576,8 +579,7 @@ impl Timing {
     /// one output of the rest), 17 bits at least, its headers reaching the
     /// close, its challenge 12 blocks, her reserve 20 000 sat and its fee
     /// 3 000 and its rates, its graph returning the hub its reserve if it
-    /// never responds ([`RETURNING`]). Of [`CAP`] and [`LOCK`], none
-    /// funded, the fixed quote.
+    /// never responds ([`RETURNING`]).
     pub fn quote_for(
         &self,
         keyset: Keyset,
@@ -666,29 +668,40 @@ mod tests {
         assert!(quoted.max_authorizations as usize >= licash::spend::MAX_INPUTS);
     }
 
+    /// A hub lends none of a contract by default but what rounds its
+    /// holder's part up to a cap; as much as its operator lets it, of one
+    /// and of all, and its wallet holds past its reserve and margin.
     #[test]
-    fn a_wallet_funds_the_widest_graph_it_holds_with_its_reserve_and_margin() {
-        let signet = Timing::of(ChainProfile::Core30Signet, None).unwrap();
-        let regtest = Timing::of(ChainProfile::Core30DefaultRegtest, None).unwrap();
-        for balance in [0, 281_070, 281_071, 50_000_000, u64::MAX] {
-            assert_eq!(signet.fundable(balance), fundable(balance));
-            assert_eq!(regtest.fundable(balance), fundable(balance));
-        }
-        let narrowest = u64::from(CAP) + RESERVE_HUB + FUNDING_MARGIN;
-        assert_eq!(fundable(narrowest), Some(CAP));
-        assert_eq!(fundable(narrowest - 1), None);
-        assert_eq!(fundable(0), None);
-        // Half a bitcoin: all of it but the reserve and margin.
-        assert_eq!(fundable(50_000_000), Some(49_850_000));
-        // a rest of under 512 sat: down to the 17 bits
-        assert_eq!(fundable(narrowest + 511), Some(CAP));
-        assert_eq!(fundable(narrowest + 512), Some(CAP + 512));
-        assert_eq!(fundable(u64::MAX), Some(MAX_CAP));
-        // Of the reserve of its network: 40,000 sat less locked in each
-        // contract on Bitcoin's.
-        let mainnet = Timing::of(ChainProfile::Core30Mainnet, None).unwrap();
-        assert_eq!(mainnet.fundable(narrowest - 40_000), Some(CAP));
-        assert_eq!(mainnet.fundable(narrowest - 40_001), None);
+    fn a_hub_lends_what_its_operator_and_its_wallet_let_it() {
+        let signet = Timing::of(ChainProfile::Core30Signet, RANGE).unwrap();
+        let floor = RESERVE_HUB + FUNDING_MARGIN;
+        assert_eq!(signet.lendable(None, 0), Some(ROUNDING));
+        assert_eq!(signet.lendable(Some(u64::MAX), 1 << 40), Some(511));
+        assert_eq!(signet.lendable(Some(floor), 0), Some(0));
+        assert_eq!(signet.lendable(Some(floor + 100), 0), Some(100));
+        // Short of its reserve: none opens.
+        assert_eq!(signet.lendable(Some(floor - 1), 0), None);
+        assert_eq!(signet.lendable(Some(0), 0), None);
+
+        let lends = signet.with_lending(Lending {
+            per_contract: 1_000_000,
+            total: 2_500_000,
+        });
+        assert_eq!(lends.lendable(None, 0), Some(1_000_000));
+        assert_eq!(lends.lendable(Some(floor + 400_000), 0), Some(400_000));
+        assert_eq!(lends.lendable(None, 2_000_000), Some(500_000));
+        assert_eq!(lends.lendable(None, 2_500_000), Some(ROUNDING));
+        assert_eq!(lends.lendable(None, u64::MAX), Some(ROUNDING));
+        let all = signet.with_lending(Lending {
+            per_contract: u32::MAX,
+            total: u64::MAX,
+        });
+        assert_eq!(all.lendable(None, 0), Some(MAX_CAP));
+        assert_eq!(all.lendable(Some(u64::MAX), 0), Some(MAX_CAP));
+        // Of the reserve of its network: 40,000 sat less on Bitcoin's.
+        let mainnet = Timing::of(ChainProfile::Core30Mainnet, RANGE).unwrap();
+        assert_eq!(mainnet.lendable(Some(floor - 40_000), 0), Some(0));
+        assert_eq!(mainnet.lendable(Some(floor - 40_001), 0), None);
     }
 
     /// A hub's opening at Funded, of a mock opening on regtest: its keyset
@@ -703,75 +716,64 @@ mod tests {
         hex::encode(Sha256::digest(&w.0))
     }
 
-    /// The quote every app asking without terms of its own opens on:
-    /// byte for byte as the hub quotes it, on each network. A hub letting
-    /// holders choose prices the fixed terms by its rate as well, at 1% a
-    /// year 24 sat more; one that doesn't, at its fixed fee alone (pinned at
-    /// 3 000 sat, the default once, its bytes unchanged since). Regtest's
+    /// `timing`'s quote of the least it offers: its least cap over its
+    /// fewest blocks, none of it funded by its holder.
+    fn least(timing: &Timing, keyset: &Keyset, checkpoint: &Checkpoint) -> Quote {
+        let r = timing.range();
+        timing.quote_for(
+            keyset.clone(),
+            checkpoint.clone(),
+            r.min_cap,
+            r.min_blocks,
+            0,
+        )
+    }
+
+    /// The quote of the least cap over 1 000 blocks, none of it funded by
+    /// its holder: byte for byte as the hub quotes it, on each network, as
+    /// it did when hubs offered it as their fixed terms, priced by the
+    /// range's rate (at 1% a year, 24 sat over a fee of 3 000). Regtest's
     /// mock decides what every graph does, so it quotes the last (16);
-    /// signet's program reads the exit on the hub's header chain and owes a claim
-    /// of the same contract no evidence against another, and quotes 16 (her
-    /// claim in a leaf's envelope, `assert` carrying π1 alone, a claim whose
-    /// `E` she signed twice owed nothing).
+    /// signet's program reads the exit on the hub's header chain and owes a
+    /// claim of the same contract no evidence against another, and quotes
+    /// 16 (her claim in a leaf's envelope, `assert` carrying π1 alone, a
+    /// claim whose `E` she signed twice owed nothing).
     #[test]
-    fn the_fixed_quote_is_pinned() {
+    fn the_least_quote_is_pinned() {
         let parts = Hub::peek(funded()).unwrap().base.parts().clone();
         let (keyset, checkpoint) = (parts.keyset, parts.chain.checkpoint);
-        let pinned = [
-            (
-                None,
-                [
-                    "e79aeb4afefda90c089117e7b29e11efd4b5fb5032d8c939c199b299695aa34b",
-                    "a708a4d3a0baeac64f94b71e3e8e6df98b870ef47443b34569335a363bff6045",
-                ],
-                3_000,
-            ),
-            (
-                Some(RANGE),
-                [
-                    "e237ab9009a58222e8d43f9e14aea009f7b35fb7d8fc184b167490883a18396b",
-                    "c4da722293e71c10404e40aa33bad2ce6f4ba0572b84f60303843982f5695cfd",
-                ],
-                3_024,
-            ),
-        ];
-        for (range, [regtest_digest, signet_digest], fee) in pinned {
-            let quoted = |profile| {
-                let timing = Timing::of(profile, range).unwrap().with_opening_fee(3_000);
-                let quote = timing.quote(keyset.clone(), checkpoint.clone());
-                assert_eq!(quote.fees.opening_fee_quote, fee);
-                assert_eq!((quote.cap, quote.graph.bits), (CAP, 17));
-                assert_eq!(quote.graph.deposit_units, 0);
-                (digest(&quote), timing.bounds(&quote))
-            };
-            let (regtest, bounds) = quoted(ChainProfile::Core30DefaultRegtest);
-            assert_eq!(regtest, regtest_digest);
-            assert_eq!((bounds.lock, bounds.response_window), (1_000, 2));
-            let (signet, bounds) = quoted(ChainProfile::Core30Signet);
-            assert_eq!(signet, signet_digest);
-            let at = Timing::of(ChainProfile::Core30Signet, range)
-                .unwrap()
-                .with_opening_fee(3_000);
-            let graph = at.quote(keyset.clone(), checkpoint.clone()).graph.id;
-            assert_eq!(graph, licash::recovery::PI1_ALONE_FROM);
-            // Regtest quotes the graph its mock reads, leaf envelopes and
-            // π1 alone, and the signets' or the one before told to.
-            let regtest = Timing::of(ChainProfile::Core30DefaultRegtest, range).unwrap();
-            let graph = regtest.quote(keyset.clone(), checkpoint.clone()).graph.id;
-            assert_eq!(graph, licash::recovery::PI1_ALONE_FROM);
-            let graph = (regtest.with_pair())
-                .quote(keyset.clone(), checkpoint.clone())
-                .graph
-                .id;
-            assert_eq!(graph, licash::recovery::LEAF_FROM);
-            let graph = (regtest
-                .with_nulldata()
-                .quote(keyset.clone(), checkpoint.clone()))
-            .graph
-            .id;
-            assert_eq!(graph, licash::recovery::SIGNED_FROM);
-            assert_eq!((bounds.lock, bounds.response_window), (1_000, 12));
-        }
+        let quoted = |profile| {
+            let timing = Timing::of(profile, RANGE).unwrap().with_opening_fee(3_000);
+            let quote = timing.quote_for(keyset.clone(), checkpoint.clone(), CAP, 1_000, 0);
+            assert_eq!(quote.fees.opening_fee_quote, 3_024);
+            assert_eq!((quote.cap, quote.graph.bits), (CAP, 17));
+            assert_eq!(quote.graph.deposit_units, 0);
+            (digest(&quote), timing.bounds(&quote))
+        };
+        let (regtest, bounds) = quoted(ChainProfile::Core30DefaultRegtest);
+        assert_eq!(
+            regtest,
+            "e237ab9009a58222e8d43f9e14aea009f7b35fb7d8fc184b167490883a18396b"
+        );
+        assert_eq!((bounds.lock, bounds.response_window), (1_000, 2));
+        let (signet, bounds) = quoted(ChainProfile::Core30Signet);
+        assert_eq!(
+            signet,
+            "c4da722293e71c10404e40aa33bad2ce6f4ba0572b84f60303843982f5695cfd"
+        );
+        assert_eq!((bounds.lock, bounds.response_window), (1_000, 12));
+        let graph = |t: Timing| least(&t, &keyset, &checkpoint).graph.id;
+        let signet = Timing::of(ChainProfile::Core30Signet, RANGE).unwrap();
+        assert_eq!(graph(signet), licash::recovery::PI1_ALONE_FROM);
+        // Regtest quotes the graph its mock reads, leaf envelopes and
+        // π1 alone, and the signets' or the one before told to.
+        let regtest = Timing::of(ChainProfile::Core30DefaultRegtest, RANGE).unwrap();
+        assert_eq!(graph(regtest), licash::recovery::PI1_ALONE_FROM);
+        assert_eq!(graph(regtest.with_pair()), licash::recovery::LEAF_FROM);
+        assert_eq!(
+            graph(regtest.with_nulldata()),
+            licash::recovery::SIGNED_FROM
+        );
     }
 
     /// A graph of the compact filing is quoted where the program trusted
@@ -786,8 +788,8 @@ mod tests {
             ChainProfile::Mutinynet,
         ] {
             let trust = crate::trust(profile).unwrap();
-            let timing = Timing::of(profile, None).unwrap();
-            let quote = timing.quote(parts.keyset.clone(), parts.chain.checkpoint.clone());
+            let timing = Timing::of(profile, RANGE).unwrap();
+            let quote = least(&timing, &parts.keyset, &parts.chain.checkpoint);
             let compact = quote.graph.id >= COMPACT_FROM;
             assert_eq!(compact, trust.compact, "{profile}");
             // No program that decodes only the legacy filing is the one
@@ -798,6 +800,7 @@ mod tests {
 
     /// Up to 100 M sat (67 108 863, a size) over half a year, at 1% a year.
     const RANGE: Range = Range {
+        min_cap: CAP,
         max_cap: 100_000_000,
         max_blocks: 26_280,
         ppm_year: 10_000,
@@ -818,17 +821,20 @@ mod tests {
             ChainProfile::Core30Signet,
             ChainProfile::Mutinynet,
         ] {
-            let timing = Timing::of(profile, None).unwrap();
-            let quote = timing.quote(keyset.clone(), checkpoint.clone());
-            let bounds = timing.bounds(&quote);
-            assert_eq!(bounds.lock, timing.lock(), "{profile:?}");
-            let close = checkpoint.height() + skew + bounds.lock;
-            let budget = checkpoint.height() + quote.chain.max_headers;
-            let after = u32::from(quote.graph.publication_window) + quote.chain.work_depth;
-            assert!(
-                budget >= close + after,
-                "{profile:?}: {budget} < {close} + {after}"
-            );
+            let timing = Timing::of(profile, RANGE).unwrap();
+            let r = timing.range();
+            for blocks in [r.min_blocks, r.max_blocks] {
+                let quote = timing.quote_for(keyset.clone(), checkpoint.clone(), CAP, blocks, 0);
+                let bounds = timing.bounds(&quote);
+                assert_eq!(bounds.lock, blocks, "{profile:?}");
+                let close = checkpoint.height() + skew + bounds.lock;
+                let budget = checkpoint.height() + quote.chain.max_headers;
+                let after = u32::from(quote.graph.publication_window) + quote.chain.work_depth;
+                assert!(
+                    budget >= close + after,
+                    "{profile:?}: {budget} < {close} + {after}"
+                );
+            }
         }
     }
 
@@ -836,8 +842,8 @@ mod tests {
     fn a_quote_chosen_is_as_wide_as_its_cap_and_as_long_as_its_blocks() {
         let parts = Hub::peek(funded()).unwrap().base.parts().clone();
         let (keyset, checkpoint) = (parts.keyset.clone(), parts.chain.checkpoint.clone());
-        let timing = Timing::of(ChainProfile::Core30Signet, Some(RANGE)).unwrap();
-        let fixed = timing.quote(keyset.clone(), checkpoint.clone());
+        let timing = Timing::of(ChainProfile::Core30Signet, RANGE).unwrap();
+        let fixed = timing.quote_for(keyset.clone(), checkpoint.clone(), CAP, 1_000, 0);
         let quote =
             |cap, blocks| timing.quote_for(keyset.clone(), checkpoint.clone(), cap, blocks, 0);
 
@@ -866,7 +872,7 @@ mod tests {
             25_000 + OPENING_FEE + 41_943
         );
         assert_eq!(timing.bounds(&chosen).lock, 26_280);
-        // But for those, as the fixed quote is.
+        // But for those, as the least quote is.
         let mut same = chosen.clone();
         same.cap = fixed.cap;
         same.graph.bits = fixed.graph.bits;
@@ -935,15 +941,15 @@ mod tests {
     fn a_surcharged_quote_costs_what_the_info_says() {
         let parts = Hub::peek(funded()).unwrap().base.parts().clone();
         let (keyset, checkpoint) = (parts.keyset, parts.chain.checkpoint);
-        let timing = Timing::of(ChainProfile::Core30Signet, Some(RANGE)).unwrap();
+        let timing = Timing::of(ChainProfile::Core30Signet, RANGE).unwrap();
         for step in 0..=MAX_STEP + 1 {
             let at = timing.at_step(step);
             let m = 1u64 << step.min(MAX_STEP);
-            let range = at.range().unwrap();
+            let range = at.range();
             assert_eq!((range.reserve, range.fee), (RESERVE_ALICE, OPENING_FEE * m));
             assert_eq!(u64::from(range.ppm_year), 10_000 * m);
             for (cap, blocks, funded) in [
-                (CAP, LOCK, 0),
+                (CAP, 1_000, 0),
                 (16_777_215, 26_280, 0),
                 (16_777_215, 26_280, 8_388_607),
             ] {
@@ -958,33 +964,30 @@ mod tests {
             assert_eq!(chosen.fees.opening_fee_quote, OPENING_FEE * m + interest);
         }
         // Step 0, the quote as it always was.
-        let quote = |t: Timing| digest(&t.quote(keyset.clone(), checkpoint.clone()));
+        let quote = |t: Timing| digest(&least(&t, &keyset, &checkpoint));
         assert_eq!(quote(timing.at_step(0)), quote(timing));
         assert_ne!(quote(timing.at_step(1)), quote(timing));
     }
 
     /// The operator's fee for an opening is the one quoted, announced and
-    /// surcharged, of the fixed terms and those chosen alike; by default,
-    /// the quote as it always was.
+    /// surcharged; by default, the quote as it always was.
     #[test]
     fn the_operators_opening_fee_is_the_one_quoted_and_announced() {
         let parts = Hub::peek(funded()).unwrap().base.parts().clone();
         let (keyset, checkpoint) = (parts.keyset, parts.chain.checkpoint);
-        let quote = |t: Timing| digest(&t.quote(keyset.clone(), checkpoint.clone()));
-        for range in [None, Some(RANGE)] {
-            let timing = Timing::of(ChainProfile::Core30Signet, range).unwrap();
-            assert_eq!(quote(timing.with_opening_fee(OPENING_FEE)), quote(timing));
-            for (fee, step) in [(0, 0), (50_000, 0), (50_000, 2), (u64::MAX, MAX_STEP)] {
-                let at = timing.with_opening_fee(fee).at_step(step);
-                let fee = fee.saturating_mul(1 << step);
-                let fixed = at.quote_for(keyset.clone(), checkpoint.clone(), CAP, LOCK, 0);
-                let interest = fixed.fees.opening_fee_quote.checked_sub(fee).unwrap();
-                assert_eq!(
-                    at.price(CAP, LOCK, 0),
-                    RESERVE_ALICE.saturating_add(fee + interest)
-                );
-                assert_eq!(at.range().map(|r| r.fee), range.map(|_| fee));
-            }
+        let quote = |t: Timing| digest(&least(&t, &keyset, &checkpoint));
+        let timing = Timing::of(ChainProfile::Core30Signet, RANGE).unwrap();
+        assert_eq!(quote(timing.with_opening_fee(OPENING_FEE)), quote(timing));
+        for (fee, step) in [(0, 0), (50_000, 0), (50_000, 2), (u64::MAX, MAX_STEP)] {
+            let at = timing.with_opening_fee(fee).at_step(step);
+            let fee = fee.saturating_mul(1 << step);
+            let least = at.quote_for(keyset.clone(), checkpoint.clone(), CAP, 1_000, 0);
+            let interest = least.fees.opening_fee_quote.checked_sub(fee).unwrap();
+            assert_eq!(
+                at.price(CAP, 1_000, 0),
+                RESERVE_ALICE.saturating_add(fee + interest)
+            );
+            assert_eq!(at.range().fee, fee);
         }
     }
 
@@ -1000,9 +1003,9 @@ mod tests {
             ChainProfile::Core30Signet,
             ChainProfile::Mutinynet,
         ] {
-            let timing = Timing::of(profile, Some(RANGE)).unwrap();
+            let timing = Timing::of(profile, RANGE).unwrap();
             let floor = Floors::of(profile).work_depth;
-            let quote = |t: &Timing| t.quote(keyset.clone(), checkpoint.clone());
+            let quote = |t: &Timing| t.quote_for(keyset.clone(), checkpoint.clone(), CAP, 1_000, 0);
             let at_floor = timing.with_work_depth(floor).unwrap();
             assert_eq!(digest(&quote(&at_floor)), digest(&quote(&timing)));
             let deeper = timing.with_work_depth(floor + MAX_EXTRA_WORK).unwrap();
@@ -1014,7 +1017,7 @@ mod tests {
             );
             more.check(profile).unwrap();
             assert_eq!(deeper.proof_blocks(), timing.proof_blocks());
-            let (shortest, longer) = (timing.range().unwrap(), deeper.range().unwrap());
+            let (shortest, longer) = (timing.range(), deeper.range());
             assert_eq!(longer.min_blocks, shortest.min_blocks + MAX_EXTRA_WORK);
             for wrong in [floor.saturating_sub(1), floor + MAX_EXTRA_WORK + 1] {
                 if wrong != floor {
@@ -1026,14 +1029,8 @@ mod tests {
 
     #[test]
     fn holders_choose_within_the_hubs_range_whatever_their_coin() {
-        let fixed = Timing::of(ChainProfile::Core30Signet, None).unwrap();
-        assert!(fixed.range().is_none());
-        assert!(fixed.allows(CAP, LOCK).is_ok());
-        let error = fixed.allows(CAP, LOCK - 1).unwrap_err();
-        assert!(error.to_string().contains("only"), "{error}");
-
-        let timing = Timing::of(ChainProfile::Core30Signet, Some(RANGE)).unwrap();
-        let range = timing.range().unwrap();
+        let timing = Timing::of(ChainProfile::Core30Signet, RANGE).unwrap();
+        let range = timing.range();
         // Its largest cap the operator's.
         assert_eq!((range.min_cap, range.max_cap), (CAP, 100_000_000));
         assert_eq!((range.min_blocks, range.max_blocks), (576, 26_280));
@@ -1042,19 +1039,19 @@ mod tests {
             (range.per_coin, range.reserve, range.fee, range.ppm_year),
             (u32::MAX, 25_000, OPENING_FEE, 10_000)
         );
-        assert!(timing.allows(CAP, LOCK).is_ok());
+        assert!(timing.allows(CAP, 1_000).is_ok());
         assert!(timing.allows(67_108_863, 26_280).is_ok());
         assert!(timing.allows(100_000_000, 26_280).is_ok());
         assert!(timing.allows(1_048_575, 576).is_ok());
-        assert!(timing.allows(15_000_000, LOCK).is_ok());
-        assert!(timing.allows(1_048_575 + 512, LOCK).is_ok());
+        assert!(timing.allows(15_000_000, 1_000).is_ok());
+        assert!(timing.allows(1_048_575 + 512, 1_000).is_ok());
         for (cap, blocks) in [
-            (CAP - 1, LOCK),
-            (CAP + 1, LOCK),
-            (1_048_576, LOCK),
-            (1_048_575 + 511, LOCK),
-            (100_000_001, LOCK),
-            (134_217_727, LOCK),
+            (CAP - 1, 1_000),
+            (CAP + 1, 1_000),
+            (1_048_576, 1_000),
+            (1_048_575 + 511, 1_000),
+            (100_000_001, 1_000),
+            (134_217_727, 1_000),
             (CAP, 575),
             (CAP, 26_281),
         ] {
@@ -1062,7 +1059,7 @@ mod tests {
         }
 
         // Out of bounds, refused as the hub starts.
-        let wider = |r: Range| Timing::of(ChainProfile::Core30Signet, Some(r)).is_err();
+        let wider = |r: Range| Timing::of(ChainProfile::Core30Signet, r).is_err();
         assert!(wider(Range {
             max_cap: MAX_CAP + 1,
             ..RANGE
@@ -1072,9 +1069,44 @@ mod tests {
             ..RANGE
         }));
         assert!(wider(Range {
-            max_blocks: LOCK - 1,
+            max_blocks: 575,
             ..RANGE
         }));
+        assert!(wider(Range {
+            min_cap: CAP - 1,
+            ..RANGE
+        }));
+        assert!(wider(Range {
+            min_cap: 100_000_001,
+            ..RANGE
+        }));
+        // Its least cap the operator's too, taken up to a cap; contracts
+        // below it refused.
+        let narrower = Range {
+            min_cap: 1_000_000,
+            ..RANGE
+        };
+        let timing = Timing::of(ChainProfile::Core30Signet, narrower).unwrap();
+        assert_eq!(timing.range().min_cap, 1_000_000);
+        assert!(timing.allows(CAP, 1_000).is_err());
+        assert!(timing.allows(1_048_575, 1_000).is_ok());
+        // Not a cap: taken up to the next.
+        let odd = Range {
+            min_cap: 1_048_575 + 1,
+            ..RANGE
+        };
+        let timing = Timing::of(ChainProfile::Core30Signet, odd).unwrap();
+        assert_eq!(timing.range().min_cap, 1_048_575 + 512);
+        // Its fewest blocks its network's, more work asked lengthening
+        // them past its most refused.
+        let short = Range {
+            max_blocks: 576,
+            ..RANGE
+        };
+        let timing = Timing::of(ChainProfile::Core30Signet, short).unwrap();
+        let floor = Floors::of(ChainProfile::Core30Signet).work_depth;
+        assert!(timing.with_work_depth(floor).is_ok());
+        assert!(timing.with_work_depth(floor + 1).is_err());
     }
 
     /// A quote on Bitcoin's network as its hub will make it: of the graph
@@ -1097,8 +1129,8 @@ mod tests {
         let parts = Hub::peek(funded()).unwrap().base.parts().clone();
         let (keyset, checkpoint) = (parts.keyset, parts.chain.checkpoint);
         let profile = ChainProfile::Core30Mainnet;
-        let timing = Timing::of(profile, Some(RANGE)).unwrap();
-        let quote = of_the_newest_graph(timing.quote(keyset.clone(), checkpoint.clone()));
+        let timing = Timing::of(profile, RANGE).unwrap();
+        let quote = of_the_newest_graph(least(&timing, &keyset, &checkpoint));
         quote.check(profile).unwrap();
         let (g, c) = (&quote.graph, &quote.chain);
         assert_eq!(timing.bounds(&quote).response_window, 144);
@@ -1111,8 +1143,8 @@ mod tests {
         assert_eq!((g.reserve_alice, g.reserve_hub), (25_000, 60_000));
         // 135 blocks to prove in, of the 144: 22 hours and a half.
         assert_eq!(timing.proof_blocks(), 135);
-        let range = timing.range().unwrap();
-        assert_eq!((range.min_blocks, timing.lock()), (1_296, 2_016));
+        let range = timing.range();
+        assert_eq!(range.min_blocks, 1_296);
         assert_eq!(range.year_blocks, 52_560);
         assert!(timing.allows(CAP, 1_296).is_ok());
         assert!(timing.allows(CAP, 1_295).is_err());
@@ -1135,13 +1167,13 @@ mod tests {
         widest(MAX_CAP_MAINNET).unwrap();
         let error = widest(MAX_CAP_MAINNET + 1).unwrap_err().to_string();
         assert!(error.contains("reserve affords"), "{error}");
-        let offering = |max_cap| Timing::of(profile, Some(Range { max_cap, ..RANGE }));
+        let offering = |max_cap| Timing::of(profile, Range { max_cap, ..RANGE });
         assert!(offering(MAX_CAP_MAINNET).is_ok());
         let error = offering(MAX_CAP_MAINNET + 1).unwrap_err().to_string();
         assert!(error.contains("on bitcoin"), "{error}");
         // Signet's terms are as they were.
-        let signet = Timing::of(ChainProfile::Core30Signet, Some(RANGE)).unwrap();
-        let s = signet.quote(keyset, checkpoint);
+        let signet = Timing::of(ChainProfile::Core30Signet, RANGE).unwrap();
+        let s = least(&signet, &keyset, &checkpoint);
         assert_eq!((s.graph.assert_window, s.graph.challenge_window), (48, 144));
         assert_eq!(s.graph.answer_window, 12);
         assert_eq!(
@@ -1153,18 +1185,18 @@ mod tests {
 
     /// Mutinynet's terms are those of Bitcoin's network in blocks but for
     /// its proof's window, which is counted in time: 2,880 of its blocks
-    /// are the day that network's 144 are, and the fixed contract and the
-    /// shortest chosen are as many blocks longer. Its interest counts a
+    /// are the day that network's 144 are, and the shortest contract is as
+    /// many blocks longer. Its interest counts a
     /// year of its own blocks. As deep as signet, and a cap of any size.
     #[test]
     fn mutinynets_terms_are_bitcoins_in_blocks_but_for_the_proofs_window_and_its_year() {
         let parts = Hub::peek(funded()).unwrap().base.parts().clone();
         let (keyset, checkpoint) = (parts.keyset, parts.chain.checkpoint);
-        let mainnet = Timing::of(ChainProfile::Core30Mainnet, Some(RANGE)).unwrap();
-        let mutinynet = Timing::of(ChainProfile::Mutinynet, Some(RANGE)).unwrap();
+        let mainnet = Timing::of(ChainProfile::Core30Mainnet, RANGE).unwrap();
+        let mutinynet = Timing::of(ChainProfile::Mutinynet, RANGE).unwrap();
         let (b, m) = (
-            mainnet.quote(keyset.clone(), checkpoint.clone()),
-            mutinynet.quote(keyset, checkpoint),
+            least(&mainnet, &keyset, &checkpoint),
+            least(&mutinynet, &keyset, &checkpoint),
         );
         m.check(ChainProfile::Mutinynet).unwrap();
         let windows = |q: &Quote| {
@@ -1185,14 +1217,12 @@ mod tests {
             f64::from(mutinynet.proof_blocks()) * 30.0 >= f64::from(mainnet.proof_blocks()) * 600.0
         );
         let longer = 2_880 - 144;
-        assert_eq!(mutinynet.lock(), mainnet.lock() + longer);
-        let (a, b) = (mainnet.range().unwrap(), mutinynet.range().unwrap());
+        let (a, b) = (mainnet.range(), mutinynet.range());
         assert_eq!(b.min_blocks, a.min_blocks + longer);
-        assert_eq!((b.min_blocks, mutinynet.lock()), (4_032, 4_752));
+        assert_eq!(b.min_blocks, 4_032);
         assert_eq!((a.year_blocks, b.year_blocks), (52_560, 1_051_200));
         for timing in [&mainnet, &mutinynet] {
-            let range = timing.range().unwrap();
-            assert!(timing.allows(CAP, timing.lock()).is_ok());
+            let range = timing.range();
             assert!(timing.allows(CAP, range.min_blocks).is_ok());
             assert!(timing.allows(CAP, range.min_blocks - 1).is_err());
         }
@@ -1201,9 +1231,9 @@ mod tests {
             a.fee(16_777_215, 26_280, 0),
             b.fee(16_777_215, 26_280 * 20, 0)
         );
-        let offering = |r: Range| Timing::of(ChainProfile::Mutinynet, Some(r));
+        let offering = |r: Range| Timing::of(ChainProfile::Mutinynet, r);
         assert!(offering(Range {
-            max_blocks: mutinynet.lock() - 1,
+            max_blocks: b.min_blocks - 1,
             ..RANGE
         })
         .is_err());
@@ -1222,10 +1252,10 @@ mod tests {
         let parts = Hub::peek(funded()).unwrap().base.parts().clone();
         let (keyset, checkpoint) = (parts.keyset.clone(), parts.chain.checkpoint.clone());
         for profile in ChainProfile::ALL {
-            let timing = Timing::of(profile, None).unwrap();
+            let timing = Timing::of(profile, RANGE).unwrap();
             let floor = Floors::of(profile).work_depth;
             for timing in [timing, timing.with_work_depth(floor + 10).unwrap()] {
-                let quote = timing.quote(keyset.clone(), checkpoint.clone());
+                let quote = least(&timing, &keyset, &checkpoint);
                 let base = licash::base::Base::new(licash::base::Parts {
                     graph: GraphTerms {
                         assert_window: quote.graph.assert_window,
@@ -1250,7 +1280,7 @@ mod tests {
     /// covers every network's.
     #[test]
     fn the_lock_window_must_cover_the_contracts_response_window() {
-        let signet = Timing::of(ChainProfile::Core30Signet, None).unwrap();
+        let signet = Timing::of(ChainProfile::Core30Signet, RANGE).unwrap();
         assert!(signet.covers_locks(12).is_ok());
         assert!(signet.covers_locks(144).is_ok());
         let short = signet.covers_locks(11).unwrap_err();
@@ -1261,10 +1291,10 @@ mod tests {
         // The hub service's default lock window, 144 blocks: the day a
         // hub has to respond in on Bitcoin's network, and no more.
         for profile in ChainProfile::ALL {
-            let timing = Timing::of(profile, None).unwrap();
+            let timing = Timing::of(profile, RANGE).unwrap();
             assert!(timing.covers_locks(144).is_ok(), "{profile}");
         }
-        let mainnet = Timing::of(ChainProfile::Core30Mainnet, None).unwrap();
+        let mainnet = Timing::of(ChainProfile::Core30Mainnet, RANGE).unwrap();
         assert!(mainnet.covers_locks(143).is_err());
     }
 }
