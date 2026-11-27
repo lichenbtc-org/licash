@@ -2394,8 +2394,9 @@ mod tests {
     use super::{before_fee, seen_paid};
 
     /// What the app goes by to gray a hub: open unless the hub says it
-    /// is full or funds none of its smallest contract, as hubs before any
-    /// said either read.
+    /// is full or lends nothing of a contract, as hubs before any said
+    /// either read. Under range-only terms its holder funds what the hub
+    /// does not lend, so a loan short of the least cap is still room.
     #[test]
     fn a_hub_has_room_for_a_contract_unless_it_says_otherwise() {
         use crate::{contract_room, ContractRange, ContractTerms, HubRoom};
@@ -2419,10 +2420,14 @@ mod tests {
             ..terms
         };
         assert_eq!(contract_room(funds(0)), HubRoom::Unfunded);
+        // Less than rounds her part up to a cap is lending nothing.
+        assert_eq!(contract_room(funds(511)), HubRoom::Unfunded);
+        assert_eq!(contract_room(funds(512)), HubRoom::Open);
         assert_eq!(contract_room(funds(131_071)), HubRoom::Open);
         // More than fits a hub's 32 bits is still room, not none.
         assert_eq!(contract_room(funds(u64::MAX)), HubRoom::Open);
-        // Against the smallest it lets a wallet choose, where it does.
+        // Lending less than the smallest contract it opens: she funds the
+        // rest.
         let ranged = ContractTerms {
             range: Some(ContractRange {
                 min_cap: 262_143,
@@ -2438,7 +2443,7 @@ mod tests {
             }),
             ..funds(131_071)
         };
-        assert_eq!(contract_room(ranged), HubRoom::Unfunded);
+        assert_eq!(contract_room(ranged), HubRoom::Open);
     }
 
     #[test]
