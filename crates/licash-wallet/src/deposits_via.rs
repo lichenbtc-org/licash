@@ -99,7 +99,7 @@ impl<T: Transport> Wallet<T> {
         let provider = hub_url(provider)?;
         let url = hub_url(hub)?;
         let (_, hub_info) = self.hub(&url)?;
-        let info: swaps::Info = self.get(&provider, swaps::SWAPS_INFO).await?;
+        let info = self.quoted_terms(&provider).await?;
         let terms = info.deposits.ok_or_else(|| {
             Error::Invalid(format!("provider {provider} takes no deposits on Bitcoin"))
         })?;
@@ -443,10 +443,13 @@ impl<T: Transport> Wallet<T> {
         pays: u64,
         terms: &Depositing,
     ) -> Result<Htlc, Error> {
-        let (_, hub_info) = self.refresh(url).await?;
+        // Asked at once, each a round trip over Tor; failed as when asked
+        // in turn, the hub's failure first.
+        let (said, info) = crate::both(self.refresh(url), self.fresh_terms(provider)).await;
+        let (_, hub_info) = said?;
+        let info = info?;
         let wrong =
             |why: String| Error::Invalid(format!("provider {provider} answered a deposit {why}"));
-        let info: swaps::Info = self.get(provider, swaps::SWAPS_INFO).await?;
         let deposits = info
             .deposits
             .ok_or_else(|| wrong("but takes none".into()))?;

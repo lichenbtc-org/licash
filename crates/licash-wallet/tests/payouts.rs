@@ -1195,6 +1195,34 @@ async fn the_least_a_provider_pays_out_is_its_smallest_coin_less_the_claims_fee(
     );
 }
 
+/// Terms kept, as an app asking its providers ahead keeps them: quoted
+/// from without asking, until asked again; what is paid asks again.
+#[tokio::test]
+async fn a_quote_reads_the_terms_kept_and_a_payout_asks_again() {
+    let eco = Eco::new().await;
+    eco.client.keep_terms(licash_wallet::TERMS_FRESH);
+    let quote = || {
+        eco.client
+            .payout_quote(PROVIDER, A, PAYEE, 1000, MAX_FEE, ONE_SAT)
+    };
+    let usual = quote().await.unwrap();
+    // It pays out nothing now: quoted as kept all the same.
+    *eco.desk.terms.lock().unwrap() = None;
+    assert_eq!(quote().await.unwrap().costs(), usual.costs());
+    // Paid: asked again, refused before any lock.
+    let e = eco.client.payout(&usual).await.unwrap_err();
+    assert!(matches!(e, Error::Invalid(_)), "{e}");
+    assert!(eco.client.locks().unwrap().is_empty());
+    // Asked again: its terms as they are now.
+    match quote().await {
+        Err(Error::Invalid(reason)) => assert!(reason.contains("pays nothing out"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+    *eco.desk.terms.lock().unwrap() = Some(TERMS);
+    eco.client.provider_info(PROVIDER).await.unwrap();
+    assert_eq!(quote().await.unwrap().costs(), usual.costs());
+}
+
 #[tokio::test]
 async fn a_payout_is_refused_beyond_its_terms_before_any_lock() {
     let eco = Eco::new().await;

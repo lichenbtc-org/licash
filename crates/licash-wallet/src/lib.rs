@@ -118,7 +118,7 @@ pub use silent::{
     SilentTweaks,
 };
 use store::{now, sql, Owner, Store};
-pub use swaps::{Swap, SwapLimits, SwapQuote, SwapState, SWAP_ROOM, SWAP_WINDOW};
+pub use swaps::{Swap, SwapLimits, SwapQuote, SwapState, SWAP_ROOM, SWAP_WINDOW, TERMS_FRESH};
 
 /// The default relative limit for automatic renewal without contract
 /// ceilings ([`Wallet::set_renew_limit`]), in parts per million. A modest
@@ -569,6 +569,13 @@ pub struct Wallet<T> {
     /// The invoices being advanced, each by one caller at a time
     /// ([`Wallet::advance_invoice`]): by hash.
     advancing: Mutex<HashMap<[u8; 32], std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    /// Each swap provider's terms as it last answered, and when, by URL:
+    /// what quotes read for as long as they are kept ([`Wallet::keep_terms`]),
+    /// in memory only.
+    terms: Mutex<HashMap<String, (licash_api::swaps::Info, std::time::Instant)>>,
+    /// How long quotes read terms kept, in seconds: 0, asked each time,
+    /// unless the application keeps them.
+    terms_for: std::sync::atomic::AtomicU64,
 }
 
 /// The height by which a lock at the hub reached at any of the URLs given,
@@ -641,6 +648,8 @@ impl<T: Transport> Wallet<T> {
             told_tip: AtomicU32::new(0),
             collecting_codes: Default::default(),
             advancing: Mutex::default(),
+            terms: Mutex::default(),
+            terms_for: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -682,6 +691,8 @@ impl<T: Transport> Wallet<T> {
             told_tip: AtomicU32::new(0),
             collecting_codes: Default::default(),
             advancing: Mutex::default(),
+            terms: Mutex::default(),
+            terms_for: std::sync::atomic::AtomicU64::new(0),
         })
     }
 

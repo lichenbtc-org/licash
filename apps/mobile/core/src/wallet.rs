@@ -278,6 +278,9 @@ impl Wallet {
             None => (Http::new(None).map_err(LicashError::failed)?, Route::Direct),
         };
         let wallet = wallet(&wallet_file(&dir), http)?;
+        // Quotes read the providers' terms as last asked, by
+        // `warm_providers` ahead of them: at once, asking nothing.
+        wallet.keep_terms(licash_wallet::TERMS_FRESH);
         let wallet = Self {
             runtime,
             wallet,

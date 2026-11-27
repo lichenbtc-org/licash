@@ -834,6 +834,66 @@ fn a_phone_pays_an_invoice_through_a_provider_when_no_hub_pays_it() {
 }
 
 #[test]
+fn an_invoice_is_paid_through_the_next_provider_if_one_fails_before_locking() {
+    let hubs = Hubs::start();
+    let lightning = |node: &Fake| swaps::Lightning {
+        node: node.pubkey(),
+        fee: Fee {
+            base: 2,
+            ppm: 10_000,
+        },
+        max: 2_000,
+        slack: licash_swaps::MIN_SLACK,
+    };
+    let (one, two) = (Arc::new(Fake::new()), Arc::new(Fake::new()));
+    one.tip(3, [0; 32]);
+    two.tip(3, [0; 32]);
+    let first = Swaps::start_paying(&hubs, 0x52, TERMS, (one.clone(), lightning(&one)));
+    let next = Swaps::start_paying(&hubs, 0x56, TERMS, (two.clone(), lightning(&two)));
+    let phone = hubs.phone(1_000);
+    let preimage = [7; 32];
+    let request = one.invoice(100_000, lock_hash(&preimage), 6, Outcome::Pay(preimage));
+    let mut offers = Vec::new();
+    for _ in 0..50 {
+        offers = phone.invoice_offers(request.clone()).unwrap_or_default();
+        if offers.len() == 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(offers.len(), 2, "{offers:?}");
+    let chosen = offers
+        .iter()
+        .find(|o| o.provider.url == first.url())
+        .unwrap();
+
+    // Quoted from the terms kept; the chosen one unreachable when paid:
+    // nothing locked to it, so the other, costing no more, pays it.
+    first.down.store(true, Ordering::SeqCst);
+    let (provider, fees) = (
+        &chosen.provider,
+        (chosen.provider.fee, chosen.provider.lock_fee),
+    );
+    let paying = phone.pay_invoice_via(
+        request.clone(),
+        chosen.hub.clone(),
+        provider.url.clone(),
+        fees.0,
+        fees.1,
+    );
+    let paying = paying.unwrap();
+    match phone.details(Kind::Lightning, paying.id.clone()).unwrap() {
+        Details::Lightning { provider, .. } => assert_eq!(provider, Some(next.url())),
+        other => panic!("{other:?}"),
+    }
+    let locks = phone.history().unwrap();
+    assert_eq!(
+        locks.iter().filter(|a| a.kind == Kind::Lightning).count(),
+        1
+    );
+}
+
+#[test]
 fn a_phone_is_paid_over_lightning_through_a_provider_when_no_hub_takes_it() {
     let hubs = Hubs::start();
     let phone = hubs.phone(1_000);

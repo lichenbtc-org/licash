@@ -389,7 +389,7 @@ impl<T: Transport> Wallet<T> {
         let invoice = decode(request)?;
         let msat = self.payable(&invoice)?;
         let (hub, info) = self.hub(&url)?;
-        let offer: swaps::Info = self.get(&provider, swaps::SWAPS_INFO).await?;
+        let offer = self.quoted_terms(&provider).await?;
         let at = (url.as_str(), &info);
         let (locked, fee, expiry) = via_terms(&provider, &offer, at, &invoice, msat, max_fee)?;
         let fees = self.agreed_fees(hub, &url, &info)?;
@@ -453,8 +453,11 @@ impl<T: Transport> Wallet<T> {
         let url = hub_url(url)?;
         let invoice = decode(request)?;
         let msat = self.payable(&invoice)?;
-        let (hub, info) = self.refresh(&url).await?;
-        let offer: swaps::Info = self.get(&provider, swaps::SWAPS_INFO).await?;
+        // Asked at once, each a round trip over Tor; failed as when asked
+        // in turn, the hub's failure first.
+        let (said, offer) = crate::both(self.refresh(&url), self.fresh_terms(&provider)).await;
+        let (hub, info) = said?;
+        let offer = offer?;
         let hash: [u8; 32] = *invoice.payment_hash().as_ref();
         let request = invoice.to_string();
         let lock = match self.lock_via(&url, &offer.address, &hash)? {
@@ -626,7 +629,7 @@ impl<T: Transport> Wallet<T> {
         let provider = hub_url(provider)?;
         let url = hub_url(hub)?;
         let (_, hub_info) = self.hub(&url)?;
-        let info: swaps::Info = self.get(&provider, swaps::SWAPS_INFO).await?;
+        let info = self.quoted_terms(&provider).await?;
         let terms = info.receive.ok_or_else(|| {
             Error::Invalid(format!(
                 "provider {provider} takes no payments over Lightning"

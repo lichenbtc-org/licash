@@ -334,7 +334,7 @@ impl<T: Transport> Wallet<T> {
         let (script, address, _) = self.payout_payee(to)?;
         self.hub(&from)?;
         let (_, from_info) = self.refresh(&from).await?;
-        let info: swaps::Info = self.get(&provider, swaps::SWAPS_INFO).await?;
+        let info = self.quoted_terms(&provider).await?;
         let terms = Terms {
             provider: &provider,
             from: (&from, &from_info),
@@ -433,8 +433,11 @@ impl<T: Transport> Wallet<T> {
         let (script, address, silent) = self.payout_payee(&quote.address)?;
         let blind = silent.map(|_| random_key().secret_bytes());
         let from_hub = self.hub(from)?.0;
-        let (_, from_info) = self.refresh(from).await?;
-        let info: swaps::Info = self.get(provider, swaps::SWAPS_INFO).await?;
+        // Asked at once, each a round trip over Tor; failed as when asked
+        // in turn, the hub's failure first.
+        let (said, info) = crate::both(self.refresh(from), self.fresh_terms(provider)).await;
+        let (_, from_info) = said?;
+        let info = info?;
         let terms = Terms {
             provider,
             from: (from, &from_info),

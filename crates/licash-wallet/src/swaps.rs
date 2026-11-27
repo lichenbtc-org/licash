@@ -16,6 +16,10 @@ use licash_api::{
 };
 use rand_core::{OsRng, RngCore};
 use rusqlite::{params, OptionalExtension, Row};
+use std::{
+    sync::PoisonError,
+    time::{Duration, Instant},
+};
 
 use crate::{
     both, hub_url, locks::Pays, now, sql, unavailable, Error, LockState, Transport, Wallet,
@@ -25,6 +29,11 @@ use crate::{
 /// provider's margin: the wallet's lock expires no later, so that its notes
 /// return soon if the provider never locks.
 pub const SWAP_WINDOW: u32 = 24;
+
+/// How long an app keeping providers warm keeps their terms for quotes
+/// ([`Wallet::keep_terms`]): longer than it waits between asking them
+/// (every few minutes), shorter than a provider's terms are worth trusting.
+pub const TERMS_FRESH: Duration = Duration::from_secs(10 * 60);
 
 /// Blocks a provider's lock leaves at least before it expires, for the
 /// wallet to claim it and the provider to follow it: a swap that leaves
@@ -176,8 +185,7 @@ impl<T: Transport> Wallet<T> {
         // Asked at once, each a round trip over Tor; failed as when asked
         // in turn, the first's failure first.
         let hubs = both(self.refresh(&from), self.refresh(&to));
-        let ((from_said, to_said), offer) =
-            both(hubs, self.get(&provider, swaps::SWAPS_INFO)).await;
+        let ((from_said, to_said), offer) = both(hubs, self.fresh_terms(&provider)).await;
         let ((_, from_info), (_, to_info)) = (from_said?, to_said?);
         let offer: swaps::Info = offer?;
         let Terms { fee, expiry, .. } = terms(
@@ -504,7 +512,7 @@ impl<T: Transport> Wallet<T> {
         if from_hub == to_hub {
             return Err(Error::Invalid("a swap is between two hubs".into()));
         }
-        let info: swaps::Info = self.get(&provider, swaps::SWAPS_INFO).await?;
+        let info = self.quoted_terms(&provider).await?;
         let amount = amount.max(info.min);
         let from_at = (from.as_str(), &from_info);
         let Terms { fee, margin, .. } =
@@ -517,10 +525,56 @@ impl<T: Transport> Wallet<T> {
         })
     }
 
+    /// Quote from each provider's terms as it last answered, asking it
+    /// nothing, for `fresh` after: an app asking its providers ahead
+    /// ([`Wallet::provider_info`]) quotes at once. What is paid always asks
+    /// again, refused if its terms rose. Not kept by default (zero): each
+    /// quote asks.
+    pub fn keep_terms(&self, fresh: Duration) {
+        let secs = fresh.as_secs();
+        self.terms_for
+            .store(secs, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// What the swap provider at `provider` says of itself and of the swaps
-    /// and payouts it makes: nothing kept.
+    /// and payouts it makes, asked now: kept for quotes
+    /// ([`Wallet::keep_terms`]).
     pub async fn provider_info(&self, provider: &str) -> Result<swaps::Info, Error> {
-        self.get(&hub_url(provider)?, swaps::SWAPS_INFO).await
+        self.fresh_terms(&hub_url(provider)?).await
+    }
+
+    /// The terms of the provider at `provider`, a URL as [`hub_url`] makes
+    /// it, for a quote: as it answered within the time they are kept
+    /// ([`Wallet::keep_terms`]), asking it nothing, else asked now. What is
+    /// paid asks again ([`Wallet::fresh_terms`]), and is refused if they
+    /// rose.
+    pub(crate) async fn quoted_terms(&self, provider: &str) -> Result<swaps::Info, Error> {
+        let fresh = self.terms_for.load(std::sync::atomic::Ordering::Relaxed);
+        let fresh = Duration::from_secs(fresh);
+        let kept = {
+            let kept = self.terms.lock().unwrap_or_else(PoisonError::into_inner);
+            let kept = kept.get(provider).filter(|(_, at)| at.elapsed() < fresh);
+            kept.map(|(info, _)| info.clone())
+        };
+        match kept {
+            Some(info) => Ok(info),
+            None => self.fresh_terms(provider).await,
+        }
+    }
+
+    /// The terms of the provider at `provider`, a URL as [`hub_url`] makes
+    /// it, asked now: kept for quotes as answered, forgotten if it did not
+    /// answer them, so that no quote offers it until it answers again.
+    pub(crate) async fn fresh_terms(&self, provider: &str) -> Result<swaps::Info, Error> {
+        let asked = self.get::<swaps::Info>(provider, swaps::SWAPS_INFO).await;
+        {
+            let mut kept = self.terms.lock().unwrap_or_else(PoisonError::into_inner);
+            match &asked {
+                Ok(info) => kept.insert(provider.to_owned(), (info.clone(), Instant::now())),
+                Err(_) => kept.remove(provider),
+            };
+        }
+        asked
     }
 
     /// Ask the hub at `url`, added, what it says of itself again, and keep

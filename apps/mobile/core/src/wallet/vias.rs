@@ -64,7 +64,10 @@ impl Wallet {
     /// hub's on the lock at most `lock_fee` more in all, as
     /// [`Wallet::invoice_offers`] quoted them ([`crate::ViaProvider`]):
     /// under way until [`Wallet::resume`] finds its lock paid, or refunded
-    /// once expired if the payment failed.
+    /// once expired if the payment failed. Should it fail before any lock
+    /// is made, the other ways to pay it costing no more in all are tried,
+    /// the cheapest first, as quoted from the providers' terms kept: its
+    /// fee risen is the owner's to accept instead.
     pub fn pay_invoice_via(
         &self,
         text: String,
@@ -75,11 +78,40 @@ impl Wallet {
     ) -> Result<Activity, LicashError> {
         let _timed = crate::log::timed("pay_invoice_via");
         let invoice = self.wallet.read_invoice(&text)?;
-        let costs = Some(max_fee.saturating_add(lock_fee));
-        let pay =
-            (self.wallet).pay_invoice_via_within(&provider, &hub, &invoice.request, max_fee, costs);
-        let lock = self.operation(pay)?;
-        Ok(super::lightning_activity(&lock, &invoice.request))
+        let most = max_fee.saturating_add(lock_fee);
+        let locked = || -> Result<Vec<String>, LicashError> {
+            Ok(self.wallet.locks()?.into_iter().map(|l| l.id).collect())
+        };
+        let before = locked()?;
+        let pay = |provider: &str, hub: &str, max_fee| {
+            let request = &invoice.request;
+            let pay =
+                (self.wallet).pay_invoice_via_within(provider, hub, request, max_fee, Some(most));
+            self.operation(pay)
+        };
+        let e = match pay(&provider, &hub, max_fee) {
+            Ok(lock) => return Ok(super::lightning_activity(&lock, &invoice.request)),
+            Err(e) => e,
+        };
+        if matches!(e, licash_wallet::Error::FeeRose { .. }) || locked()? != before {
+            return Err(e.into());
+        }
+        tracing::info!(%provider, "paying the invoice failed, nothing locked: {e}");
+        let others = self.invoice_offers(text).unwrap_or_default();
+        let others = others
+            .into_iter()
+            .filter(|o| o.fee <= most && (o.provider.url != provider || o.hub != hub));
+        for other in others {
+            match pay(&other.provider.url, &other.hub, other.provider.fee) {
+                Ok(lock) => return Ok(super::lightning_activity(&lock, &invoice.request)),
+                Err(again) if locked()? != before => return Err(again.into()),
+                Err(again) => {
+                    let through = &other.provider.url;
+                    tracing::info!(%through, "paying the invoice failed, nothing locked: {again}");
+                }
+            }
+        }
+        Err(e.into())
     }
 }
 
