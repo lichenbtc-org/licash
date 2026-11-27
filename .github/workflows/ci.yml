@@ -116,6 +116,8 @@ jobs:
       # and left for the images job below, which builds it again.
       - uses: ./.github/actions/prover-cache
       - run: docker build -f apps/hub/Dockerfile .
+      # Its standby (apps/hub/standby.sh), on the layers just built.
+      - run: docker build -f apps/hub/Dockerfile --target standby .
   chain:
     runs-on: ubuntu-latest
     timeout-minutes: 20

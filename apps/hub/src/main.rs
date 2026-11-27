@@ -1265,6 +1265,10 @@ fn main() -> ExitCode {
     let structured = matches!(cli.log, Log::Json);
     match command(cli) {
         Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.downcast_ref::<Restore>().is_some() => {
+            tracing::warn!("{e}");
+            ExitCode::from(Restore::CODE)
+        }
         Err(e) => {
             if structured {
                 tracing::error!("{e:#}");
@@ -1575,6 +1579,12 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                             tracing::error!("notifying an alert: {e:#}");
                         }
                     }));
+                    // A standby leaves each step to a live hub until
+                    // halfway through its window, and stops for a newer
+                    // copy of its ledger where its own is older than that.
+                    if matches!(keys, Keys::Standby(_)) {
+                        openings.defer_as_standby();
+                    }
                     tracing::info!(
                         mock = openings.advertise().mock,
                         ?range,
@@ -2131,6 +2141,7 @@ async fn serve(
     });
     // What the hub can't do without: one stopping stops it.
     let mut critical = Critical::default();
+    let standby = contracts.as_ref().map(|(openings, _)| openings.clone());
     if let Some((openings, every)) = contracts {
         if !respond_only {
             critical.spawn(
@@ -2241,17 +2252,47 @@ async fn serve(
     for task in announcing.into_iter().chain(swaps) {
         task.abort();
     }
+    // A standby stopping for a newer ledger is started again at once: not
+    // a stop to tell of.
+    let restore = standby.is_some_and(|openings| openings.stale());
     if let (Some(notifying), Some(notifier)) = (notifying, notifier) {
         // Events not yet sent go out after the next start.
         notifying.abort();
-        notifier.stopped().await;
+        if !restore {
+            notifier.stopped().await;
+        }
     }
     if let Ok(why) = told.try_recv() {
+        if restore {
+            return Err(Restore.into());
+        }
         anyhow::bail!("{why}");
     }
     tracing::info!("stopped");
     Ok(())
 }
+
+/// A standby stopped for its ledger to be restored from the hub's newest
+/// replica, then started again: exit code [`Restore::CODE`].
+#[derive(Debug)]
+struct Restore;
+
+impl Restore {
+    /// `EX_TEMPFAIL`: to be started again, not a failure.
+    const CODE: u8 = 75;
+}
+
+impl std::fmt::Display for Restore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the standby's ledger is older than a contract's step: stopped, for hub.sqlite to \
+             be restored from the hub's newest replica and the standby started again"
+        )
+    }
+}
+
+impl std::error::Error for Restore {}
 
 /// How often a hub that opens contracts asks its witnesses whether another
 /// copy took them over.

@@ -80,5 +80,18 @@ HEALTHCHECK --interval=30s --timeout=5s \
 ENTRYPOINT ["licash-hub"]
 CMD ["run"]
 
+# The hub's standby (docs/hub.md, "The standby"), `--target standby`: with
+# Litestream, which restores its ledger from the hub's replica at each
+# start (apps/hub/standby.sh). x86-64 and arm64, as Litestream's image.
+FROM runtime AS standby
+COPY --from=prover /opt/r0/ /usr/local/
+COPY --from=litestream/litestream:0.5.18@sha256:513bff62a88fc0c86c73d27333c41c54c89fe890a7c32a551600adff9309b11b \
+    /usr/local/bin/litestream /usr/local/bin/litestream
+COPY --chmod=755 apps/hub/standby.sh /usr/local/bin/licash-hub-standby
+# Its starts are routine (each restore): told only of its alerts.
+ENV LICASH_HUB_NOTIFY_KINDS=alert,reorg
+ENTRYPOINT ["licash-hub-standby"]
+CMD ["run"]
+
 FROM runtime AS production
 COPY --from=prover /opt/r0/ /usr/local/
