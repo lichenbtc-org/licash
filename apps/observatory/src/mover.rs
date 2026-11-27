@@ -600,12 +600,12 @@ impl<T: Transport + 'static> Mover<T> {
             }
         }
         let (provider, from, to, quote) = quoted.ok_or(Skipped::NoRoute(refused))?;
-        let locked = quote.amount + quote.fee;
+        let locked = quote.amount.saturating_add(quote.fee);
         let lock_fee = self
             .wallet
             .lock_fee(self.url(&from.id), locked)
             .map_err(|e| Skipped::NoRoute(e.to_string()))?;
-        if available.get(&from.id).copied().unwrap_or(0) < locked + lock_fee {
+        if available.get(&from.id).copied().unwrap_or(0) < locked.saturating_add(lock_fee) {
             return Err(Skipped::NoRoute("too little held to swap".into()));
         }
         Ok(Plan {
@@ -615,7 +615,7 @@ impl<T: Transport + 'static> Mover<T> {
             via: Some(provider.id.clone()),
             deposit_via: None,
             amount: quote.amount,
-            quoted: quote.fee + lock_fee,
+            quoted: quote.fee.saturating_add(lock_fee),
         })
     }
 
@@ -762,8 +762,10 @@ impl<T: Transport + 'static> Mover<T> {
                 let pays = deposits.pays(amount);
                 // The wallet's claim, budgeted as the wallet does, at the
                 // provider's rate.
-                let claim = (CLAIM_VBYTES * chain.rate.max(1_000) * 3).div_ceil(1000);
-                let value = pays + claim;
+                let claim = (CLAIM_VBYTES.saturating_mul(chain.rate.max(1_000)))
+                    .saturating_mul(3)
+                    .div_ceil(1000);
+                let value = pays.saturating_add(claim);
                 if amount > *max || value < chain.min || value > chain.max {
                     continue;
                 }
@@ -781,9 +783,9 @@ impl<T: Transport + 'static> Mover<T> {
                         .unwrap_or(0);
                     // The provider's fee and its miners', the claim's and
                     // the lock's; then the deposit's.
-                    let costs = locked - pays + lock;
-                    if swaps_at && held >= pays + costs {
-                        let quoted = costs + (pays - amount);
+                    let costs = locked.saturating_sub(pays).saturating_add(lock);
+                    if swaps_at && held >= pays.saturating_add(costs) {
+                        let quoted = costs.saturating_add(pays.saturating_sub(amount));
                         routes.push((provider, taker, from, to, amount, quoted));
                     }
                 }
@@ -832,8 +834,15 @@ impl<T: Transport + 'static> Mover<T> {
             Ok(Some(rate)) => rate.max(FeeRate::BROADCAST_MIN),
             _ => FeeRate::BROADCAST_MIN,
         };
-        // Within what was planned, but for the deposit's fee.
-        let max_fee = plan.quoted - (terms.pays - plan.amount);
+        // Within what was planned, but for the deposit's fee, as it asks it
+        // now: refused, nothing paid, if that alone is more.
+        let max_fee = payout_allowance(plan.quoted, plan.amount, terms.pays).ok_or_else(|| {
+            format!(
+                "the deposit's fee, {} sat, passes what the move was quoted, {} sat",
+                terms.pays.saturating_sub(plan.amount),
+                plan.quoted
+            )
+        })?;
         let swap_began = tokio::time::Instant::now();
         let quote = wallet
             .payout_quote(&provider, from, &terms.address, terms.pays, max_fee, rate)
@@ -993,6 +1002,13 @@ fn shuffle<T>(items: &mut [T]) {
     }
 }
 
+/// What a payout may cost on top of what it pays, `pays`, for a deposit of
+/// `amount` whose move was quoted `quoted` in all: none if the deposit's
+/// own fee, which its provider names when asked, leaves nothing.
+fn payout_allowance(quoted: u64, amount: u64, pays: u64) -> Option<u64> {
+    quoted.checked_sub(pays.checked_sub(amount)?)
+}
+
 /// One of `items`, at random.
 fn pick<T>(items: &[T]) -> Option<&T> {
     if items.is_empty() {
@@ -1004,6 +1020,20 @@ fn pick<T>(items: &[T]) -> Option<&T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A payout may cost what the move was quoted less the deposit's fee
+    /// as its provider asks it: nothing, refused, if that fee is more,
+    /// however much more, rather than a ceiling wrapping around.
+    #[test]
+    fn a_payout_may_cost_what_the_deposit_leaves_of_the_quote() {
+        // 300 sat quoted, a deposit of 2,000 asking 2,100: 200 left.
+        assert_eq!(payout_allowance(300, 2_000, 2_100), Some(200));
+        assert_eq!(payout_allowance(300, 2_000, 2_300), Some(0));
+        assert_eq!(payout_allowance(300, 2_000, 2_301), None);
+        assert_eq!(payout_allowance(300, 2_000, u64::MAX), None);
+        // Asking less than it locks is no deposit's.
+        assert_eq!(payout_allowance(300, 2_000, 1_999), None);
+    }
 
     #[test]
     fn no_route_is_tried_again_sooner_than_no_budget() {

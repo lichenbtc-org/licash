@@ -126,7 +126,10 @@ move costing 3 sat comes far more often than one costing 300, and none
 more often than the table's limit. Each wait is drawn between half and one
 and a half times that mean, so no service can tell when the next comes.
 A move is made only if the 30 days before it, with its quote, stay within
-its share and the whole budget.
+its share and the whole budget, and it costs no more than its quote: a
+provider asking more by the time the move is made, for a swap or a
+deposit, is refused before anything is locked or paid out, and the move
+fails.
 
 Moves over Lightning are no longer made: hubs pay and make no invoices,
 and a provider's invoice for a wallet can't be paid through another
