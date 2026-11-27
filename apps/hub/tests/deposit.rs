@@ -64,6 +64,8 @@ fn config() -> deposit::Config {
         downtime: 2,
         sweep_blocks: 6,
         min_fee_rate: FeeRate::from_sat_per_vb_u32(1),
+        // The deposits of hubs before they took those of closes only.
+        plain: true,
         ..deposit::Config::new(sweep_to())
     }
 }
@@ -1568,6 +1570,35 @@ async fn deposits_asked_and_not_paid_from_one_source_are_bounded() {
     // One asked, asked again over it: the same.
     gateway.deposit(&asked[0], Some(&one)).await.unwrap();
     gateway.deposit(last, Some(&other)).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_hub_takes_no_new_plain_deposit_and_answers_those_it_took_before() {
+    let net = Net::new().await;
+    let alice = net.wallet("alice");
+    let deposit = alice.deposit(HUB, 3_000).await.unwrap();
+    let (_, body) = net.asked("alice", &deposit.hash);
+    let first = net.deposits.deposit(&body, None).await.unwrap();
+    let not_plain = deposit::Config {
+        plain: false,
+        ..config()
+    };
+    assert!(!deposit::Config::new(sweep_to()).plain, "never by default");
+    let profile = ChainProfile::Core30DefaultRegtest;
+    let open = |path: &std::path::Path| {
+        let (hub, source) = (net.hub.clone(), net.source.clone());
+        deposit::Gateway::open(hub, source, profile, not_plain.clone(), path).unwrap()
+    };
+    // Upgraded, of the same database: the deposit it took, asked again,
+    // answered as before.
+    let upgraded = open(&net.dir.path().join("hub.sqlite"));
+    assert_eq!(upgraded.deposit(&body, None).await.unwrap(), first);
+    // New to a hub taking none: refused, as to forward elsewhere.
+    let path = net.dir.path().join("other.sqlite");
+    drop(licash_store::create(&path, licash_store::Kind::Hub).unwrap());
+    let refused = open(&path).deposit(&body, None).await.unwrap_err().0;
+    assert_eq!(refused.code, Code::Forward, "{refused:?}");
+    assert_eq!(refused.message, deposit::NO_PLAIN);
 }
 
 #[tokio::test]

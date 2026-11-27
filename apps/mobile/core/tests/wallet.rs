@@ -121,6 +121,8 @@ impl Net {
             downtime: 2,
             sweep_blocks: 6,
             min_fee_rate: bitcoin::FeeRate::from_sat_per_vb_u32(1),
+            // As hubs took them before they took those of closes only.
+            plain: true,
             ..deposit::Config::new(sweep())
         };
         let profile = licash::spend::ChainProfile::Core30DefaultRegtest;

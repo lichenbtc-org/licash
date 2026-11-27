@@ -340,8 +340,14 @@ of any other size. Payers ask a hub not naming it to keep none.
 
 With `--deposit-sweep-address ADDRESS` (and `--chain`), the hub takes
 deposits on Bitcoin: a payment to a deposit's address, once confirmed,
-locks the hub's own notes to its payer, and the preimage the payer claims
-them with lets the hub claim the coins to the sweep address. Unclaimed
+locks the hub's own notes to its payer. It takes new ones only to return a
+contract's reserve on its default close (below): notes enter a hub through
+its contracts, and coins become notes through swap providers taking
+deposits ([swaps](swaps.md)). A plain deposit, which returns no reserve,
+asked of an earlier release is still answered and followed to the end, but a
+new one is refused (`forward`), even at a hub opening no contracts. The
+preimage a deposit's payer claims its notes with lets the hub claim the
+coins to the sweep address. Unclaimed
 deposits return to their payer after a timeout. `--deposit-*` flags set
 the fee, amounts and timing (a deposit's lock lasts 36 blocks by
 default, room for the payer to activate it on Bitcoin should the hub keep

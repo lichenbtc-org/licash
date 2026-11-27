@@ -182,6 +182,8 @@ impl Server {
                 downtime: 2,
                 sweep_blocks: 6,
                 min_fee_rate: bitcoin::FeeRate::from_sat_per_vb_u32(1),
+                // As hubs took them before they took those of closes only.
+                plain: true,
                 ..deposit::Config::new(sweep())
             };
             let (source, path) = (url.parse().unwrap(), dir.path().join("hub.sqlite"));

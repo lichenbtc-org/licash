@@ -75,6 +75,11 @@ pub struct Config {
     /// refused as unavailable: each is scanned for in every block of its
     /// window, at no cost to whoever asked.
     pub max_open: u32,
+    /// Whether new plain deposits, those returning no contract's reserve,
+    /// are taken. Never by the service: notes enter a hub through its
+    /// contracts, and coins become notes through swap providers. Those
+    /// taken before are followed on all the same; tests of that set it.
+    pub plain: bool,
 }
 
 impl Config {
@@ -97,6 +102,7 @@ impl Config {
             sweep_to,
             poll: Duration::from_secs(5),
             max_open: 1024,
+            plain: false,
         }
     }
 
@@ -840,6 +846,10 @@ fn unkept(kept: Kept) -> Failure {
     Failure(Problem::new(Code::Unavailable, detail))
 }
 
+/// Why a new plain deposit is refused.
+pub const NO_PLAIN: &str = "the hub takes deposits of contracts' closes only: deposit on Bitcoin \
+                            through a swap provider";
+
 fn refused(detail: &str) -> Failure {
     Failure(Problem::new(Code::Forward, detail))
 }
@@ -959,6 +969,7 @@ impl Gateway {
         // terms.
         let tip = match self.store.get(&hash).map_err(store_down)? {
             Some(_) => None,
+            None if body.close.is_none() && !c.plain => return Err(refused(NO_PLAIN)),
             None => self.source.tip().await.ok().map(|tip| tip.height),
         };
         let turn = self.peer.turn().await;
