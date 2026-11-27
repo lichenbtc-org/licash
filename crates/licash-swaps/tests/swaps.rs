@@ -1679,6 +1679,12 @@ async fn a_hub_restarted_adopts_the_lock_it_made_and_never_locks_again() {
 
     // Only B takes its swaps on.
     eco.stop();
+    // Counted read only, beside it or without it: none of a file never made.
+    let file = eco.dir.path().join("provider.sqlite");
+    assert_eq!(licash_swaps::own_under_way(&file).unwrap(), 3);
+    let none = eco.dir.path().join("none.sqlite");
+    assert_eq!(licash_swaps::own_under_way(&none).unwrap(), 0);
+    assert!(!none.exists());
     match eco.reopen(None) {
         Err(licash_swaps::Error::Setup(why)) => assert!(why.contains("3 swaps"), "{why}"),
         Err(e) => panic!("{e}"),
@@ -1716,6 +1722,7 @@ async fn a_hub_restarted_adopts_the_lock_it_made_and_never_locks_again() {
     };
     let backing = licash_swaps::backing_own(&swaps, &hashes).unwrap();
     assert_eq!(backing.into_iter().collect::<Vec<_>>(), [hashes[1]]);
+    assert_eq!(licash_swaps::own_under_way(&swaps).unwrap(), 1);
     let none = eco.dir.path().join("none.sqlite");
     assert!(licash_swaps::backing_own(&none, &hashes)
         .unwrap()

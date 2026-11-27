@@ -559,6 +559,22 @@ pub fn backing_own(path: &Path, hashes: &[[u8; 32]]) -> Result<HashSet<[u8; 32]>
     Ok(found)
 }
 
+/// How many swaps into its own hub the provider in the wallet's file at
+/// `path`, if there is one, has under way: the hub's locks for them are
+/// backed once the provider claims the clients' locks. Read only, creating
+/// and upgrading nothing.
+pub fn own_under_way(path: &Path) -> Result<usize, Error> {
+    let Some(conn) = read_swaps(path)? else {
+        return Ok(0);
+    };
+    let count: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM provider_swaps WHERE {OWN_UNDER_WAY}"),
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(usize::try_from(count).unwrap_or(usize::MAX))
+}
+
 /// The provider's tables in the wallet's file at `path`, read only: none
 /// if there is no file, or the provider never made its tables in it.
 fn read_swaps(path: &Path) -> Result<Option<rusqlite::Connection>, Error> {
