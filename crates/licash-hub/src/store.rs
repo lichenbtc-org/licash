@@ -223,6 +223,36 @@ CREATE TABLE shown_inputs (
 ) STRICT;
 ";
 
+/// The unlock of each grant released, a component of its own beside the
+/// ledger's: kept, not derived from the hub's seed again, so that a copy
+/// of the ledger without the seed cites a released spend against a claim
+/// as the hub does. No secret: its payee has it from the release on. A
+/// ledger with these tables holds the unlock of every grant released;
+/// one without is of a hub of before, whose first start with its seed
+/// makes and fills them in one transaction ([`unlocks_in`]).
+pub(crate) const UNLOCKS: &str = "unlocks";
+pub(crate) const UNLOCKS_VERSION: i64 = 1;
+
+const UNLOCKS_SCHEMA: &str = "
+-- The unlock of the grant `id`, written in the transaction that releases
+-- it. Never deleted: a released grant is not.
+CREATE TABLE released_unlocks (
+    id BLOB PRIMARY KEY,
+    unlock BLOB NOT NULL
+) STRICT;
+";
+
+/// Make the unlocks' tables in `tx` unless the file has them: whether it
+/// made them, for the hub to fill them in `tx` with the unlock of each
+/// grant it released before. Another version of them is refused.
+pub(crate) fn unlocks_in(tx: &Transaction<'_>) -> Result<bool, Error> {
+    let made = licash_store::component_version(tx, UNLOCKS)
+        .map_err(setup)?
+        .is_none();
+    licash_store::component_in(tx, UNLOCKS, UNLOCKS_VERSION, UNLOCKS_SCHEMA).map_err(setup)?;
+    Ok(made)
+}
+
 pub(crate) struct Store {
     inner: Mutex<Inner>,
     halted: AtomicBool,
@@ -247,6 +277,8 @@ impl Store {
         let created = licash_store::write(&mut conn, |tx| {
             licash_store::component_in(tx, COMPONENT, VERSION, SCHEMA).map_err(setup)?;
             licash_store::component_in(tx, SHOWN, SHOWN_VERSION, SHOWN_SCHEMA).map_err(setup)?;
+            // Nothing released yet: every unlock kept from the first.
+            unlocks_in(tx)?;
             tx.execute(
                 "INSERT INTO meta (one, seq, created_at) VALUES (1, 0, ?1)",
                 [now()],

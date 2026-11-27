@@ -488,6 +488,107 @@ fn a_claim_of_notes_the_hub_released_a_spend_of_meets_that_spend_and_its_unlock(
         licash::recovery::evidence_to_bytes(&again),
         licash::recovery::evidence_to_bytes(&found)
     );
+    // The unlock cited is the one the ledger kept at the release, not one
+    // derived again: another kept in its place is the one cited.
+    drop(hub);
+    let conn = sql(&files.db);
+    let kept: Vec<([u8; 32], [u8; 32])> = conn
+        .prepare("SELECT id, unlock FROM released_unlocks")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(kept, [(*spend.proposal.id().as_bytes(), unlock)]);
+    conn.execute("UPDATE released_unlocks SET unlock = ?1", [[7u8; 32]])
+        .unwrap();
+    drop(conn);
+    let hub = open(&files, Policy::default());
+    let cited = hub.evidence(&claim_of(&keyset, &[&spent])).unwrap();
+    assert!(matches!(&cited[..], [Against::Spend { unlock: Some(u), .. }] if *u == [7; 32]));
+    // Its payee is given the hub's own again all the same.
+    assert_eq!(hub.release(&signed, &spend.notes()).unwrap(), unlock);
+}
+
+/// A ledger of before unlocks were kept has no tables of them: the hub's
+/// next start with its seed makes them and keeps the unlock of each grant
+/// released until then, and its evidence is what it was. So does it keep
+/// one a release of before left out since, and no other.
+#[test]
+fn a_ledger_of_before_keeps_the_unlocks_of_its_released_grants_at_its_hubs_start() {
+    let files = files();
+    let hub = open(&files, Policy::default());
+    let (_, keyset) = issuer(&files);
+    let (alice, bob) = (owner(1), owner(2));
+    let coins = [8, 4, 2].map(|denom| mint(&files, &alice, denom));
+    let spends: Vec<Spend> = (coins.iter().zip([8, 4, 2]))
+        .map(|(coin, denom)| {
+            Spend::new(
+                &keyset,
+                std::slice::from_ref(coin),
+                &[(bob.address(), denom)],
+            )
+        })
+        .collect();
+    // Two released, one offered only.
+    let mut unlocks = Vec::new();
+    for spend in &spends[..2] {
+        let grant = spend.offer(&hub).unwrap();
+        let signed = spend.sign(&keyset, Authorization::Granted(Box::new(grant)));
+        unlocks.push((
+            *spend.proposal.id().as_bytes(),
+            hub.release(&signed, &spend.notes()).unwrap(),
+        ));
+    }
+    spends[2].offer(&hub).unwrap();
+    unlocks.sort();
+    let claim = claim_of(&keyset, &[&coins[0], &coins[1], &coins[2]]);
+    let found = licash::recovery::evidence_to_bytes(&hub.evidence(&claim).unwrap());
+    drop(hub);
+    let kept = |conn: &rusqlite::Connection| -> Vec<([u8; 32], [u8; 32])> {
+        conn.prepare("SELECT id, unlock FROM released_unlocks ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    // As a hub of before left it.
+    let conn = sql(&files.db);
+    assert_eq!(kept(&conn), unlocks);
+    conn.execute_batch(
+        "DROP TABLE released_unlocks;
+         DELETE FROM schema_versions WHERE component = 'unlocks';",
+    )
+    .unwrap();
+    drop(conn);
+    let hub = open(&files, Policy::default());
+    assert_eq!(
+        licash::recovery::evidence_to_bytes(&hub.evidence(&claim).unwrap()),
+        found
+    );
+    drop(hub);
+    let conn = sql(&files.db);
+    assert_eq!(kept(&conn), unlocks);
+    // One a release of before left out, having released its grant on
+    // this file since: kept at the next start, the others as they are.
+    conn.execute("DELETE FROM released_unlocks WHERE id = ?1", [unlocks[0].0])
+        .unwrap();
+    conn.execute("UPDATE released_unlocks SET unlock = ?1", [[7u8; 32]])
+        .unwrap();
+    drop(conn);
+    drop(open(&files, Policy::default()));
+    let conn = sql(&files.db);
+    assert_eq!(kept(&conn), [unlocks[0], (unlocks[1].0, [7; 32])]);
+    // Tables of another version are refused, and nothing is written.
+    conn.execute(
+        "UPDATE schema_versions SET version = 2 WHERE component = 'unlocks'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let error = setup_error(Hub::open(&files.seed, &files.db, Policy::default()));
+    assert!(error.contains("unlocks is of version 2"), "{error}");
 }
 
 #[test]

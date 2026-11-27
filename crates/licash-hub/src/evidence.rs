@@ -227,14 +227,13 @@ impl Hub {
         let signed = SignedProposal::from_bytes(keyset, &notes, &signed)?;
         let unlock = match signed.authorization() {
             Authorization::Plain => None,
-            Authorization::Granted(_) => {
-                let salt: [u8; 32] = c.query_row(
-                    "SELECT salt FROM grants WHERE id = ?1",
-                    [id.as_bytes()],
-                    |r| r.get(0),
-                )?;
-                Some(self.unlock(&keyset_id, id, &salt))
-            }
+            // As kept at its release, by a ledger that has every one or
+            // is opened by no hub: read by a copy without the seed too.
+            Authorization::Granted(_) => Some(c.query_row(
+                "SELECT unlock FROM released_unlocks WHERE id = ?1",
+                [id.as_bytes()],
+                |r| r.get(0),
+            )?),
         };
         Ok(Some(Evidence::Spend {
             signed,

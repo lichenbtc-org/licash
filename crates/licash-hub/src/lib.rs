@@ -548,11 +548,42 @@ impl Hub {
             reorg_alerted: AtomicBool::default(),
             proved: Mutex::default(),
         };
+        hub.keep_unlocks()?;
         let boot = hex::encode(boot);
         tracing::info!(keysets = hub.keysets.len(), %boot, "hub started");
         hub.store
             .write(|tx| notify(tx, &Notice::Started { boot }))?;
         Ok(hub)
+    }
+
+    /// Keep the unlock of each grant released that the ledger does not
+    /// hold yet (`store::UNLOCKS`), derived as each was: all of them in a
+    /// ledger of before unlocks were kept, in the transaction that makes
+    /// their tables, and those a release of before left out if it ran on
+    /// this file since. None in a ledger this release alone wrote, which
+    /// keeps each at its release. So a ledger a hub of this release
+    /// started on holds the unlock of every grant released.
+    fn keep_unlocks(&self) -> Result<(), Error> {
+        let kept = self.store.write(|tx| {
+            store::unlocks_in(tx)?;
+            let mut missing = tx.prepare(
+                "SELECT g.id, p.keyset, g.salt FROM grants g JOIN proposals p ON p.id = g.id
+                 WHERE g.released_at IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM released_unlocks u WHERE u.id = g.id)",
+            )?;
+            let missing = missing
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<Vec<([u8; 32], [u8; 32], [u8; 32])>, _>>()?;
+            for (id, keyset, salt) in &missing {
+                let unlock = self.unlock(keyset, &ProposalId::from_bytes(*id), salt);
+                keep_unlock(tx, id, &unlock)?;
+            }
+            Ok(missing.len())
+        })?;
+        if kept > 0 {
+            tracing::info!(kept, "unlocks of grants released before kept in the ledger");
+        }
+        Ok(())
     }
 
     /// Whether the hub stopped serving ([`Error::Halted`]): a restart
@@ -674,9 +705,11 @@ impl Hub {
     }
 
     /// The unlock of the grant of `proposal`: a scalar of the hub's secret,
-    /// derived again rather than stored, its key in the grant
-    /// ([`licash::authorization::Grant::unlock_key`]). Zero with negligible
-    /// odds, which [`PreparedGrant::derive`] refuses.
+    /// derived again for its payee, its key in the grant
+    /// ([`licash::authorization::Grant::unlock_key`]), and kept in the
+    /// ledger once released for the evidence that cites it
+    /// ([`keep_unlock`]). Zero with negligible odds, which
+    /// [`PreparedGrant::derive`] refuses.
     fn unlock(&self, keyset: &[u8; 32], proposal: &ProposalId, salt: &[u8; 32]) -> Unlock {
         let hash = tagged_hash(
             "licash-hub/grant-unlock",
@@ -690,6 +723,16 @@ impl Hub {
     fn nonce_secret(&self, proposal: &[u8; 32]) -> [u8; 32] {
         tagged_hash("licash-hub/unlink-nonce", &[&self.boot_key, proposal])
     }
+}
+
+/// Keep `unlock`, the released grant `id`'s, in the ledger: once, the
+/// same if kept already.
+fn keep_unlock(tx: &Transaction<'_>, id: &[u8; 32], unlock: &Unlock) -> Result<(), Error> {
+    tx.execute(
+        "INSERT INTO released_unlocks (id, unlock) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
+        params![id, unlock],
+    )?;
+    Ok(())
 }
 
 fn notify(tx: &Transaction<'_>, notice: &Notice) -> Result<(), Error> {
@@ -1020,6 +1063,7 @@ impl Hub {
                 "UPDATE grants SET signed = ?2, released_at = ?3 WHERE id = ?1",
                 params![id.as_bytes(), signed.to_bytes(), now()],
             )?;
+            keep_unlock(tx, id.as_bytes(), &unlock)?;
             let proposal = hex::encode(id.as_bytes());
             notify(tx, &Notice::Released { proposal, amount, fee })?;
             Ok(true)

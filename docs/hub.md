@@ -698,7 +698,9 @@ made empty when a hub of an earlier release opens its file): no spend takes
 the note after, the lock itself is never served, and it is the hub's
 evidence against any other claim of the note. Then
 it decides what the claim is owed against its ledger: the spends it retired
-the claimed notes for (owner-signed, a granted one with its unlock), the locks other claims
+the claimed notes for (owner-signed, a granted one with its unlock, which
+the ledger keeps from its release on: the component `unlocks` of
+`hub.sqlite`, read by a copy without the seed as well), the locks other claims
 gave them up by, other claims of them, and, for each timed lock the claim names, the branch it did
 not settle it on (its preimage, or its expiry). A candidate its statement
 refuses, or that voids nothing but items not valid anyway, is left out
@@ -1220,6 +1222,12 @@ Before starting it:
   lacking one responds to none of its contested claims.
 - Expect no migration: a database or file of an earlier layout is refused
   by name, never read nor replaced.
+- The first start of this release keeps in `hub.sqlite` the unlock of each
+  spend the hub released before (the component `unlocks`, a hash for each,
+  in one transaction): until then the hub derived it from its seed each
+  time it cited the spend. Nothing else of the ledger changes, and a
+  release of before still opens the file; the unlocks of what it releases
+  meanwhile are kept at the next start of this one.
 - A Core login of the hub's limited by `-rpcwhitelist` needs, with
   `--contracts`, `listtransactions`, `getmempoolentry` and
   `abandontransaction` too (above). Without `listtransactions` its operator
