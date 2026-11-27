@@ -1289,6 +1289,38 @@ docker run --rm -v licash-hub:/data licash-hub init
 docker run -d -p 8338:8338 -v licash-hub:/data licash-hub
 ```
 
+## Keysets
+
+A hub issues under one keyset, index 0 of its seed, made by `init` and
+never rotated: this release has no command that adds or retires one.
+
+Rotation, when it comes, keeps these rules, each forced by what a keyset
+is tied to now:
+
+- Spending. A proposal names one keyset, for its inputs and its outputs
+  alike, so a hub that stops issuing under a keyset stops its notes being
+  spent at all. Retiring a keyset therefore needs a proposal whose inputs
+  are of the old keyset and outputs of the new one first: a change to the
+  spend's format, its owners' signatures and every verifier of it,
+  contracts' programs included.
+- Issuance. Under a retiring keyset the hub issues only what it was bound
+  to before it retired it: grants it offered and not yet released or
+  forgot, and the pay or refund branch of each lock under it. Everything
+  new is under the active keyset.
+- Redemption and evidence. Notes of a retiring keyset stay spendable into
+  the active one, and its spent set, issuances and the evidence citing
+  them are kept, for as long as a contract opened under it is open or a
+  claim citing its notes can be made: never deleted with the keyset's
+  retirement.
+- Identity. A hub's proof of identity signs its list of keysets
+  (`Info::identity`): a wallet takes a new list only with that proof, from
+  the hub it knows, and takes each new keyset's issuances on their own
+  proofs as now.
+- Upgrade. A ledger of before names one keyset with no state: it is the
+  active one. Marking keysets active or retiring is a new component of
+  `hub.sqlite`, made with the first rotation, never inferred from its
+  absence.
+
 ## Upgrading
 
 Stop the hub, back up `<data>` (see the backups above), replace the binary and start it
