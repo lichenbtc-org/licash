@@ -34,6 +34,6 @@ async fn wallets_discover_the_hubs_announced_on_nostr() -> anyhow::Result<()> {
     let wallet = eco.wallet("discoverer")?;
     let hub = &found[0].announcement.urls[0];
     let info = wallet.add_hub(hub).await?;
-    assert!(info.lightning.is_some());
+    assert!(info.locks.is_some(), "{info:?}");
     Ok(())
 }

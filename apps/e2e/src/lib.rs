@@ -1,8 +1,7 @@
 //! The regtest ecosystem of `docker-compose.yml`, for the end-to-end tests:
-//! Bitcoin Core, two hubs with Lightning gateways over their LND nodes, an
-//! outside LND node, a swap provider, and wallets in temporary files.
-//! `run.sh` brings the stack up; [`Eco::up`] funds its nodes and opens their
-//! channels once.
+//! Bitcoin Core, two hubs, a swap provider over its LND node, an outside LND
+//! node, and wallets in temporary files. `run.sh` brings the stack up;
+//! [`Eco::up`] funds the nodes and opens their channel once.
 
 use std::{
     future::Future,
@@ -22,7 +21,7 @@ use bitcoin::{
     Sequence, Transaction, TxIn, TxOut, Witness,
 };
 use licash::spend::{lock_hash, ChainProfile};
-use licash_api::{swaps, Info, ReceiveStatus};
+use licash_api::{swaps, Info};
 use licash_onchain::silent::{self, SpAddress};
 use licash_wallet::InvoiceState;
 use rand_core::{OsRng, RngCore};
@@ -34,18 +33,21 @@ pub use licash_transport::Http;
 pub mod phone;
 
 /// Satoshis in each channel, half pushed to its other end.
-const CHANNEL: u64 = 2_000_000;
+const CHANNEL: u64 = 6_000_000;
 
-/// The Lightning nodes: the outside one, each hub's and the swap
-/// provider's.
+/// The Lightning nodes: the outside one and the swap provider's. Hubs run
+/// none: wallets pay and are paid over Lightning through the provider.
 pub const OUTSIDE: &str = "outside-ln";
 pub const SWAPS_LN: &str = "swaps-ln";
-pub const NODES: [&str; 4] = [OUTSIDE, "hub1-ln", "hub2-ln", SWAPS_LN];
+pub const NODES: [&str; 2] = [OUTSIDE, SWAPS_LN];
 
-/// The channels, by their nodes in [`NODES`], the first opening each: one
-/// between each two of the outside node and the hubs', and the provider's
-/// to hub2's and the outside one.
-const CHANNELS: [(usize, usize); 5] = [(0, 1), (0, 2), (1, 2), (3, 2), (3, 0)];
+/// The channels, by their nodes in [`NODES`], the first opening each: the
+/// provider's to the outside node.
+const CHANNELS: [(usize, usize); 1] = [(1, 0)];
+
+/// The least the provider's wallet deposits at a hub at once when it
+/// holds too little there ([`Eco::stock_at`]): few deposits, few blocks.
+const RESTOCK: u64 = 150_000;
 
 /// A wallet of the tests, over HTTP.
 pub type Wallet = licash_wallet::Wallet<Http>;
@@ -103,8 +105,7 @@ pub async fn until<T, F: Future<Output = anyhow::Result<Option<T>>>>(
 
 impl Eco {
     /// The stack of Compose project `$LICASH_E2E_PROJECT` (by default
-    /// `licash-e2e`), with its nodes funded, the `CHANNELS` open, and its
-    /// hubs' gateways up.
+    /// `licash-e2e`), with its nodes funded and the `CHANNELS` open.
     pub async fn up() -> anyhow::Result<Self> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let project = std::env::var("LICASH_E2E_PROJECT").unwrap_or_else(|_| "licash-e2e".into());
@@ -244,24 +245,20 @@ impl Eco {
         Ok(response.json().await?)
     }
 
-    /// `wallet`, paid `amount` from outside through the gateway of `hub`.
+    /// `wallet`, paid `amount` in notes at `hub` from outside over
+    /// Lightning, through the swap provider: its fee on top, the provider
+    /// stocked there first.
     pub async fn pay_in(&self, wallet: &Wallet, hub: &str, amount: u64) -> anyhow::Result<()> {
-        let invoice = wallet.invoice(hub, amount).await?;
+        self.stock_at(hub, amount).await?;
+        wallet.add_hub(hub).await?;
+        let invoice = wallet
+            .invoice_through(&self.swaps, hub, amount, None)
+            .await?;
         let paying = self.pay(OUTSIDE, invoice.request.as_deref().context("a request")?);
         let state = received(wallet, &invoice.hash).await?;
         ensure!(state == InvoiceState::Received, "the invoice was {state:?}");
         ensure!(paying.await??, "the outside node's payment failed");
         Ok(())
-    }
-
-    /// Where the gateway of `hub` stands on the payment to a wallet of
-    /// `hash`, in hex.
-    pub async fn receipt(&self, hub: &str, hash: &str) -> anyhow::Result<ReceiveStatus> {
-        let mut bytes = [0; 32];
-        hex::decode_to_slice(hash, &mut bytes)?;
-        let url = format!("{hub}{}", licash_api::ln_receive_state(&bytes));
-        let response = self.http.get(url).send().await?.error_for_status()?;
-        Ok(response.json().await?)
     }
 
     /// What the hubs and the swap provider notified their operators of on
@@ -549,39 +546,71 @@ impl Eco {
         Ok(response.json().await?)
     }
 
+    /// The info of the bridge at `bridge`, once it answers: once the
+    /// provider it is paid through holds notes at its hub, `amount` of
+    /// them at least, which it stocks there first.
+    pub async fn bridge_ready(
+        &self,
+        bridge: &str,
+        hub: &str,
+        amount: u64,
+    ) -> anyhow::Result<Value> {
+        self.stock_at(hub, amount).await?;
+        let url = format!("{bridge}{}", licash_api::bridge::INFO);
+        until("the bridge paid through its provider", 60, || async {
+            Ok(self.get_json(&url).await.ok())
+        })
+        .await
+    }
+
     /// The most the provider locks at hub 2 now.
     pub async fn stocked(&self) -> anyhow::Result<u64> {
-        let at = self.info(self.hub(2)).await?.address;
+        self.stocked_at(self.hub(2)).await
+    }
+
+    /// The most the provider locks at `hub` now.
+    pub async fn stocked_at(&self, hub: &str) -> anyhow::Result<u64> {
+        let at = self.info(hub).await?.address;
         let info = self.swaps_info().await?;
         Ok(info.hub(&at).map_or(0, |hub| hub.max))
     }
 
-    /// The provider able to lock `amount` at hub 2, paid in from outside
-    /// through hub 2's gateway if it is not yet.
+    /// The provider able to lock `amount` at hub 2 ([`Eco::stock_at`]).
     pub async fn stock(&self, amount: u64) -> anyhow::Result<()> {
-        if self.stocked().await? >= amount {
+        self.stock_at(self.hub(2), amount).await
+    }
+
+    /// The provider able to lock `amount` at `hub`, its wallet paid there
+    /// in a deposit on Bitcoin if it is not yet.
+    pub async fn stock_at(&self, hub: &str, amount: u64) -> anyhow::Result<()> {
+        if self.stocked_at(hub).await? >= amount {
             return Ok(());
         }
-        // Its fee on the lock to come, generously.
-        let asked = (amount + amount / 100 + 100).to_string();
+        let n = (self.hubs.iter().position(|h| h == hub)).context("a hub of the stack")? + 1;
+        // At the URL the provider reaches it at, its fee on the locks to
+        // come generously.
+        let inside = format!("http://hub{n}:8338");
+        let asked = (amount + amount / 100 + 100).max(RESTOCK).to_string();
         let args = [
             "licash-wallet",
             "--json",
-            "invoice",
+            "deposit",
             &asked,
             "--hub",
-            "http://hub2:8338",
+            &inside,
         ];
-        let invoice: Value = serde_json::from_slice(&self.exec("swaps", &args).await?)?;
-        let request = invoice["request"].as_str().context("an invoice")?;
-        let paying = self.pay(OUTSIDE, request);
-        // The provider takes it, as it takes its wallet's payments on.
+        let deposit: Value = serde_json::from_slice(&self.exec("swaps", &args).await?)?;
+        let terms = &deposit["terms"];
+        let address = terms["address"].as_str().context("a deposit address")?;
+        let pays = terms["pays"].as_u64().context("a deposit amount")?;
+        self.send_to(address, pays).await?;
+        // At the hubs' deposit depth of 1, the provider takes the
+        // deposit's notes, as it takes its wallet's payments on.
+        self.mine(1).await?;
         until("the provider stocked", 180, || async {
-            Ok((self.stocked().await? >= amount).then_some(()))
+            Ok((self.stocked_at(hub).await? >= amount).then_some(()))
         })
-        .await?;
-        ensure!(paying.await??, "the outside node's payment failed");
-        Ok(())
+        .await
     }
 }
 
@@ -696,8 +725,8 @@ impl Eco {
         Ok(open.any(|c| c["remote_pubkey"] == peer))
     }
 
-    /// Coins for the miner, the [`CHANNELS`], half their funds on each
-    /// side, and every hub's gateway up: whatever is missing.
+    /// Coins for the miner and the [`CHANNELS`], half their funds on each
+    /// side: whatever is missing.
     async fn fund(&self) -> anyhow::Result<()> {
         if let Err(e) = self.rpc("", "createwallet", json!(["miner"])).await {
             ensure!(format!("{e}").contains("already exists"), e);
@@ -778,12 +807,6 @@ impl Eco {
                     Ok(self.lncli(node, &args).await.ok().map(|_| ()))
                 },
             )
-            .await?;
-        }
-        for hub in &self.hubs {
-            until(&format!("the gateway of {hub}"), 120, || async move {
-                Ok(self.info(hub).await?.lightning.map(|_| ()))
-            })
             .await?;
         }
         Ok(())

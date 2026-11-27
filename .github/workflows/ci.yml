@@ -214,7 +214,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps
-      - name: Hubs, gateways and wallets on a regtest ecosystem
+      - name: Hubs, providers and wallets on a regtest ecosystem
         run: apps/e2e/run.sh
       - if: failure()
         uses: actions/upload-artifact@v7

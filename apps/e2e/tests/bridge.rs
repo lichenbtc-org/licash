@@ -32,9 +32,8 @@ async fn a_wallet_finds_an_open_bridge_tops_it_up_and_is_paid_at_its_address() -
         Ok((!found.is_empty()).then_some(found))
     })
     .await?;
-    let info = eco
-        .get_json(&format!("{bridge}{}", licash_api::bridge::INFO))
-        .await?;
+    // It is paid through the provider, holding notes at its hub, hub2.
+    let info = eco.bridge_ready(bridge, eco.hub(2), 200).await?;
     let announced = &found[0];
     assert_eq!(announced.announcement.urls, [bridge]);
     assert!(announced.named_by(info["nostr"].as_str()), "{announced:?}");
@@ -52,7 +51,8 @@ async fn a_wallet_finds_an_open_bridge_tops_it_up_and_is_paid_at_its_address() -
     let topped = credited(&wallet, bridge, 0).await?;
     assert_eq!(topped, 1_000_000);
 
-    // Paid at its Lightning Address, from outside.
+    // Paid at its Lightning Address, from outside, through the provider,
+    // which pays the bridge in notes it holds at hub2.
     let account = wallet.bridge_username(bridge, Some("alice")).await?;
     let address = account.lightning_address.expect("an address");
     assert!(address.starts_with("alice@"), "{address}");

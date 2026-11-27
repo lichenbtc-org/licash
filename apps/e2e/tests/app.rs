@@ -281,16 +281,20 @@ async fn contact(phone: &Phone, bob: &licash_e2e::Wallet) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Paid over Lightning: an invoice its hub makes asking the amount it
-/// enters, the hub's fee in it, shown as a QR code as soon as it has an
-/// amount, which a node outside pays. Its notes are taken while shown, and the payment is in the
+/// Paid over Lightning: an invoice the swap provider makes asking the
+/// amount it enters, the provider's fee in it, shown as a QR code as soon
+/// as it has an amount, which a node outside pays. Its notes are taken while shown, and the payment is in the
 /// history.
 async fn lightning(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     let before = phone.balance().await?;
     // What the wallet gets of an invoice asking 4000: the most that fits
-    // with the hub's fee on it.
-    let info = eco.info(eco.hub(1)).await?;
-    let receive = info.lightning.context("hub 1 takes no Lightning")?.receive;
+    // with the provider's fee on it, paid in notes it holds at a hub.
+    eco.stock_at(eco.hub(1), 4_000).await?;
+    let provider = eco.swaps_info().await?;
+    let receive = provider
+        .receive
+        .context("the provider takes no payments")?
+        .fee;
     let gets = (0..=4_000u64)
         .rev()
         .find(|n| n + receive.due(*n) <= 4_000)
@@ -299,7 +303,7 @@ async fn lightning(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     phone.tap_id("set-amount").await?;
     phone.tap_id("amount").await?;
     phone.type_text("4000").await?;
-    // A memo for the payer: hub 1 puts one in its invoices.
+    // A memo for the payer: the provider puts one in its invoices.
     phone.fill_id("memo-field", "Pizza night").await?;
     phone.tap_id("done").await?;
     phone.tagged("way", "Lightning invoice", 10).await?;
@@ -334,7 +338,7 @@ async fn lightning(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
 }
 
 /// Paid an invoice of the node outside through the swap provider, chosen
-/// in advanced mode over its hub's gateway: the provider's node pays it for
+/// in advanced mode: the provider's node pays it for
 /// a lock of the app's notes at hub 1, and claims the lock with the
 /// preimage. The confirm screen names the provider and how long the sats
 /// would wait should it not pay; the history, who paid it.
@@ -343,8 +347,8 @@ async fn paid_through_provider(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     let (request, hash) = eco.invoice(OUTSIDE, 2_000).await?;
     phone.link(&format!("lightning:{request}")).await?;
     phone.tagged("paying", "2,000 sat", 120).await?;
-    // Every way to pay it: hub 1's gateway and the provider, announced as
-    // "swaps"; the provider chosen, unless it was already, the cheapest.
+    // Every way to pay it: the provider, announced as "swaps", chosen
+    // unless it was already.
     phone.tap_id("providers").await?;
     phone.wait("swaps", 120).await?;
     if phone.has("use swaps").await? {
@@ -694,13 +698,15 @@ async fn used(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     restored(phone, hub, &silent.to_string()).await
 }
 
-/// An account at the bridge at hub 2 kept for its owner alone, added with
-/// the pairing code its operator reads out: topped up from hub 1, an app
-/// connected with the URI it copies, paid from outside at its Lightning
+/// An account at the bridge at hub 1 kept for its owner alone, added with
+/// the pairing code its operator reads out: topped up in notes at hub 1, an
+/// app connected with the URI it copies, paid from outside at its Lightning
 /// Address, which Receive shows, then frozen and its notes exported to the
-/// app, which uses hub 2 by now (`visited`).
+/// app.
 async fn bridged(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     let bridge = eco.bridge2();
+    // Paid through the provider, which holds notes at its hub, hub 1.
+    eco.bridge_ready(bridge, eco.hub(1), 2_000).await?;
     // Renewed: a code to pair with however often the stack ran.
     let pairing = eco
         .exec("bridge2", &["licash-bridge", "pairing", "--renew"])
@@ -715,15 +721,12 @@ async fn bridged(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     // Added, its page open: nothing in the account yet.
     phone.tagged("bridge-balance", "0 sat", 60).await?;
 
-    // Topped up from hub 1 over Lightning, less hub 2's fee on receiving.
+    // Topped up in notes at hub 1: credited whole.
     phone.fill_id("bridge-top-up-amount", "2000").await?;
     phone.tap_id("bridge-top-up").await?;
     phone.wait("Topped up", 60).await?;
     let topped = bridge_balance(phone, 0).await?;
-    ensure!(
-        (1_900..=2_000).contains(&topped),
-        "{topped} sat credited of 2000"
-    );
+    ensure!(topped == 2_000, "{topped} sat credited of 2000");
 
     // An app connected: its URI copied, pasted as into the app (in a
     // field of the page's, left before it is imported).
@@ -769,7 +772,8 @@ async fn bridged(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
         .await?;
     phone.tap("Back").await?;
     phone.home(30).await?;
-    // Paid there from outside, as LNURL-pay has it.
+    // Paid there from outside, as LNURL-pay has it: through the provider,
+    // which pays the bridge in notes it holds at hub 1.
     let pay = eco
         .get_json(&format!("{bridge}/.well-known/lnurlp/phone"))
         .await?;

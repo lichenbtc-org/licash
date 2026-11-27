@@ -1,10 +1,9 @@
-# A regtest ecosystem for the end-to-end tests: Bitcoin Core, two hubs with
-# Lightning gateways over their own LND nodes (the first taking deposits on
-# Bitcoin, claimed to a fixed address), an outside LND node that
-# pays and is paid, a swap provider between the hubs paying Lightning
-# invoices from an LND node of its own, a Nostr relay the
-# hubs and the provider announce themselves on, and a Gotify server their
-# operators are notified on. `run.sh` brings it up, runs the tests and
+# A regtest ecosystem for the end-to-end tests: Bitcoin Core, two hubs
+# taking deposits on Bitcoin (claimed to a fixed address), an outside LND
+# node that pays and is paid, a swap provider between the hubs paying and
+# paid over Lightning through an LND node of its own (hubs run none), a
+# Nostr relay the hubs and the provider announce themselves on, and a
+# Gotify server their operators are notified on. `run.sh` brings it up, runs the tests and
 # removes it.
 # Every port is published on 127.0.0.1 only: the hubs', the provider's and
 # the relay's at fixed ports, which wallets keep across restarts and the hubs
@@ -37,25 +36,6 @@ x-lnd: &lnd
   - --rpclisten=0.0.0.0:10009
   - --restlisten=0.0.0.0:8080
 
-# The macaroon a hub's gateway needs of its LND node, and no more: baked
-# beside the node, in its network and data, for the eight calls it makes
-# (docs/hub.md). A hub given it could not run on a call left out.
-x-macaroon: &macaroon
-  <<: *lnd
-  healthcheck:
-    disable: true
-  restart: "no"
-  entrypoint: ["lncli", "--network=regtest", "bakemacaroon", "--save_to=/root/.lnd/hub.macaroon"]
-  command:
-  - uri:/lnrpc.Lightning/GetInfo
-  - uri:/lnrpc.Lightning/ChannelBalance
-  - uri:/routerrpc.Router/SendPaymentV2
-  - uri:/routerrpc.Router/TrackPaymentV2
-  - uri:/invoicesrpc.Invoices/AddHoldInvoice
-  - uri:/lnrpc.Lightning/LookupInvoice
-  - uri:/invoicesrpc.Invoices/SettleInvoice
-  - uri:/invoicesrpc.Invoices/CancelInvoice
-
 x-hub: &hub
   image: licash-hub:e2e
   build:
@@ -63,16 +43,12 @@ x-hub: &hub
     dockerfile: apps/hub/Dockerfile
     # Regtest uses mock proofs and does not need the production prover.
     target: runtime
-  # Root, to read its LND node's macaroon.
-  user: "0:0"
   entrypoint: ["sh", "-c"]
   environment:
     LICASH_HUB_CHAIN: http://licash:licash@bitcoind:18443
     LICASH_HUB_NETWORK: regtest
     LICASH_HUB_CHAIN_POLL: "1"
     LICASH_HUB_TWEAKS: "true"
-    LICASH_HUB_LND_MACAROON: /lnd/hub.macaroon
-    LICASH_HUB_LND_CERT: /lnd/tls.cert
     LICASH_HUB_NOSTR_RELAYS: ws://relay:8080
     # The relay as wallets on this host reach it.
     LICASH_HUB_MAILBOX_RELAYS: ws://127.0.0.1:${LICASH_E2E_RELAY:-38390}
@@ -111,35 +87,7 @@ services:
   outside-ln:
     <<: *lnd
 
-  hub1-ln:
-    <<: *lnd
-    volumes:
-      - hub1-ln:/root/.lnd
-
-  hub2-ln:
-    <<: *lnd
-    volumes:
-      - hub2-ln:/root/.lnd
-
-  hub1-macaroon:
-    <<: *macaroon
-    network_mode: service:hub1-ln
-    volumes:
-      - hub1-ln:/root/.lnd
-    depends_on:
-      hub1-ln:
-        condition: service_healthy
-
-  hub2-macaroon:
-    <<: *macaroon
-    network_mode: service:hub2-ln
-    volumes:
-      - hub2-ln:/root/.lnd
-    depends_on:
-      hub2-ln:
-        condition: service_healthy
-
-  # The swap provider's, with channels to hub2's node and the outside one.
+  # The swap provider's, with a channel to the outside one.
   swaps-ln:
     <<: *lnd
     volumes:
@@ -152,13 +100,12 @@ services:
     # choose, caps up to 2^21 - 1 sat over up to 1,000 blocks, lending up to
     # 2^21 sat of each, its one-time answers kept in its database alone (no
     # witnesses, as regtest allows). Its locks may last 240 blocks, longer than hub2's
-    # 144: a provider other than hub2 swaps from here to hub2 only if the
-    # lock it takes here outlasts its own at hub2 by hub2's window and the
-    # refund request that forces the preimage out of hub2.
+    # 144: the swap provider swaps from here to hub2 only if the lock it
+    # takes here outlasts its own at hub2 by hub2's window and the refund
+    # request that forces the preimage out of hub2.
     command:
       - >-
-        [ -f /data/seed ] || licash-hub init; exec licash-hub run --lnd https://hub1-ln:8080
-        --lock-window 240
+        [ -f /data/seed ] || licash-hub init; exec licash-hub run --lock-window 240
         --chain http://licash:licash@bitcoind:18443/wallet/miner --contracts
         --contracts-witnesses none --contracts-max-cap 2097151 --contracts-max-blocks 1000
         --contracts-lend 2097152 --contracts-lend-total 100000000
@@ -170,38 +117,33 @@ services:
       - "127.0.0.1:${LICASH_E2E_HUB1:-38338}:8338"
     volumes:
       - hub1:/data
-      - hub1-ln:/lnd:ro
       - notify:/notify:ro
     depends_on:
-      hub1-macaroon:
-        condition: service_completed_successfully
+      bitcoind:
+        condition: service_healthy
       gotify-app:
         condition: service_completed_successfully
       relay:
         condition: service_started
 
-  # It provides the swaps into it from hub1, for 1 + 5000 ppm, holding or
-  # owed at most 30 000 of hub1's notes: its own lock there is of notes it
-  # issues, which need not outlast its window. No contract protects hub1's
-  # notes here (the tests open none): unprotected, as only tests run.
+  # It takes deposits as hub1 does, which stock the swap provider here.
   hub2:
     <<: *hub
     command:
       - >-
-        [ -f /data/seed ] || licash-hub init; exec licash-hub run --lnd https://hub2-ln:8080
+        [ -f /data/seed ] || licash-hub init; exec licash-hub run
         --announce-url http://127.0.0.1:${LICASH_E2E_HUB2:-38339} --announce-name hub2
         --name hub2 --notify gotify://gotify/$$(cat /notify/token)
-        --swaps --swaps-from http://hub1:8338=30000 --swaps-fee-base 1 --swaps-fee-ppm 5000
-        --swaps-no-contracts
+        --deposit-sweep-address bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080
+        --deposit-depth 1 --deposit-window 6 --deposit-downtime 2 --deposit-sweep-blocks 6
     ports:
       - "127.0.0.1:${LICASH_E2E_HUB2:-38339}:8338"
     volumes:
       - hub2:/data
-      - hub2-ln:/lnd:ro
       - notify:/notify:ro
     depends_on:
-      hub2-macaroon:
-        condition: service_completed_successfully
+      bitcoind:
+        condition: service_healthy
       gotify-app:
         condition: service_completed_successfully
       relay:
@@ -256,9 +198,9 @@ services:
       hub2:
         condition: service_healthy
 
-  # An NWC bridge open to anyone, paying and paid through hub2, its
-  # accounts' Lightning Addresses at the URL published on the host, which
-  # it announces on the relay.
+  # An NWC bridge open to anyone at hub2, paying and paid over Lightning
+  # through the swap provider, its accounts' Lightning Addresses at the URL
+  # published on the host, which it announces on the relay.
   bridge:
     image: licash-bridge:e2e
     build:
@@ -268,7 +210,8 @@ services:
     command:
       - >-
         [ -f /data/wallet.sqlite ] || licash-bridge init --network regtest --hub http://hub2:8338;
-        exec licash-bridge run --relay ws://relay:8080 --open --name bridge --interval 1
+        exec licash-bridge run --via http://swaps:8340 --relay ws://relay:8080 --open
+        --name bridge --interval 1
         --max-balance 100000 --public-url http://127.0.0.1:${LICASH_E2E_BRIDGE:-38341} --announce
     environment:
       RUST_LOG: info
@@ -279,19 +222,23 @@ services:
     depends_on:
       hub2:
         condition: service_healthy
+      swaps:
+        condition: service_healthy
       relay:
         condition: service_started
 
-  # An NWC bridge for its owner alone at hub2, whom its pairing code
-  # registers, its Lightning Addresses at the URL published on the host:
-  # the app's, which exports its notes.
+  # An NWC bridge for its owner alone at hub1, whom its pairing code
+  # registers, paying and paid through the swap provider, its Lightning
+  # Addresses at the URL published on the host: the app's, which tops it up
+  # in notes at hub1 and exports its notes.
   bridge2:
     image: licash-bridge:e2e
     entrypoint: ["sh", "-c"]
     command:
       - >-
-        [ -f /data/wallet.sqlite ] || licash-bridge init --network regtest --hub http://hub2:8338;
-        exec licash-bridge run --relay ws://relay:8080 --name bridge2 --interval 1
+        [ -f /data/wallet.sqlite ] || licash-bridge init --network regtest --hub http://hub1:8338;
+        exec licash-bridge run --via http://swaps:8340 --relay ws://relay:8080 --name bridge2
+        --interval 1
         --public-url http://127.0.0.1:${LICASH_E2E_BRIDGE2:-38342}
     environment:
       RUST_LOG: info
@@ -300,7 +247,9 @@ services:
     volumes:
       - bridge2:/data
     depends_on:
-      hub2:
+      hub1:
+        condition: service_healthy
+      swaps:
         condition: service_healthy
       relay:
         condition: service_started
@@ -345,6 +294,4 @@ volumes:
   swaps:
   bridge:
   bridge2:
-  hub1-ln:
-  hub2-ln:
   swaps-ln:

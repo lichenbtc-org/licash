@@ -22,15 +22,17 @@ async fn operators_are_notified_on_gotify() -> anyhow::Result<()> {
             3
         );
     }
-    // Started with no channels, and the provider with nothing to swap with:
-    // alerts, at high priority.
-    let channels = find("hub1: Hub alert", "Lightning node can")?;
-    assert_eq!(channels.priority, 8);
+    // The provider, started with nothing to swap with: an alert, at high
+    // priority.
     let stock = find("swaps: Swaps alert", "No swaps to")?;
     assert_eq!(stock.priority, 8);
 
-    // A payment received at hub 2: its lock is notified as it is paid.
-    let last = heard.first().map_or(0, |n| n.id);
+    // A payment received at hub 2, the provider's lock to its payee: the
+    // lock is notified as it is paid, of the notes the provider locked,
+    // which the hub sees, not of the amount received. The provider stocked
+    // there first, its deposit's own lock paid before.
+    eco.stock_at(eco.hub(2), 4_321).await?;
+    let last = eco.notifications().await?.first().map_or(0, |n| n.id);
     let frank = eco.wallet("frank")?;
     eco.pay_in(&frank, eco.hub(2), 4_321).await?;
     let paid = until("hub2 notifies the lock paid", 60, || async {
@@ -40,10 +42,7 @@ async fn operators_are_notified_on_gotify() -> anyhow::Result<()> {
             .find(|n| n.id > last && n.title == "hub2: Lock paid"))
     })
     .await?;
-    assert!(
-        paid.message.starts_with("• Amount: 4,321 sat\n"),
-        "{paid:?}"
-    );
+    assert!(paid.message.starts_with("• Amount: "), "{paid:?}");
     assert_eq!(paid.priority, 3);
     Ok(())
 }

@@ -1,7 +1,9 @@
 //! The observatory watches the stack's hubs and provider, then moves a
-//! balance of its own between them, in Licash, through the provider, over
-//! Lightning and on Bitcoin, each move recorded with what it cost, on the
-//! stack of `apps/e2e/run.sh`, which runs these.
+//! balance of its own between them, in Licash, through the provider and on
+//! Bitcoin, each move recorded with what it cost, on the stack of
+//! `apps/e2e/run.sh`, which runs these. Over Lightning it finds no route:
+//! hubs make no invoices, and a provider's invoice for a wallet asks a
+//! final CLTV no lock at a hub outlasts.
 
 use std::{
     sync::{Arc, Mutex},
@@ -12,7 +14,7 @@ use licash_e2e::{until, Eco};
 use licash_nostr::Route;
 use licash_observatory::{
     budget::Kind,
-    mover::{Mover, Moving},
+    mover::{Mover, Moving, Skipped},
     observer::{self, Watching},
     probe::Dialer,
     store::{Outcome, Store},
@@ -87,7 +89,12 @@ async fn the_observatory_moves_its_balance_between_hubs_and_records_each_move() 
     };
     let mut mover = Mover::new(wallet, moving)?;
 
-    for kind in [Kind::Hub, Kind::Swap, Kind::Lightning, Kind::Chain] {
+    let lightning = mover.move_now(Kind::Lightning).await;
+    assert!(
+        matches!(lightning, Err(Skipped::NoRoute(_))),
+        "{lightning:?}"
+    );
+    for kind in [Kind::Hub, Kind::Swap, Kind::Chain] {
         // Blocks mined meanwhile, for a move on Bitcoin.
         let mining = async {
             loop {
