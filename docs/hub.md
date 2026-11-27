@@ -949,6 +949,62 @@ A hub of an earlier release ignores epochs: once another copy took over,
 its enrollments are refused, so it opens no contract, but it still serves
 wallets and runs its gateways. Stop it, as the restore steps say.
 
+#### The standby
+
+A standby is a copy of the hub on another machine that holds no `seed`:
+it answers the disputes of the contracts open if the hub is lost, and can
+do no more. Write its keys on the hub, beside the running hub or with it
+stopped, then run it on a copy of `<data>` with them:
+
+```sh
+licash-hub standby-keys standby.json        # on the hub, with its seed
+licash-hub --standby-keys standby.json run --chain ... --contracts \
+    --contracts-wallet ... --contracts-witness-set ... --contracts-witness ...
+```
+
+It runs as `--respond-only` does, asked or not: no API but `/health`, its
+responder, fee bumping and alerts on. With no seed it issues no note,
+releases and locks no spend, claims no deposit and announces nothing, and
+`init`, `standby-keys`, `contracts-takeover` and `contracts-witness-import` refuse
+its keys. It is refused without `--contracts` and their witnesses.
+
+What it holds:
+
+- `standby.json`: the hub's keysets and address, which the hub publishes,
+  and its witness key (of `seed`, and of no use but to the witnesses).
+- A copy of `hub.sqlite`, of a ledger a hub of this release started on:
+  such a ledger keeps the unlock of each spend the hub released, which
+  the standby cites as the hub does, and one that does not is refused by
+  name (start the hub of this release on its ledger, then copy it again).
+- `opening-instances/`, `header-chain/` and `hp-proofs/` (without
+  `bench.json`), as any restore.
+- A Bitcoin Core wallet of its own, funded with the fee coins its answers
+  need.
+
+Never give it `seed`, `contracts-instance`, `swaps/`, nor a login to the
+hub's Core wallet or LND.
+
+It serves no wallet, so a holder who exits while it alone answers is
+shown neither what it responded on nor its proof: the holder contests each
+response and challenges each assertion, and every claim it reduces costs
+it a proof and an answer to a challenge. Size its prover, or the machines
+it rents (`LICASH_R0_WORKERS`, below), for that.
+
+Its ledger is as old as its copy, and it answers as any copy does: a
+claim of notes spent after its copy is paid in full, and its answer, if
+the witnesses keep it first, is the one every copy signs. Keep its copy as
+fresh as a backup's (above), and run it while the hub is down, not beside
+it. Once it has answered, its copy of the ledger is the standby's own:
+never restore the hub from it. To serve wallets again, restore the hub
+from its newest backup with its seed and take the contracts over
+([Taking over](#taking-over)).
+
+What the standby's machine exposes: `hub.sqlite` holds the secret of each
+opening, and with the witness key whoever holds them answers each
+contract's disputes as the hub. Holding a contract as well, they can be
+paid all it claims with the hub's reserve, whatever it is owed, for each
+contract they hold. They mint no note, and take nothing a holder is owed.
+
 The responder can only answer what its node shows it. The hub alerts once
 if the node's tip stays unchanged for 12 blocks' time (2 hours, 6 minutes
 on Mutinynet, never on regtest), which means the node is stalled, out of

@@ -458,6 +458,108 @@ fn a_hubs_witness_key_is_of_its_seed_and_an_import_is_never_on_mainnet() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("into witnesses"));
 }
 
+/// The hub writes its standby's keys with its seed, never over a file. A
+/// copy of its ledger with them and no seed names the hub's witness key,
+/// and is refused what the seed alone does: creating a hub, writing keys,
+/// taking the contracts over, and running without contracts to answer for.
+#[test]
+fn a_standby_runs_on_keys_its_hub_wrote_and_is_refused_what_its_seed_alone_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("hub");
+    assert!(output(&data, &["init", "--max-pow", "6"]).status.success());
+    let keys = dir.path().join("standby.json");
+    let keys = keys.to_str().unwrap();
+    assert!(stdout(&data, &["standby-keys", keys]).contains("Wrote"));
+    let failed = |data: &Path, args: &[&str]| {
+        let out = output(data, args);
+        assert!(!out.status.success(), "{args:?}");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    assert!(failed(&data, &["standby-keys", keys]).contains("exists"));
+    // The hub's data on another machine, all but its seed.
+    let copy = dir.path().join("standby");
+    std::fs::create_dir(&copy).unwrap();
+    let into = copy.join("hub.sqlite");
+    rusqlite::Connection::open(data.join("hub.sqlite"))
+        .unwrap()
+        .execute("VACUUM INTO ?1", [into.to_str().unwrap()])
+        .unwrap();
+    assert!(failed(&copy, &["witness-key"]).contains("seed"));
+    let standby = ["--standby-keys", keys];
+    fn with<'a>(keys: &[&'a str], args: &[&'a str]) -> Vec<&'a str> {
+        [keys, args].concat()
+    }
+    assert_eq!(
+        stdout(&copy, &with(&standby, &["witness-key"])),
+        stdout(&data, &["witness-key"])
+    );
+    let set = "11".repeat(32);
+    let witness = format!("https://127.0.0.1:1#{}", "22".repeat(32));
+    let witnesses = [
+        "--contracts-witness-set",
+        &set,
+        "--contracts-witness",
+        &witness,
+    ];
+    let other = dir.path().join("other.json");
+    for (args, what) in [
+        (vec!["init", "--max-pow", "6"], "create a hub"),
+        (
+            vec!["standby-keys", other.to_str().unwrap()],
+            "write a standby's keys",
+        ),
+        (
+            [&["contracts-takeover"][..], &witnesses].concat(),
+            "take the contracts over",
+        ),
+        (
+            [
+                &["contracts-witness-import", "--network", "regtest"][..],
+                &witnesses,
+            ]
+            .concat(),
+            "import contracts into witnesses",
+        ),
+    ] {
+        let stderr = failed(&copy, &with(&standby, &args));
+        assert!(stderr.contains(&format!("does not {what}")), "{stderr}");
+    }
+    assert!(!other.exists());
+    // It answers the contracts' disputes, or runs nothing.
+    let listen = format!("127.0.0.1:{}", free_port());
+    let stderr = failed(&copy, &with(&standby, &["run", "--listen", &listen]));
+    assert!(
+        stderr.contains("needs --contracts and their witnesses"),
+        "{stderr}"
+    );
+    // Another hub's keys open no ledger of this one.
+    let theirs = dir.path().join("theirs");
+    assert!(output(&theirs, &["init", "--max-pow", "6"])
+        .status
+        .success());
+    let their_keys = dir.path().join("theirs.json");
+    let their_keys = their_keys.to_str().unwrap();
+    stdout(&theirs, &["standby-keys", their_keys]);
+    let run = [
+        &["run", "--listen", &listen, "--network", "regtest"][..],
+        &["--chain", "http://127.0.0.1:1", "--contracts"],
+        &witnesses,
+    ]
+    .concat();
+    let stderr = failed(&copy, &with(&["--standby-keys", their_keys], &run));
+    assert!(
+        stderr.contains("the standby keys do not match the database"),
+        "{stderr}"
+    );
+    // Its own open the ledger, as far as its node, which is not there.
+    let stderr = failed(&copy, &with(&standby, &run));
+    assert!(stderr.contains("responding only: a standby"), "{stderr}");
+    assert!(stderr.contains("hub started"), "{stderr}");
+    // Its keys or the seed, never both.
+    let both = ["--seed", "seed", "--standby-keys", keys, "witness-key"];
+    assert!(failed(&copy, &both).contains("cannot be used with"));
+}
+
 /// Give the hub at `data` an own lock under `hash`, which it may yet pay,
 /// as for a deposit, a Lightning receipt or a swap: the lock's id.
 fn own_lock(data: &Path, hash: [u8; 32]) -> String {

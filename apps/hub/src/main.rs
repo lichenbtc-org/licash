@@ -53,6 +53,19 @@ struct Cli {
     /// The seed file, the hub's one secret: `<data>/seed` unless given.
     #[arg(long, global = true, env = "LICASH_HUB_SEED")]
     seed: Option<PathBuf>,
+    /// Run as a standby of the hub, on a copy of its ledger and without
+    /// its seed: with the keys its hub wrote for it (`standby-keys`), it
+    /// answers the disputes of the contracts open as `run --respond-only`
+    /// does, and no more. It issues no note, opens and takes over no
+    /// contract.
+    #[arg(
+        long,
+        global = true,
+        value_name = "FILE",
+        env = "LICASH_HUB_STANDBY_KEYS",
+        conflicts_with = "seed"
+    )]
+    standby_keys: Option<PathBuf>,
     /// Log lines on stderr as text or JSON, filtered by RUST_LOG.
     #[arg(long, global = true, env = "LICASH_HUB_LOG", value_enum, default_value_t = Log::Text)]
     log: Log,
@@ -322,10 +335,49 @@ struct WitnessArgs {
     contracts_witness: Vec<String>,
 }
 
+/// Where the hub's keys come from: its seed, or, for a standby, the keys
+/// its hub wrote for it (`--standby-keys`).
+#[derive(Clone, Debug)]
+enum Keys {
+    Seed(PathBuf),
+    Standby(PathBuf),
+}
+
+impl Keys {
+    /// The hub on the ledger at `db`: a standby with a standby's keys.
+    fn open(&self, db: &Path, policy: Policy) -> anyhow::Result<Hub> {
+        match self {
+            Self::Seed(seed) => Hub::open(seed, db, policy).context("open the hub"),
+            Self::Standby(keys) => {
+                Hub::open_standby(keys, db, policy).context("open the hub's standby")
+            }
+        }
+    }
+
+    /// The key the hub signs what its contract witnesses keep with.
+    fn witness_secret(&self) -> anyhow::Result<[u8; 32]> {
+        match self {
+            Self::Seed(seed) => licash_hub::witness_secret_of(seed),
+            Self::Standby(keys) => licash_hub::standby_witness_secret(keys),
+        }
+        .context("the hub's witness key")
+    }
+
+    /// The seed, for `what` a standby never does.
+    fn seed(&self, what: &str) -> anyhow::Result<&Path> {
+        match self {
+            Self::Seed(seed) => Ok(seed),
+            Self::Standby(_) => anyhow::bail!(
+                "a standby (--standby-keys) does not {what}: that is its hub's, with its seed"
+            ),
+        }
+    }
+}
+
 impl WitnessArgs {
-    /// The witnesses named, with the hub's witness key of the seed at
-    /// `seed`: none named is refused, never taken as `none`.
-    fn witnesses(&self, seed: &Path) -> anyhow::Result<licash_contracts::hub::Witnesses> {
+    /// The witnesses named, with the hub's witness key of `keys`: none
+    /// named is refused, never taken as `none`.
+    fn witnesses(&self, keys: &Keys) -> anyhow::Result<licash_contracts::hub::Witnesses> {
         use licash_contracts::hub::Witnesses;
         if self.contracts_witnesses.is_some() {
             return Ok(Witnesses::none());
@@ -341,8 +393,7 @@ impl WitnessArgs {
             .iter()
             .map(|w| licash_witness::client::Client::parse(w))
             .collect::<anyhow::Result<Vec<_>>>()?;
-        let secret = licash_hub::witness_secret_of(seed).context("the hub's witness key")?;
-        Witnesses::of(set, members, secret)
+        Witnesses::of(set, members, keys.witness_secret()?)
     }
 }
 
@@ -1129,6 +1180,15 @@ enum Command {
     /// The x-only public key of the hub's witness key, of its seed, in hex:
     /// what `licash-witness init --hub-key` takes.
     WitnessKey,
+    /// Write the keys a standby of this hub runs with (`--standby-keys`),
+    /// beside the running hub or with it stopped: its keysets and address,
+    /// which it publishes, and its witness key. Whoever holds them with a
+    /// copy of `hub.sqlite` answers the contracts' disputes as the hub,
+    /// and mints nothing: keep them as you keep that copy.
+    StandbyKeys {
+        /// The file to write: never over one there.
+        out: PathBuf,
+    },
     /// Give the hub's contract witnesses, all new, the contracts it opened
     /// before it had them, with the hub stopped: each enrolled, each answer
     /// it signed kept as it signed it, and each it may have signed with
@@ -1218,9 +1278,15 @@ fn command(cli: Cli) -> anyhow::Result<()> {
         ],
         "hub.sqlite",
     )?;
-    let seed = cli.seed.unwrap_or_else(|| cli.data.join("seed"));
+    let keys = match cli.standby_keys {
+        Some(keys) => Keys::Standby(keys),
+        None => Keys::Seed(cli.seed.unwrap_or_else(|| cli.data.join("seed"))),
+    };
     match cli.command {
-        Command::Init { max_pow } => init(&cli.data, &seed, &db, max_pow, cli.log),
+        Command::Init { max_pow } => {
+            let seed = keys.seed("create a hub")?;
+            init(&cli.data, seed, &db, max_pow, cli.log)
+        }
         Command::Run {
             listen,
             ingress,
@@ -1237,7 +1303,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             notify_kinds,
             respond_only,
         } => {
-            let respond_only = match responding_only(respond_only, &chain, &seed, &cli.data)? {
+            let respond_only = match responding_only(respond_only, &chain, &keys, &cli.data)? {
                 Some(why) => {
                     tracing::warn!("responding only: {why}");
                     true
@@ -1346,8 +1412,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                     .context("set up notifications")?;
                 Some(notifier)
             };
-            let hub = Hub::open(&seed, &db, policy).context("open the hub")?;
-            let hub = Arc::new(hub);
+            let hub = Arc::new(keys.open(&db, policy)?);
             if respond_only {
                 // What its gateways and swaps owe is collected by the copy
                 // that leads, if one does: told, as no one here does.
@@ -1412,7 +1477,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 (true, Some((source, _, _))) => {
                     let keyset = hub.issuing();
                     let wallet = wallet.unwrap_or_else(|| source.clone());
-                    let witnesses = witnessing.witnesses(&seed)?;
+                    let witnesses = witnessing.witnesses(&keys)?;
                     let opening = Openings::with_wallet(
                         &cli.data,
                         source.clone(),
@@ -1639,8 +1704,18 @@ fn command(cli: Cli) -> anyhow::Result<()> {
         } => audit(&db, json, max_authorizations),
         Command::ResumePayouts => resume_payouts(&cli.data),
         Command::WitnessKey => {
-            let secret = licash_hub::witness_secret_of(&seed).context("the hub's witness key")?;
+            let secret = keys.witness_secret()?;
             println!("{}", hex::encode(licash_witness::public_key(&secret)?));
+            Ok(())
+        }
+        Command::StandbyKeys { out } => {
+            let seed = keys.seed("write a standby's keys")?;
+            licash_hub::write_standby_keys(seed, &db, &out).context("write the standby's keys")?;
+            println!(
+                "Wrote {}: the hub's witness key and what it publishes of itself. With a copy \
+                 of hub.sqlite it answers the contracts' disputes as the hub.",
+                out.display()
+            );
             Ok(())
         }
         Command::ContractsWitnessImport { witnesses, network } => {
@@ -1653,9 +1728,10 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 witnesses.contracts_witnesses.is_none(),
                 "an import is into witnesses: --contracts-witness-set and --contracts-witness"
             );
+            keys.seed("import contracts into witnesses")?;
             // Held until the import is done: no hub signs beside it.
             let _stopped = licash_hub::stopped(&db)?;
-            let witnesses = witnesses.witnesses(&seed)?;
+            let witnesses = witnesses.witnesses(&keys)?;
             let runtime = tokio::runtime::Runtime::new()?;
             let imported = runtime.block_on(witnesses.import(&cli.data))?;
             println!(
@@ -1670,7 +1746,8 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 witnesses.contracts_witnesses.is_none(),
                 "a takeover is kept by witnesses: --contracts-witness-set and --contracts-witness"
             );
-            let witnesses = witnesses.witnesses(&seed)?;
+            keys.seed("take the contracts over")?;
+            let witnesses = witnesses.witnesses(&keys)?;
             let runtime = tokio::runtime::Runtime::new()?;
             let epoch = runtime.block_on(witnesses.take_over(&cli.data))?;
             println!(
@@ -2157,8 +2234,9 @@ fn superseded(epoch: u64) -> String {
     )
 }
 
-/// Why `run` responds only, if it does: asked (`respond_only`, refused
-/// without contracts and witnesses), or another copy of the hub took the
+/// Why `run` responds only, if it does: asked (`respond_only`, or a
+/// standby's keys, which do no more: refused without contracts and
+/// witnesses), or another copy of the hub took the
 /// contracts over, as its witnesses say. Not known (a witness unreachable),
 /// it responds only if it last saw itself superseded
 /// ([`licash_contracts::hub::superseded`]), else runs as asked: as its
@@ -2166,11 +2244,21 @@ fn superseded(epoch: u64) -> String {
 fn responding_only(
     respond_only: bool,
     chain: &Chain,
-    seed: &Path,
+    keys: &Keys,
     data: &Path,
 ) -> anyhow::Result<Option<String>> {
     use licash_contracts::hub::Leadership;
     let witnessed = chain.contracts && chain.witnesses.contracts_witness_set.is_some();
+    if matches!(keys, Keys::Standby(_)) {
+        anyhow::ensure!(
+            witnessed,
+            "a standby (--standby-keys) answers the contracts' disputes beside the copy that \
+             leads: it needs --contracts and their witnesses"
+        );
+        return Ok(Some(
+            "a standby, without the hub's seed (--standby-keys)".into(),
+        ));
+    }
     if respond_only {
         anyhow::ensure!(
             witnessed,
@@ -2182,7 +2270,7 @@ fn responding_only(
     if !witnessed {
         return Ok(None);
     }
-    let witnesses = chain.witnesses.witnesses(seed)?;
+    let witnesses = chain.witnesses.witnesses(keys)?;
     let asked = tokio::runtime::Runtime::new()?.block_on(witnesses.leadership(data));
     Ok(match asked {
         Ok(Leadership::Superseded(epoch)) => Some(superseded(epoch)),
@@ -2389,7 +2477,7 @@ fn events(db: &Path, mut after: u64, limit: u32, follow: bool) -> anyhow::Result
 mod tests {
     use clap::Parser;
 
-    use super::{responding_only, Cli, Command, Critical};
+    use super::{responding_only, Cli, Command, Critical, Keys};
 
     #[tokio::test]
     async fn the_first_critical_task_to_stop_or_panic_is_named() {
@@ -2493,8 +2581,11 @@ mod tests {
                     ..
                 } => {
                     let dir = tempfile::tempdir().unwrap();
-                    let seed = dir.path().join("seed");
-                    responding_only(respond_only, &chain, &seed, dir.path())
+                    let keys = match cli.standby_keys {
+                        Some(keys) => Keys::Standby(keys),
+                        None => Keys::Seed(dir.path().join("seed")),
+                    };
+                    responding_only(respond_only, &chain, &keys, dir.path())
                 }
                 _ => unreachable!(),
             }
@@ -2523,6 +2614,58 @@ mod tests {
             only(&["--contracts", "--contracts-witnesses", "none"]).unwrap(),
             None
         );
+        // A standby's keys respond only, asked or not, and under the same
+        // rule: never without contracts and their witnesses.
+        let standby = ["--standby-keys", "standby.json"];
+        let why = only(&[&standby[..], &witnessed].concat()).unwrap();
+        assert!(why.unwrap().contains("a standby"));
+        let both = [&standby[..], &["--respond-only"], &witnessed].concat();
+        assert!(only(&both).unwrap().unwrap().contains("a standby"));
+        assert!(only(&standby).is_err());
+        assert!(only(&[&standby[..], &["--contracts"]].concat()).is_err());
+        let unwitnessed = [&standby[..], &unwitnessed[1..]].concat();
+        assert!(only(&unwitnessed).is_err());
+        // Its keys or the seed, not both.
+        let both = [
+            "licash-hub",
+            "--seed",
+            "seed",
+            "--standby-keys",
+            "k",
+            "status",
+        ];
+        assert!(Cli::try_parse_from(both).is_err());
+    }
+
+    /// A standby's keys do what its hub's seed alone does in no command:
+    /// none creates a hub, writes keys, takes the contracts over or
+    /// imports them into witnesses.
+    #[test]
+    fn a_standbys_keys_are_refused_what_the_seed_alone_does() {
+        let keys = Keys::Standby("standby.json".into());
+        for what in ["create a hub", "take the contracts over"] {
+            let error = keys.seed(what).unwrap_err().to_string();
+            assert!(error.contains(&format!("does not {what}")), "{error}");
+        }
+        let seed = Keys::Seed("seed".into());
+        assert_eq!(
+            seed.seed("create a hub").unwrap(),
+            std::path::Path::new("seed")
+        );
+        // Its witness key is its hub's: what the witnesses check.
+        let dir = tempfile::tempdir().unwrap();
+        let (seed, db) = (dir.path().join("seed"), dir.path().join("hub.sqlite"));
+        licash_hub::Hub::init(&seed, &db, 6).unwrap();
+        let out = dir.path().join("standby.json");
+        licash_hub::write_standby_keys(&seed, &db, &out).unwrap();
+        let (hub, standby) = (Keys::Seed(seed), Keys::Standby(out));
+        assert_eq!(
+            standby.witness_secret().unwrap(),
+            hub.witness_secret().unwrap()
+        );
+        let policy = licash_hub::Policy::default();
+        assert!(!hub.open(&db, policy).unwrap().standby());
+        assert!(standby.open(&db, policy).unwrap().standby());
     }
 
     /// Its witnesses unreachable, a hub responds only if it last saw
@@ -2545,6 +2688,7 @@ mod tests {
         let Command::Run { chain, .. } = Cli::try_parse_from(args).unwrap().command else {
             unreachable!()
         };
+        let seed = Keys::Seed(seed);
         assert_eq!(
             responding_only(false, &chain, &seed, dir.path()).unwrap(),
             None

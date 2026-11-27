@@ -39,6 +39,10 @@ mod lost;
 #[path = "contracts/first.rs"]
 mod first;
 
+/// A copy of the hub without its seed answers its disputes ([`standby`]).
+#[path = "contracts/standby.rs"]
+mod standby;
+
 /// Whether the wallet's file at `wallet` holds the holder's contracts: made
 /// with the first contract opened, and by no reading of them.
 fn holds_contracts(wallet: &std::path::Path) -> Result<bool> {
