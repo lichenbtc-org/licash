@@ -15,8 +15,8 @@ licash-contract = { path = "../../crates/licash-contract" }
 licash-hp = { path = "../../crates/licash-hp" }
 licash-onchain.workspace = true
 licash-statement = { path = "../../crates/licash-statement" }
-lichen-babe = { git = "https://github.com/lichenbtc-org/lichen", rev = "b1176e2d69a85ee3e934bbbe54e9933562f304d1" }
-lichen-contract = { git = "https://github.com/lichenbtc-org/lichen", rev = "b1176e2d69a85ee3e934bbbe54e9933562f304d1" }
+lichen-babe = { git = "https://github.com/lichenbtc-org/lichen", rev = "598316c977e67ae39a7e374945a415c4eca92c84" }
+lichen-contract = { git = "https://github.com/lichenbtc-org/lichen", rev = "598316c977e67ae39a7e374945a415c4eca92c84" }
 lichen-btc = { git = "https://github.com/lichenbtc-org/lichen-btc", rev = "d7d2de04f7f8d51b44f61a68c7e1789f36502071" }
 licash-store.workspace = true
 licash-wallet.workspace = true

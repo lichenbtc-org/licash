@@ -22,6 +22,7 @@ use lichen_btc::{
     tx::{build_spend, build_tx, Timelock},
     witness::tapscript_witness,
 };
+use lichen_contract::payout::Word;
 use lichen_contract::{anchor_tree_for, Owned, Presign, Role};
 use lichen_wots::WotsPublic;
 use rand_chacha::ChaCha20Rng;
@@ -118,7 +119,10 @@ impl Opening {
         let word = graph::word(&self.babe.spec.terms, b)?;
         self.finish(
             "request",
-            HubProves::request_wire(&keys.b.sign(&word.to_be_bytes())?, &keys.e.sign(e)?),
+            HubProves::request_wire(
+                &keys.b.sign(&word.to_u32().to_be_bytes())?,
+                &keys.e.sign(e)?,
+            ),
         )
     }
     /// Publish the claim with optional fee coins and change outputs, all
@@ -361,7 +365,7 @@ impl HubOpening {
         let word = graph::word(&self.babe.spec.terms, b_prime)?;
         self.finish(
             "respond",
-            HubProves::respond_wire(&keys.b.sign(&word.to_be_bytes())?),
+            HubProves::respond_wire(&keys.b.sign(&word.to_u32().to_be_bytes())?),
         )
     }
     pub fn disclosure(
@@ -782,7 +786,7 @@ pub struct Payout<'a> {
     pub value_key: &'a WotsPublic,
     pub signer: Role,
     /// The word signed, as the chain shows it: its bits select the outputs.
-    pub word: u32,
+    pub word: Word,
     pub wire: &'a [Vec<u8>],
 }
 
@@ -849,7 +853,7 @@ pub fn equivocated(
     let core = babe.core();
     let (t, ctx) = (core.terms, core.ctx());
     let txid = payout.compute_txid();
-    let bits = t.paid_bits();
+    let bits = t.payout().paid_bits();
     // Her reserve's output follows the bits' (Lichen's `Core::owned`), its
     // `equiv_b` index the first after theirs.
     let reserve = (

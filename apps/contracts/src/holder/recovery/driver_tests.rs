@@ -5,6 +5,7 @@ use bitcoin::{block, hashes::Hash as _, Block, BlockHash, Network, ScriptBuf};
 use licash::spend::ChainProfile;
 use licash_contract::opening::{Hub, Trust};
 use licash_wallet::{Blocks, Response as HttpResponse};
+use lichen_contract::payout::Word;
 use std::{collections::BTreeMap, sync::Mutex};
 
 struct Offline;
@@ -824,7 +825,13 @@ fn a_silent_hub_of_a_returning_graph_pays_her_claim_and_gets_its_reserve_back() 
     // signed.
     let core = o.babe.core();
     let owned = core
-        .owned(&timeout, &o.holder.b_key, Role::User, 4096, Role::User)
+        .owned(
+            &timeout,
+            &o.holder.b_key,
+            Role::User,
+            Word::new(4096),
+            Role::User,
+        )
         .unwrap();
     let reserve = owned
         .iter()
@@ -1074,7 +1081,7 @@ fn her_payout_of_a_b_she_signed_twice_is_swept_by_equiv_b() {
     )
     .unwrap();
     let owned = dispute::equivocated(&ho.babe, &payout, &ho.holder.b_key).unwrap();
-    let bits = ho.babe.core().terms.paid_bits();
+    let bits = ho.babe.core().terms.payout().paid_bits();
     assert_eq!(owned.len(), bits.len() + 1);
     let names: Vec<_> = owned.iter().map(|o| o.leaf.clone()).collect();
     assert_eq!(names.first().unwrap(), &format!("equiv_b_{}", bits.start));

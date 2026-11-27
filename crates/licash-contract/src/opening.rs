@@ -2687,7 +2687,10 @@ mod tests {
         assert!(ao.offer.sigs.keys().all(|n| !HubProves::withheld(n)));
         assert!(ao.consent.sigs.keys().any(|n| HubProves::withheld(n)));
         let response = ho.respond(&h.keys, 1024).unwrap();
-        assert_eq!(HubProves::responded_word(&response).unwrap().0, 1024);
+        assert_eq!(
+            HubProves::responded_word(&response).unwrap().0,
+            lichen_contract::payout::Word::new(1024)
+        );
         assert_eq!(crate::graph::responded(&ho.base, &response).unwrap(), 1024);
         let proof = lichen_babe::statement::mock_prove(&journal(&ao.base));
         let asserted = ho.assert(&h.keys, &proof).unwrap();

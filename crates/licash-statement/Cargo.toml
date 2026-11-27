@@ -1,6 +1,8 @@
 # What Bitcoin shows of a recovery's exit on Lichen's hub-proves graph,
 # read in the Hub's guest (r0/hp-guest, through licash-hp) and natively.
-# no_std, on sha2 alone, so the guest builds it.
+# no_std, on sha2 and Lichen's lichen-payout (no_std, of no dependencies:
+# the one definition of what a signed word means) alone, so the guest
+# builds it.
 [package]
 name = "licash-statement"
 version = "0.0.1"
@@ -17,3 +19,4 @@ testing = []
 
 [dependencies]
 sha2 = { version = "0.10", default-features = false }
+lichen-payout = { git = "https://github.com/lichenbtc-org/lichen", rev = "598316c977e67ae39a7e374945a415c4eca92c84" }

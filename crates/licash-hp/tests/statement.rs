@@ -635,11 +635,18 @@ fn the_contract_is_bases() {
 #[test]
 fn the_contract_counts_words_as_its_payout() {
     use licash_hp::payout;
-    use licash_statement::Payout;
+    use licash_statement::{Payout, Word};
 
     let issuer = IssuerKeys::random(3).unwrap();
     let plain = base(issuer.keyset().unwrap(), 53);
-    assert_eq!(contract(&plain).payout, Payout { bits: 21, rest: 0 });
+    assert_eq!(
+        contract(&plain).payout,
+        Payout {
+            bits: 21,
+            low_bits: 9,
+            rest: 0
+        }
+    );
     let mut parts = plain.parts().clone();
     parts.graph.bits = 10;
     parts.cap = 1_023 + 600;
@@ -648,11 +655,12 @@ fn the_contract_counts_words_as_its_payout() {
         payout(&rested),
         Payout {
             bits: 10,
+            low_bits: 9,
             rest: 600
         }
     );
     assert_eq!(contract(&rested).payout, payout(&rested));
-    assert_eq!(payout(&rested).amount((1 << 10) | 23), 623);
+    assert_eq!(payout(&rested).amount(Word::new((1 << 10) | 23)), Some(623));
     // not in the journal, which D binds through Base
     assert_ne!(contract(&rested).d, contract(&plain).d);
 }

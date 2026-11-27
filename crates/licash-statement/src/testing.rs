@@ -24,6 +24,13 @@ fn pair(a: &Hash, b: &Hash) -> Hash {
     sha256d(&[&a[..], b].concat())
 }
 
+/// The fixtures' payout: 32 bits, no rest, every word its number.
+pub const PAYOUT: Payout = Payout {
+    bits: 32,
+    low_bits: 0,
+    rest: 0,
+};
+
 /// A coinbase (non-witness) committing `commitment`, with a script of
 /// two bytes.
 fn coinbase(commitment: &Hash) -> Vec<u8> {
@@ -369,7 +376,7 @@ pub fn exit_publishing(
         deposit,
         checkpoint,
         work: 10 * work(0x207fffff),
-        payout: Payout::default(),
+        payout: PAYOUT,
     };
     X {
         contract,

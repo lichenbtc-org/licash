@@ -95,12 +95,15 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
-/// How the payout of `base` counts a signed word: its bits, and the rest
-/// of a cap past them ([`licash::base::Parts::rest`]).
+/// The payout of `base`, by which the statement reads a signed word: its
+/// bits, those it has no outputs below, and the rest of a cap past them
+/// ([`licash::base::Parts::rest`]). The payout the contract's terms build
+/// (Lichen's `Terms::payout`).
 pub fn payout(base: &Base) -> Payout {
     let p = base.parts();
     Payout {
         bits: p.graph.bits.into(),
+        low_bits: p.graph.low_bits.into(),
         rest: p.rest().expect("a Base's rest is checked"),
     }
 }

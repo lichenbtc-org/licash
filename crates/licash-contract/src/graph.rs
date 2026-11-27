@@ -57,6 +57,7 @@ use lichen_btc::sighash::sign_tapscript_acp;
 use lichen_btc::taptree::{Leaf, TapTree};
 use lichen_btc::tx::{build_spend, Timelock};
 use lichen_btc::witness::tapscript_witness;
+use lichen_contract::payout::Word;
 use lichen_contract::{
     anchor_tree, payout_less_signed, wots_shape, ContractParams, Core, PartyPubKeys, Presign, Role,
     Terms, POST_CSV,
@@ -201,24 +202,38 @@ pub fn terms(p: &Parts) -> Result<Terms> {
 }
 
 /// `request`'s `b`, as the payout of `base` counts the word she signed
-/// (the statement's [`licash_hp::payout`]), and `E`.
+/// (the statement's [`licash_hp::payout`],
+/// [`count`](lichen_contract::payout::Payout::count)), and `E`.
 pub fn requested(base: &Base, request: &Transaction) -> Result<(u32, [u8; 32])> {
     let (word, e) = HubProves::requested_word(request)?;
-    Ok((licash_hp::payout(base).amount(word), e))
+    Ok((counted(base, word)?, e))
 }
 
 /// `respond`'s `b′`, as the payout of `base` counts the word the hub
-/// signed.
+/// signed ([`count`](lichen_contract::payout::Payout::count)). A word
+/// beyond the outputs counts too, so that a response of one is read and
+/// played, not refused here: it counts more than the payout's cap, at
+/// least her `b` if she signed a word of the payout, so `bears_out`
+/// refuses it as conceded (and she challenges it), as the statement
+/// refuses it outright
+/// ([`amount`](lichen_contract::payout::Payout::amount)).
 pub fn responded(base: &Base, respond: &Transaction) -> Result<u32> {
     let (word, _) = HubProves::responded_word(respond)?;
-    Ok(licash_hp::payout(base).amount(word))
+    counted(base, word)
+}
+
+/// What `word` counts on the payout of `base`, within a `u32` as any word
+/// of a checked payout does.
+fn counted(base: &Base, word: Word) -> Result<u32> {
+    let units = licash_hp::payout(base).count(word);
+    u32::try_from(units).with_context(|| format!("a word counting {units} units"))
 }
 
 /// The word that signs `amount` units of the payout of `terms`: what both
 /// parties sign, the same of the same amount after any restart
-/// (`Terms::word`).
-pub fn word(terms: &Terms, amount: u32) -> Result<u32> {
-    terms.word(u64::from(amount))
+/// ([`word`](lichen_contract::payout::Payout::word)).
+pub fn word(terms: &Terms, amount: u32) -> Result<Word> {
+    Ok(terms.payout().word(u64::from(amount))?)
 }
 
 /// The dispute's windows, relative, in blocks: `w_H` for the hub's
@@ -700,13 +715,13 @@ impl HubProves {
     /// `request`'s script-checked `b` and `E`, `b` the word she signed:
     /// what the payout pays her is that word ([`requested`] reads what
     /// it counts).
-    pub fn requested_word(request: &Transaction) -> Result<(u32, [u8; 32])> {
+    pub fn requested_word(request: &Transaction) -> Result<(Word, [u8; 32])> {
         let (b, e) = Self::read_request(&link_args(request))?;
-        let b = u32::from_be_bytes(
+        let b = Word::new(u32::from_be_bytes(
             b.message()
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("b's signature signs 4 bytes"))?,
-        );
+        ));
         let e = e
             .message()
             .try_into()
@@ -716,13 +731,13 @@ impl HubProves {
     /// `respond`'s script-checked `b′`, the word the hub signed, and its
     /// signature on it as the payout's leaves take it ([`responded`] reads
     /// what the word counts).
-    pub fn responded_word(respond: &Transaction) -> Result<(u32, Vec<Vec<u8>>)> {
+    pub fn responded_word(respond: &Transaction) -> Result<(Word, Vec<Vec<u8>>)> {
         let sig = Self::read_respond(&link_args(respond))?;
-        let b = u32::from_be_bytes(
+        let b = Word::new(u32::from_be_bytes(
             sig.message()
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("b′'s signature signs 4 bytes"))?,
-        );
+        ));
         Ok((b, Self::b_wire(&sig)))
     }
     /// What `assert` put on chain.
@@ -868,9 +883,13 @@ fn script_signature(params: WotsParams, args: &[Vec<u8>]) -> Result<WotsSig> {
 mod tests {
     use super::*;
 
-    /// The words both parties sign (Lichen's `Terms::word`, which builds
-    /// the payout) are read by the statement as what they sign, and any
-    /// word as Lichen counts it: the payout and the statement agree.
+    /// The words both parties sign ([`word`], of the payout the terms
+    /// build, which the statement reads them by) are read by it as what
+    /// they sign. A word it refuses of the hub ([`Payout::amount`]) counts
+    /// natively ([`responded`]) above the cap, so above any `b` she signs:
+    /// conceded, as `bears_out` reads it.
+    ///
+    /// [`Payout::amount`]: lichen_contract::payout::Payout::amount
     #[test]
     fn the_statement_counts_a_word_as_the_payout_does() {
         for bits in 1..=8u32 {
@@ -887,17 +906,19 @@ mod tests {
                         reserve_hub: Amount::ZERO,
                         rest,
                     };
-                    let payout = licash_statement::Payout { bits, rest };
+                    let payout = terms.payout();
                     for amount in 0..=terms.v_max_units() as u32 {
-                        assert_eq!(payout.amount(word(&terms, amount).unwrap()), amount);
+                        let w = word(&terms, amount).unwrap();
+                        assert_eq!(payout.amount(w), Some(u64::from(amount)));
                     }
                     assert!(word(&terms, terms.v_max_units() as u32 + 1).is_err());
-                    for w in 0..(4u32 << bits) {
-                        assert_eq!(
-                            u64::from(payout.amount(w)),
-                            terms.amount(w),
-                            "{terms:?}: {w}"
-                        );
+                    for w in (0..(4u32 << bits)).map(Word::new) {
+                        match payout.amount(w) {
+                            Some(a) => assert_eq!(a, payout.count(w), "{terms:?}: {w:?}"),
+                            None => {
+                                assert!(payout.count(w) > terms.v_max_units(), "{terms:?}: {w:?}")
+                            }
+                        }
                     }
                 }
             }
@@ -905,13 +926,16 @@ mod tests {
         // the extremes of the word
         let payout = licash_statement::Payout {
             bits: 31,
+            low_bits: 0,
             rest: (1 << 31) - 1,
         };
-        assert_eq!(payout.amount(u32::MAX), u32::MAX - 1);
-        assert_eq!(
-            licash_statement::Payout { bits: 32, rest: 0 }.amount(u32::MAX),
-            u32::MAX
-        );
+        assert_eq!(payout.count(Word::new(u32::MAX)), u64::from(u32::MAX - 1));
+        let wide = licash_statement::Payout {
+            bits: 32,
+            low_bits: 0,
+            rest: 0,
+        };
+        assert_eq!(wide.amount(Word::new(u32::MAX)), Some(u64::from(u32::MAX)));
     }
     use crate::keys::{HolderKeys, HubKeys};
 

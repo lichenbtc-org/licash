@@ -1005,8 +1005,14 @@ dependencies = [
 name = "licash-statement"
 version = "0.0.1"
 dependencies = [
+ "lichen-payout",
  "sha2",
 ]
+
+[[package]]
+name = "lichen-payout"
+version = "0.4.5"
+source = "git+https://github.com/lichenbtc-org/lichen?rev=598316c977e67ae39a7e374945a415c4eca92c84#598316c977e67ae39a7e374945a415c4eca92c84"
 
 [[package]]
 name = "log"

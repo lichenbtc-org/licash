@@ -43,6 +43,7 @@ use licash_contract::opening::{Hub, HubOpening};
 use licash_onchain::deadline;
 use licash_statement::Carrier;
 use licash_wallet::first_spend;
+use lichen_contract::payout::Word;
 use lichen_contract::Role;
 use sha2::{Digest, Sha256};
 
@@ -2851,7 +2852,7 @@ impl Openings {
         &self,
         id: &[u8; 32],
         r: &Transaction,
-        word: u32,
+        word: Word,
     ) -> Result<Option<Vec<Vec<u8>>>> {
         let Some(pinned) = Responses::open(&self.data)?.other_request(id, r)? else {
             return Ok(None);
