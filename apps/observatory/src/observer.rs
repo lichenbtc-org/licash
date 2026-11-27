@@ -19,19 +19,29 @@ pub const KEPT: Duration = Duration::from_secs(7 * 24 * 3600);
 /// How long probes are kept.
 pub const HISTORY: Duration = Duration::from_secs(90 * 24 * 3600);
 
-/// The most probes under way at once of services that answered as
-/// themselves lately ([`Store::answered_since`]), or were configured.
+/// The most probes under way at once of the services configured, and of
+/// the [`SENIOR`] of each role.
 const AT_ONCE: usize = 8;
 
-/// The most probes under way at once of the others: announcing is free, so
-/// a flood of them waits on itself, never on those above.
+/// The most probes under way at once of the others: announcing is free, and
+/// so is answering as the key that announced, so a flood of them waits on
+/// itself, never on those above.
 const AT_ONCE_UNPROVEN: usize = 4;
 
-/// The most services of a role announced and seen in the last [`KEPT`]
-/// that did not answer as themselves in it: past it, an announcement of a
-/// key not stored already is passed over. Announcing is free, and each is
-/// stored and probed.
-pub const MAX_UNPROVEN: usize = 2_000;
+/// The services of a role announced that answered as themselves lately
+/// ([`Store::answered_since`]) probed apart from the others, the first seen
+/// first: those known longest, which a flood of new keys does not displace.
+pub const SENIOR: usize = 256;
+
+/// The most services of a role announced and seen in the last [`KEPT`],
+/// answering or not: past it, an announcement of a key not stored already
+/// is passed over. Announcing is free, and so is answering as the key that
+/// announced: each is stored and probed.
+pub const MAX_ANNOUNCED: usize = 2_000;
+
+/// The most bytes of an info taken as a service's: a hub's is a few
+/// kilobytes, and each is stored as it changes.
+pub const MAX_INFO: usize = 64 * 1024;
 
 /// What the observer watches, and how.
 #[derive(Clone)]
@@ -121,18 +131,17 @@ pub async fn discover(store: &Store, watching: &Watching) -> anyhow::Result<()> 
         )
         .await?;
         tracing::debug!(role = role.name(), found = found.len(), "announcements");
-        let mut unproven = (services.iter())
+        let mut watched = (services.iter())
             .filter(|s| s.role == role && s.key.is_some() && s.last_seen >= since)
-            .filter(|s| !answered.contains_key(&s.id))
             .count();
         let mut passed_over = 0;
         for found in found {
             if !stored.contains(found.key.as_str()) {
-                if unproven >= MAX_UNPROVEN {
+                if watched >= MAX_ANNOUNCED {
                     passed_over += 1;
                     continue;
                 }
-                unproven += 1;
+                watched += 1;
             }
             store.seen(&Service {
                 id: found.key.clone(),
@@ -148,8 +157,8 @@ pub async fn discover(store: &Store, watching: &Watching) -> anyhow::Result<()> 
             tracing::warn!(
                 role = role.name(),
                 passed_over,
-                unproven,
-                "announcements of new keys passed over: as many services never answering are kept"
+                watched,
+                "announcements of new keys passed over: as many services announced are watched"
             );
         }
     }
@@ -180,12 +189,13 @@ pub async fn round(store: Arc<Store>, watching: Watching) {
         Ok(answered) => answered,
         Err(e) => return tracing::warn!("reading the services answering: {e:#}"),
     };
+    let senior = senior(&services, &answered);
     let at_once = Arc::new(tokio::sync::Semaphore::new(AT_ONCE));
     let at_once_unproven = Arc::new(tokio::sync::Semaphore::new(AT_ONCE_UNPROVEN));
     let mut probes = tokio::task::JoinSet::new();
     let spread = millis(watching.probe_every) as u64 / 2;
     for service in services.into_iter().filter(|s| s.last_seen >= since) {
-        let lane = match service.key.is_none() || answered.contains_key(&service.id) {
+        let lane = match service.key.is_none() || senior.contains(&service.id) {
             true => &at_once,
             false => &at_once_unproven,
         };
@@ -209,6 +219,23 @@ pub async fn round(store: Arc<Store>, watching: Watching) {
         }
     }
     while probes.join_next().await.is_some() {}
+}
+
+/// The ids of the [`SENIOR`] services of each role announced that
+/// answered, by `answered`, the first seen first.
+pub fn senior(
+    services: &[Service],
+    answered: &std::collections::HashMap<String, i64>,
+) -> HashSet<String> {
+    let mut senior = HashSet::new();
+    for role in [Role::Hub, Role::Provider] {
+        let mut of: Vec<&Service> = (services.iter())
+            .filter(|s| s.role == role && s.key.is_some() && answered.contains_key(&s.id))
+            .collect();
+        of.sort_by(|a, b| (a.first_seen, &a.id).cmp(&(b.first_seen, &b.id)));
+        senior.extend(of.into_iter().take(SENIOR).map(|s| s.id.clone()));
+    }
+    senior
 }
 
 /// Probe `url` of `service`: the probe, and the info it answered,
@@ -257,6 +284,9 @@ pub async fn check(
 /// names the key that announced it. Only its shape and key are checked
 /// here: its terms are read part by part when shown.
 fn verified(service: &Service, body: &[u8]) -> Result<String, String> {
+    if body.len() > MAX_INFO {
+        return Err(format!("an info of more than {MAX_INFO} bytes"));
+    }
     let info: serde_json::Value = serde_json::from_slice(body).map_err(|e| e.to_string())?;
     let nostr = crate::terms::nostr(&info, service.role == Role::Hub)?;
     if let Some(key) = &service.key {

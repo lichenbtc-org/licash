@@ -29,18 +29,22 @@ announced it, so a URL cannot answer for another service. A service is
 still probed for seven days after its last announcement, so going away
 shows as downtime rather than vanishing. Probes are kept for 90 days.
 
-Announcing is free, so a flood of announcements must not hide or delay
-the services that work. Those that answered as themselves in the last
-seven days are asked of the relays by their keys too, so newer
-announcements filling what a relay answers cannot hide them. They are
-also probed apart: at most 8 of them at once, and 4 of all the others,
-so a flood of services that never answer delays only its own probes.
-At most 2,000 services of a role seen in the last seven days may not have
-answered in them: past that, announcements of new keys are passed over,
-with a warning in the log, while known ones and those configured with
-`--hub` or `--provider` are kept up to date. An announced service that
-never answered is forgotten, with its probes, seven days after it was
-last seen, making room for others.
+Announcing is free, and so is answering as the key that announced, so a
+flood of announcements must not hide or delay the services that work.
+Those that answered as themselves in the last seven days are asked of the
+relays by their keys too, so newer announcements filling what a relay
+answers cannot hide them. The 256 of each role first seen among them, and
+those configured, are probed apart: at most 8 of them at once, and 4 of
+all the others, so a flood of new services delays only its own probes.
+At most 2,000 services of a role announced may be watched (seen in the
+last seven days), answering or not: past that, announcements of new keys
+are passed over, with a warning in the log, while known ones and those
+configured with `--hub` or `--provider` are kept up to date. An announced
+service that never answered is forgotten, with its probes, seven days
+after it was last seen, and any announced service 90 days after, with its
+terms, making room for others. An info of more than 64 KiB is not taken
+as the service's, and a service's terms are kept as they change, the
+latest 16 versions of them.
 
 ## Probes, and Tor
 

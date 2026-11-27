@@ -230,6 +230,24 @@ async fn a_url_answering_for_another_key_is_not_the_service() {
     );
 }
 
+/// An info larger than any service's is not taken as one, nor stored.
+#[tokio::test]
+async fn an_info_too_large_is_not_the_services() {
+    let mut info = hub_info();
+    info["padding"] = json!("x".repeat(observer::MAX_INFO));
+    let url = serve(licash_api::INFO, info).await;
+    let service = announced(HUB_KEY, Role::Hub, vec![url.clone()]);
+    let dialer = Dialer::direct_reaching(true);
+    let (probe, info) = observer::check(&dialer, &service, &url, Duration::from_secs(5)).await;
+    assert!(!probe.ok && info.is_none());
+    let error = probe.error.unwrap_or_default();
+    assert!(error.contains("more than"), "{error}");
+    // Its info as served, under the bound: the service's.
+    let url = serve(licash_api::INFO, hub_info()).await;
+    let (probe, _) = observer::check(&dialer, &service, &url, Duration::from_secs(5)).await;
+    assert!(probe.ok, "{:?}", probe.error);
+}
+
 #[tokio::test]
 async fn a_configured_service_is_watched_by_its_url() {
     let dir = tempfile::tempdir().unwrap();
@@ -673,9 +691,56 @@ fn the_services_answering_lately_are_those_with_a_probe_ok_since() {
     assert_eq!(answered["honest"], 20);
 }
 
-/// Announcements never answered for pile up no longer than the history:
-/// such a service gone that long is forgotten, unlike one configured, one
-/// that ever answered as itself, or one seen since.
+/// Answering as the key that announced is as free as announcing: while as
+/// many services of a role as are watched answered so, an announcement of
+/// a new key is passed over all the same.
+#[tokio::test]
+async fn announcements_of_new_keys_wait_while_as_many_answering_are_watched() {
+    use licash_nostr::{Announcement, Announcer};
+    let relay = nostr_sdk::prelude::MockRelay::run().await.unwrap();
+    let relays = vec![relay.url().await.to_string()];
+    let new = Announcer::new(&[23; 32], licash_nostr::Role::Hub, &relays, &Route::Direct);
+    let new = new.await.unwrap();
+    let announcement = Announcement {
+        urls: vec!["https://new.example".into()],
+        network: "regtest".into(),
+        name: None,
+    };
+    new.announce(&announcement).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("o.sqlite")).unwrap();
+    let at = store::now();
+    for i in 0..observer::MAX_ANNOUNCED {
+        let id = format!("{i:064x}");
+        let url = format!("https://sybil{i}.example");
+        store
+            .seen(&announced(&id, Role::Hub, vec![url.clone()]))
+            .unwrap();
+        let answered = store::Probe {
+            at,
+            service: id,
+            url,
+            ok: true,
+            open_ms: Some(1),
+            rtt_ms: Some(1),
+            info_ms: Some(1),
+            error: None,
+        };
+        store.probed(&answered).unwrap();
+    }
+    let watching = Watching {
+        relays,
+        ..watching()
+    };
+    observer::discover(&store, &watching).await.unwrap();
+    let services = store.services().unwrap();
+    assert_eq!(services.len(), observer::MAX_ANNOUNCED);
+    assert!(!services.iter().any(|s| s.id == new.key()));
+}
+
+/// Announcements pile up no longer than the history: a service announced
+/// and gone that long is forgotten with its terms, even one that answered
+/// as itself, which is free too, unlike one configured or one seen since.
 #[test]
 fn announced_services_never_answering_are_forgotten_with_the_history() {
     let dir = tempfile::tempdir().unwrap();
@@ -706,7 +771,71 @@ fn announced_services_never_answering_are_forgotten_with_the_history() {
         .map(|s| s.id)
         .collect();
     kept.sort();
-    assert_eq!(kept, ["answered", "https://configured.example", "recent"]);
+    assert_eq!(kept, ["https://configured.example", "recent"]);
+    assert!(store.latest_terms().unwrap().is_empty());
+}
+
+/// Each service's terms are kept as they change, the latest few of them:
+/// only the latest is read, however often a service changes its own.
+#[test]
+fn a_service_keeps_its_latest_terms_however_often_they_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("o.sqlite")).unwrap();
+    let now = store::now();
+    store
+        .seen(&announced(
+            HUB_KEY,
+            Role::Hub,
+            vec!["https://a.example".into()],
+        ))
+        .unwrap();
+    let versions = store::TERMS_KEPT + 10;
+    for n in 0..versions {
+        store
+            .terms_seen(HUB_KEY, now - versions + n, &format!("{{\"n\":{n}}}"))
+            .unwrap();
+    }
+    store
+        .prune(now - observer::millis(observer::HISTORY))
+        .unwrap();
+    let db = rusqlite::Connection::open(dir.path().join("o.sqlite")).unwrap();
+    let kept: i64 = db
+        .query_row("SELECT count(*) FROM terms", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(kept, store::TERMS_KEPT);
+    let latest = store.latest_terms().unwrap();
+    assert_eq!(latest[0].2, format!("{{\"n\":{}}}", versions - 1));
+}
+
+/// Of the services announced that answered as themselves, those first
+/// seen are probed apart from the rest, so a flood of new keys answering
+/// for themselves does not delay them: at most so many of each role.
+#[test]
+fn the_services_known_longest_are_probed_apart_from_newer_ones() {
+    let mut services = Vec::new();
+    let mut answered = std::collections::HashMap::new();
+    for i in 0..observer::SENIOR + 10 {
+        let id = format!("{i:064x}");
+        services.push(Service {
+            first_seen: 1_000 + i as i64,
+            ..announced(&id, Role::Provider, vec![format!("https://p{i}.example")])
+        });
+        answered.insert(id, 5_000);
+    }
+    // One known longer that never answered lately: not among them.
+    services.push(Service {
+        first_seen: 1,
+        ..announced(
+            &"ff".repeat(32),
+            Role::Provider,
+            vec!["https://q.example".into()],
+        )
+    });
+    let senior = observer::senior(&services, &answered);
+    assert_eq!(senior.len(), observer::SENIOR);
+    assert!(senior.contains(&format!("{:064x}", 0)));
+    assert!(!senior.contains(&format!("{:064x}", observer::SENIOR)));
+    assert!(!senior.contains(&"ff".repeat(32)));
 }
 
 /// While as many services of a role as are kept never answered, an
@@ -743,7 +872,7 @@ async fn announcements_of_new_keys_wait_while_as_many_never_answering_are_kept()
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("o.sqlite")).unwrap();
         let at = store::now() - age;
-        for i in 0..observer::MAX_UNPROVEN {
+        for i in 0..observer::MAX_ANNOUNCED {
             let id = format!("{i:064x}");
             let urls = vec![format!("https://sybil{i}.example")];
             let sybil = Service {
@@ -773,7 +902,7 @@ async fn announcements_of_new_keys_wait_while_as_many_never_answering_are_kept()
         assert_eq!(kept.urls, ["https://known.example"], "{age}");
         assert_eq!(of(new.key()).is_some(), admitted, "{age}");
         let sybils = match admitted {
-            false => observer::MAX_UNPROVEN,
+            false => observer::MAX_ANNOUNCED,
             true => 0,
         };
         assert_eq!(services.len(), sybils + 1 + usize::from(admitted), "{age}");

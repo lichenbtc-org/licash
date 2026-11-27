@@ -22,6 +22,9 @@ use serde::Serialize;
 /// older image still opens the file after a rollback.
 const VERSION: i64 = 1;
 
+/// The most versions of a service's terms kept ([`Store::prune`]).
+pub const TERMS_KEPT: i64 = 16;
+
 const SCHEMA: &str = "
 CREATE TABLE services (
     id TEXT PRIMARY KEY,
@@ -432,17 +435,38 @@ impl Store {
     }
 
     /// Forget probes, and terms other than each service's last, older than
-    /// `before`, and the services announced, last seen before it, that never
-    /// answered as themselves: announcing is free, and they would only pile
-    /// up. Actions are kept: they are few, and the budget reads them.
+    /// `before`, but the last [`TERMS_KEPT`] of each, and the services
+    /// announced, last seen before it, with their probes and terms, whether
+    /// they answered or not: announcing is free, and so is answering as the
+    /// key that announced, so they would only pile up. Those configured are
+    /// kept. Actions are kept: they are few, and the budget reads them.
     pub fn prune(&self, before: i64) -> anyhow::Result<()> {
         let db = self.db();
         db.execute("DELETE FROM probes WHERE at < ?1", [before])?;
-        forget_unanswered(&db, before)?;
+        const GONE: &str = "SELECT id FROM services WHERE key IS NOT NULL AND last_seen < ?1";
+        let tx = db.unchecked_transaction()?;
+        for table in ["probes WHERE service", "terms WHERE service"] {
+            tx.execute(&format!("DELETE FROM {table} IN ({GONE})"), [before])?;
+        }
+        tx.execute(
+            &format!("DELETE FROM services WHERE id IN ({GONE})"),
+            [before],
+        )?;
+        tx.commit()?;
         db.execute(
             "DELETE FROM terms WHERE at < ?1 AND at < (
                  SELECT max(at) FROM terms t WHERE t.service = terms.service)",
             [before],
+        )?;
+        // Each service's latest terms alone are read: a few more kept,
+        // however often they change.
+        db.execute(
+            "DELETE FROM terms WHERE rowid IN (
+                 SELECT rowid FROM (
+                     SELECT rowid, row_number() OVER (PARTITION BY service ORDER BY at DESC) AS n
+                     FROM terms)
+                 WHERE n > ?1)",
+            [TERMS_KEPT],
         )?;
         Ok(())
     }
