@@ -1163,8 +1163,20 @@ fn a_tor_client_of_its_own_keeps_its_state_next_to_the_wallet() {
 /// A regtest address to take coins back to.
 const BACK_TO: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 
+/// A deposit of `amount` asked of `hub` itself by the wallet at `file`, as
+/// wallets asked before hubs left deposits to swap providers: the CLI asks
+/// none of a hub, but follows and refunds those asked before.
+fn deposit_at_hub(file: &std::path::Path, hub: &str, amount: u64) -> licash_wallet::Deposit {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let transport = licash_transport::Http::new(None).unwrap();
+        let wallet = licash_wallet::Wallet::open(file, transport).unwrap();
+        wallet.deposit(hub, amount).await.unwrap()
+    })
+}
+
 #[test]
-fn owners_deposit_on_bitcoin_and_take_back_what_was_never_received() {
+fn owners_follow_and_take_back_deposits_asked_of_a_hub_before() {
     let hub = Server::with_deposits(FEE);
     let dir = tempfile::tempdir().unwrap();
     let (alice, _) = party(dir.path(), "alice", Some(&hub));
@@ -1181,18 +1193,12 @@ fn owners_deposit_on_bitcoin_and_take_back_what_was_never_received() {
     assert!(text.contains("deposits 1,000 to 4,000 sat"), "{text}");
 
     // Asked for 2000 in notes: pay 2100 on Bitcoin, the hub's fee on top.
-    let asked = wallet(&alice, &["deposit", "2000"], None);
-    let stderr = String::from_utf8_lossy(&asked.stderr).into_owned();
-    assert!(stderr.contains("pay exactly 2100 sat"), "{stderr}");
-    let hash = stderr.trim().strip_prefix("deposit ").unwrap();
-    let hash = hash.split(':').next().unwrap().to_owned();
-    let uri = ok(asked).trim().to_owned();
-    let (address, amount) = uri
-        .strip_prefix("bitcoin:")
-        .and_then(|rest| rest.split_once("?amount="))
-        .unwrap();
-    assert!(address.starts_with("bcrt1p"), "{uri}");
-    assert_eq!(amount, "0.000021");
+    let asked = deposit_at_hub(&alice, &hub.url(), 2_000);
+    let (hash, terms) = (asked.hash, asked.terms.unwrap());
+    assert_eq!(terms.pays, 2_100);
+    let address = terms.address.as_str();
+    assert!(address.starts_with("bcrt1p"), "{address}");
+    let uri = format!("bitcoin:{address}?amount=0.000021");
     // Listed, the hub's fee in it says what it is of the deposit.
     let text = ok(wallet(&alice, &["deposits"], None));
     let terms = format!("pay 2,000 + 100 sat (5%) to {address} by block ");
@@ -1233,15 +1239,13 @@ fn owners_deposit_on_bitcoin_and_take_back_what_was_never_received() {
 
     // Asked for 1500, paid a block after the last it could confirm in:
     // canceled, the payment refunded once its timeout passed.
-    let late: Value =
-        serde_json::from_str(&ok(wallet(&alice, &["--json", "deposit", "1500"], None))).unwrap();
-    let late_hash = late["hash"].as_str().unwrap();
-    let terms = &late["terms"];
-    let fund_by = terms["fund_by"].as_u64().unwrap() as u32;
-    let timeout = terms["timeout"].as_u64().unwrap() as u32;
+    let late = deposit_at_hub(&alice, &hub.url(), 1_500);
+    let late_hash = late.hash.as_str();
+    let terms = late.terms.unwrap();
+    let (fund_by, timeout) = (terms.fund_by, terms.timeout);
     hub.mine(fund_by - hub.height(), None);
     hub.round();
-    let paid = hub.pay_onchain(terms["address"].as_str().unwrap(), 1_600, 2);
+    let paid = hub.pay_onchain(&terms.address, 1_600, 2);
     hub.mine(2, None);
     hub.round();
     let resumed = json(&alice, &["resume"]);
@@ -2136,39 +2140,10 @@ fn coins_paid_on_bitcoin_are_found_spent_and_moved_to_notes() {
         "coins are never joined",
     );
 
-    // The largest coin moved to notes, whole and alone, the deposit's fee
-    // and the hub's on top: once at depth, resume takes them.
-    let moved: Value =
-        serde_json::from_str(&ok(onchain(&alice, &["--json", "move", "--fee-rate", "1"]))).unwrap();
-    assert_eq!(moved["state"], "open");
-    let amount = moved["amount"].as_u64().unwrap();
-    let deposit = hub
-        .sent()
-        .into_iter()
-        .find(|t| t.compute_txid().to_string() == moved["txid"].as_str().unwrap());
-    let deposit = deposit.unwrap();
-    assert_eq!((deposit.input.len(), deposit.output.len()), (1, 1));
-    assert_eq!(deposit.output[0].value.to_sat(), amount + 100);
-    let fee = 2_500 - amount - 100;
-    let rate = bitcoin::FeeRate::from_sat_per_vb_u32(1);
-    assert_eq!(fee, rate.fee_wu(deposit.weight()).unwrap().to_sat());
-    // Her change, too little to move alone, stays.
-    failed(
-        onchain(&alice, &["move"]),
-        1,
-        &format!("{change} available"),
-    );
-    hub.confirm_sent();
-    hub.round();
-    hub.mine(1, None);
-    hub.round();
-    assert_eq!(
-        json(&alice, &["resume"])["deposits"][0]["state"],
-        "received"
-    );
-    assert_eq!(available(&alice), (amount, 0));
-    assert_eq!(scan(&alice)["spent"].as_array().unwrap().len(), 1);
-    assert_eq!(values(&json(&alice, &["onchain", "coins"])), [change]);
+    // Coins move to notes only through a swap provider taking deposits
+    // (owners_deposit_on_bitcoin_through_a_provider): hubs take none.
+    failed(onchain(&alice, &["move"]), 2, "--via <URL>");
+    failed(wallet(&alice, &["deposit", "1000"], None), 2, "--via <URL>");
 }
 
 /// Cold storage set by a tpub of segwit addresses: shown with its next

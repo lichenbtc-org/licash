@@ -179,29 +179,25 @@ A wallet that asked a hub's Lightning gateway for an invoice or a payment
 before its hub dropped the gateway keeps following it with `resume`: a
 payment's lock is refunded once expired if it was never paid.
 
-Through a hub taking deposits, `deposit <amount>` prints a BIP21 URI to pay
-on Bitcoin, the hub's fee on top; `resume` takes the notes once the payment
-confirmed. A deposit never received is taken back after its timeout with
-`refund <hash> --to <address> --chain <url>`. A deposit's lock's preimage
-is revealed only with 6 blocks left, at the higher of its hub's height and
-the chain's as the wallet knows it of itself (`resume --chain <url>`, or the
-last block it scanned); a wallet that knows neither trusts its hub's word
-for the height, as it trusts it with the notes. A deposit's refund key derives
-from the seed, the hub and its number there, and its preimage from those,
-a key drawn for it, the notes asked and the payment: a wallet restored from
-its seed finds the deposits it asked at a hub by their refund keys as it
-adds it (until 20 numbers in a row are unknown there), keeps those the hub
-answers as they were asked (other notes or another payment are another
-hash, and not kept), then takes them on or refunds them as any.
+`deposit <amount> --via <provider>` gets notes at a hub for coins paid on
+Bitcoin, through a swap provider taking deposits (hubs take none of their
+own): it prints a BIP21 URI paying the provider's address, its fee and its
+claim's miners on top. The provider looks for no payment: `resume --chain
+<url>` finds it once it has the provider's confirmations and tells the
+provider, which then locks its own notes to the wallet at the hub, and the
+wallet claims them. The lock's preimage is revealed only with 6 blocks
+left, at the higher of its hub's height and the chain's as the wallet knows
+it. A deposit never received is taken back after its timeout with `refund
+<hash> --to <address> --chain <url>`. Its preimage and refund key are drawn
+at random, not from the seed: pay it only from this wallet's file, and
+resume within the blocks after.
 
-`deposit <amount> --via <provider>` asks a swap provider taking deposits on
-Bitcoin instead: the URI pays its address, its fee and its claim's miners on
-top. The provider looks for no payment: `resume --chain <url>` finds it once
-it has the provider's confirmations and tells the provider, which then locks
-its own notes to the wallet at the hub, and the wallet claims them as a hub's
-deposit's. A deposit through a provider is refunded the same way. Its
-preimage and refund key are drawn at random, not from the seed: pay it only
-from this wallet's file, and resume within the blocks after.
+Deposits asked of a hub itself under earlier releases are still listed,
+taken on by `resume` and refunded as above. Their refund keys derive from
+the seed, the hub and their number there: a wallet restored from its seed
+finds them at a hub by their refund keys as it adds it (until 20 numbers in
+a row are unknown there), keeps those the hub answers as they were asked,
+then takes them on or refunds them as any.
 
 `code` prints `licash:<code>`, naming the wallet's mailbox and at most three
 of its hubs: by default those whose contracts have the most room to protect
@@ -224,14 +220,13 @@ another network than `--network`, `init` warns and the wallet looks from
 the hubs' first tweaks, as one made without it.
 `onchain coins`
 lists the coins, `onchain send <to> <amount>` pays an address, a silent
-payment address or a code on Bitcoin, and `onchain move` deposits a coin
-for notes at a hub taking deposits. With `--chain`, each of these looks for
+payment address or a code on Bitcoin, and `onchain move --via <provider>`
+deposits a coin through a swap provider taking deposits, for its notes at
+`--hub` (by default the first trusted). With `--chain`, each of these looks for
 coins first up to the chain's height, as `scan` does. Coins are never joined: a send spends
 one coin alone (`--coin TXID:VOUT`, by default the largest, `--all` all of
 it), and a move deposits one coin whole, leaving no change (`--coin`, by
-default the largest), refused if the hub takes less than all of it.
-`onchain move --via <provider>` deposits it through a swap provider taking
-deposits instead, for its notes at `--hub` (by default the first trusted);
+default the largest), refused if the provider takes less than all of it;
 `resume --chain` then finds the payment and claims the notes, as for
 `deposit --via`.
 

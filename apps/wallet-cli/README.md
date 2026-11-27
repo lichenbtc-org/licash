@@ -15,7 +15,7 @@ licash-wallet-cli`, or run the image `ghcr.io/lichenbtc-org/licash-wallet`.
 licash-wallet init --network signet
 licash-wallet discover --relay wss://relay.primal.net   # hubs announced on Nostr
 licash-wallet add-hub <URL>
-licash-wallet deposit 50000          # a Bitcoin address that pays you notes
+licash-wallet deposit 50000 --via <PROVIDER>  # a Bitcoin address that pays you notes
 licash-wallet address                # where other wallets pay you
 licash-wallet send <address> 1000 > payment.json
 licash-wallet receive payment.json

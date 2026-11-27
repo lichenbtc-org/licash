@@ -325,10 +325,11 @@ enum Command {
     },
     /// The Lightning invoices asked for, newest first.
     Invoices,
-    /// Get AMOUNT in notes for coins paid on Bitcoin: the address and the
-    /// exact amount to pay, the fee on top, as a BIP21 URI (the deposit's
-    /// hash on stderr). `resume` takes the notes once the payment
-    /// confirmed (`resume --chain` for one through a provider).
+    /// Get AMOUNT in notes for coins paid on Bitcoin, through a swap
+    /// provider: the address and the exact amount to pay, its fee on top,
+    /// as a BIP21 URI (the deposit's hash on stderr). `resume --chain`
+    /// takes the notes once the payment confirmed. Hubs take no deposits
+    /// of their own.
     Deposit {
         amount: u64,
         /// At this hub [default: the only one trusted].
@@ -336,9 +337,9 @@ enum Command {
         hub: Option<String>,
         /// Through the swap provider at this URL, which locks its notes at
         /// the hub once told of the payment: it sees the amount and the
-        /// wallet's address. Without it, the hub takes the deposit.
+        /// wallet's address.
         #[arg(long, value_name = "URL")]
-        via: Option<String>,
+        via: String,
         /// Also draw the URI as a QR code, on a terminal.
         #[arg(long)]
         qr: bool,
@@ -1393,10 +1394,7 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
                 Some(hub) => hub,
                 None => only_hub(&wallet)?,
             };
-            let deposit = match &via {
-                Some(via) => wallet.deposit_through(via, &hub, amount).await?,
-                None => wallet.deposit(&hub, amount).await?,
-            };
+            let deposit = wallet.deposit_through(&via, &hub, amount).await?;
             let text = match (&deposit.terms, &deposit.state) {
                 (Some(terms), DepositState::Open) => {
                     eprintln!(

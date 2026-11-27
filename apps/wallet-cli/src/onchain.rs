@@ -51,18 +51,17 @@ pub enum Onchain {
         #[arg(long)]
         fee_rate: Option<u64>,
     },
-    /// Move one coin, whole, to notes at a hub taking deposits, or through
-    /// a swap provider taking them, never joined with another nor leaving
-    /// change: the deposit, which `resume` takes the notes of once its
-    /// payment confirmed (`resume --chain` through a provider).
+    /// Move one coin, whole, to notes at a hub through a swap provider
+    /// taking deposits, never joined with another nor leaving change: the
+    /// deposit, which `resume --chain` takes the notes of once its payment
+    /// confirmed.
     Move {
-        /// At this hub [default: the first trusted taking deposits, or the
-        /// first trusted with --via].
+        /// At this hub [default: the first trusted].
         #[arg(long)]
         hub: Option<String>,
         /// Through the swap provider at this URL, for its notes at the hub.
-        #[arg(long)]
-        via: Option<String>,
+        #[arg(long, value_name = "URL")]
+        via: String,
         /// This coin, `TXID:VOUT` [default: the largest free].
         #[arg(long)]
         coin: Option<bitcoin::OutPoint>,
@@ -177,20 +176,12 @@ pub async fn run(
             fee_rate,
         } => {
             let source = source()?;
-            let hub = match (hub, &via) {
-                (Some(hub), _) => hub,
-                (None, Some(_)) => match wallet.hubs()?.into_iter().next() {
+            let hub = match hub {
+                Some(hub) => hub,
+                None => match wallet.hubs()?.into_iter().next() {
                     Some((url, _)) => url,
                     None => bail!("no hub trusted"),
                 },
-                (None, None) => {
-                    let hubs = wallet.hubs()?.into_iter();
-                    let mut taking = hubs.filter(|(_, info)| info.deposits.is_some());
-                    match taking.next() {
-                        Some((url, _)) => url,
-                        None => bail!("no hub trusted takes deposits"),
-                    }
-                }
             };
             let rate = rate(&source, fee_rate).await?;
             let coin = match coin {
@@ -201,12 +192,9 @@ pub async fn run(
                     .map(|c| c.outpoint)
                     .context("no free coin to move")?,
             };
-            let (deposit, tx) = match &via {
-                Some(provider) => {
-                    (wallet.deposit_silent_through(provider, &hub, coin, rate)).await?
-                }
-                None => wallet.deposit_silent(&hub, coin, rate).await?,
-            };
+            let (deposit, tx) = wallet
+                .deposit_silent_through(&via, &hub, coin, rate)
+                .await?;
             let txid = broadcast(&source, &tx).await?;
             eprintln!(
                 "deposit {}: {} sat in notes once {txid} confirms; `licash-wallet resume` takes them",
