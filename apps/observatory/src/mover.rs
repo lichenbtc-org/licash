@@ -19,9 +19,7 @@ use std::{
 
 use bitcoin::{BlockHash, FeeRate};
 use licash_chain_client::Source;
-use licash_wallet::{
-    DepositState, InvoiceState, LockState, PayoutState, SwapLimits, SwapState, Transport, Wallet,
-};
+use licash_wallet::{DepositState, PayoutState, SwapLimits, SwapState, Transport, Wallet};
 use rand_core::{OsRng, RngCore};
 
 use crate::{
@@ -33,6 +31,12 @@ use crate::{
 
 /// How often the mover looks whether a move is due.
 const TICK: Duration = Duration::from_secs(20);
+
+/// Why no move over Lightning is made: hubs pay and make no invoices, and
+/// a provider's invoice is not paid through another provider, so no route
+/// starts and ends in Licash. Its kind stays for the moves recorded before.
+const NO_LIGHTNING: &str =
+    "hubs pay and make no Lightning invoices, and no route over Lightning stays in Licash";
 
 /// How often moves left under way are taken on again.
 const RESUME_EVERY: Duration = Duration::from_secs(10 * 60);
@@ -222,15 +226,6 @@ fn network(store: &Store, fresh: i64) -> anyhow::Result<Network> {
     Ok(network)
 }
 
-/// Over Lightning: through a provider or the hub's own gateway, from a
-/// hub, to a hub's invoice, at an estimated cost.
-type LightningRoute<'a> = (
-    Option<&'a Live<ProviderTerms>>,
-    &'a Live<HubTerms>,
-    &'a Live<HubTerms>,
-    u64,
-);
-
 /// A move planned: what it is, where, and what it was quoted to cost.
 struct Plan {
     kind: Kind,
@@ -369,7 +364,11 @@ impl<T: Transport + 'static> Mover<T> {
 
     /// Whether moves of `kind` are made: on Bitcoin only with a chain.
     fn enabled(&self, kind: Kind) -> bool {
-        kind != Kind::Chain || self.moving.chain.is_some()
+        match kind {
+            Kind::Chain => self.moving.chain.is_some(),
+            Kind::Lightning => false,
+            Kind::Hub | Kind::Swap => true,
+        }
     }
 
     /// What a swap of `amount` may cost and lock: the wallet's usual
@@ -492,7 +491,7 @@ impl<T: Transport + 'static> Mover<T> {
         let plan = match kind {
             Kind::Hub => self.plan_hub(network),
             Kind::Swap => self.plan_swap(network).await,
-            Kind::Lightning => self.plan_lightning(network),
+            Kind::Lightning => Err(Skipped::NoRoute(NO_LIGHTNING.into())),
             Kind::Chain => self.plan_chain(network),
         }?;
         let month = self
@@ -616,72 +615,6 @@ impl<T: Transport + 'static> Mover<T> {
         })
     }
 
-    /// From a hub's gateway to another hub's invoice, or through a
-    /// provider's node, to any hub's: estimated from their terms, as an
-    /// invoice is made only once the move is made.
-    fn plan_lightning(&self, network: &Network) -> Result<Plan, Skipped> {
-        let available = self.available();
-        let amount = self.moving.amount;
-        let usable = |h: &&Live<HubTerms>| self.added.contains_key(&h.id);
-        let receiving: Vec<&Live<HubTerms>> = network
-            .hubs
-            .iter()
-            .filter(usable)
-            .filter(|h| {
-                h.terms
-                    .lightning
-                    .as_ref()
-                    .is_some_and(|l| (l.min_receive..=l.max_receive).contains(&amount))
-            })
-            .collect();
-        let mut routes: Vec<LightningRoute> = Vec::new();
-        for to in &receiving {
-            let receive = to
-                .terms
-                .lightning
-                .as_ref()
-                .map_or(0, |l| l.receive.due(amount));
-            let asked = amount + receive;
-            for from in network.hubs.iter().filter(usable) {
-                let held = available.get(&from.id).copied().unwrap_or(0);
-                let lock = self.wallet.lock_fee(self.url(&from.id), asked).unwrap_or(0);
-                if let Some(pay) = from.terms.lightning.as_ref() {
-                    let fee = pay.pay.due(asked);
-                    if from.id != to.id && asked <= pay.max_pay && held >= asked + fee + lock {
-                        routes.push((None, from, to, receive + fee + lock));
-                    }
-                }
-                for provider in &network.providers {
-                    let Some(ln) = &provider.terms.lightning else {
-                        continue;
-                    };
-                    let swaps_at = from
-                        .terms
-                        .address
-                        .as_ref()
-                        .is_some_and(|a| provider.terms.hubs.iter().any(|(at, _)| at == a));
-                    let fee = ln.fee.due(asked);
-                    if swaps_at && asked <= ln.max && held >= asked + fee + lock {
-                        routes.push((Some(provider), from, to, receive + fee + lock));
-                    }
-                }
-            }
-        }
-        let (via, from, to, quoted) = pick(&routes).ok_or_else(|| {
-            Skipped::NoRoute(format!(
-                "no hub or provider pays {amount} sat over Lightning to another hub's invoice"
-            ))
-        })?;
-        Ok(Plan {
-            kind: Kind::Lightning,
-            source: from.id.clone(),
-            target: to.id.clone(),
-            via: via.map(|p| p.id.clone()),
-            amount,
-            quoted: *quoted,
-        })
-    }
-
     /// Make `plan`, timed, and record how it went.
     async fn make(&self, plan: Plan) {
         let before = self.held();
@@ -788,73 +721,8 @@ impl<T: Transport + 'static> Mover<T> {
                     }
                 }
             }
-            Kind::Lightning => self.carry_lightning(plan, from, to).await,
+            Kind::Lightning => Err(NO_LIGHTNING.into()),
             Kind::Chain => self.carry_chain(plan, (from, to), progress).await,
-        }
-    }
-
-    async fn carry_lightning(&self, plan: &Plan, from: &str, to: &str) -> Result<(), String> {
-        let wallet = &self.wallet;
-        let mut invoice = wallet.invoice(to, plan.amount).await.map_err(said)?;
-        while invoice.request.is_none() {
-            if let InvoiceState::Canceled(why) = &invoice.state {
-                return Err(format!("no invoice: {why}"));
-            }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            if let Ok(followed) = wallet.follow_invoice(&invoice.hash).await {
-                invoice = followed;
-            }
-        }
-        let request = invoice.request.clone().unwrap_or_default();
-        let mut lock = match &plan.via {
-            None => {
-                let fee = wallet.invoice_fee(from, &request).map_err(said)?;
-                wallet
-                    .pay_invoice_within(from, &request, Some(fee))
-                    .await
-                    .map_err(said)?
-            }
-            Some(_) => {
-                let provider = self.provider_url(plan)?;
-                let ceiling = plan.quoted;
-                let quote = wallet
-                    .invoice_quote_via(&provider, from, &request, ceiling)
-                    .await
-                    .map_err(said)?;
-                wallet
-                    .pay_invoice_via(&provider, from, &request, quote.fee)
-                    .await
-                    .map_err(said)?
-            }
-        };
-        loop {
-            if matches!(invoice.state, InvoiceState::Received) {
-                return Ok(());
-            }
-            if let InvoiceState::Canceled(why) = &invoice.state {
-                return Err(format!("the invoice was not paid: {why}"));
-            }
-            match (&lock.state, &lock.failure) {
-                (LockState::Refunded | LockState::Abandoned(_), failure) => {
-                    let why = failure
-                        .clone()
-                        .unwrap_or_else(|| "its lock was refunded".into());
-                    return Err(format!("the invoice was not paid: {why}"));
-                }
-                (_, Some(failure)) if lock.via.is_some() => {
-                    return Err(format!("the provider did not pay: {failure}"));
-                }
-                _ => {}
-            }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            if let Ok(followed) = wallet.follow_invoice(&invoice.hash).await {
-                invoice = followed;
-            }
-            match wallet.follow_lock(&lock.id).await {
-                Ok(followed) => lock = followed,
-                Err(licash_wallet::Error::Pending { .. }) => {}
-                Err(e) => return Err(said(e)),
-            }
         }
     }
 

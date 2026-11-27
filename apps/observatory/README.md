@@ -16,7 +16,7 @@ Use the image `ghcr.io/lichenbtc-org/licash-observatory`, or build it with
 
 ```sh
 licash-observatory --data ./observatory run --network signet --budget 5000
-LICASH_WALLET=./observatory/signet/wallet.sqlite licash-wallet invoice 20000 --hub https://hub.example
+LICASH_WALLET=./observatory/signet/wallet.sqlite licash-wallet invoice 20000 --hub https://hub.example --via https://swaps.example
 docker run -d -p 8350:8350 -v licash-observatory:/data \
   ghcr.io/lichenbtc-org/licash-observatory run --network signet
 ```

@@ -101,7 +101,7 @@ take, and what they cost.
 | --- | --- | --- | --- |
 | In Licash | pays itself at a hub | 10% | 10 minutes |
 | Between hubs | swaps through a provider from one hub to another | 30% | 30 minutes |
-| Over Lightning | pays another hub's invoice, from a hub's gateway or through a provider | 30% | 30 minutes |
+| Over Lightning | no longer made (see below), shown for the moves recorded before | 30% | 30 minutes |
 | On Bitcoin | pays out of a hub through a provider to a hub's deposit address, then claims the deposit | 30% | 24 hours |
 
 A move on Bitcoin is timed by its swap: from asking the provider to the
@@ -128,11 +128,11 @@ and a half times that mean, so no service can tell when the next comes.
 A move is made only if the 30 days before it, with its quote, stay within
 its share and the whole budget.
 
-A move over Lightning pays an invoice of one hub from another hub's gateway,
-or through a provider that pays over Lightning, so it needs two hubs with a
-gateway, or one and such a provider; with fewer, the page says "No route"
-beside it and the observatory tries again every few minutes, spending
-nothing. A kind that waits shows why on the Moves page.
+Moves over Lightning are no longer made: hubs pay and make no invoices,
+and a provider's invoice for a wallet can't be paid through another
+provider, so no route over Lightning starts and ends in Licash. The kind
+stays, disabled, for the moves recorded before, and its share of the
+budget is left unspent. A kind that waits shows why on the Moves page.
 
 A swap is quoted at a few providers at random until one agrees to its
 limits: a fee of 1% and 100 sat, and a margin (how long the notes stay
@@ -143,8 +143,8 @@ for 482 is not refused for a few hours of a few thousand sat.
 Moves are made one at a time, and each costs what the wallet holds less
 after it: fees, and anything lost. Only services that answered their last
 probe are used, a source hub only if it holds enough, and the rest at
-random. A move not done in time (2 minutes in Licash, 15 between hubs, 5
-over Lightning, 6 hours on Bitcoin) counts as failed; the wallet takes it
+random. A move not done in time (2 minutes in Licash, 15 between hubs, 6
+hours on Bitcoin) counts as failed; the wallet takes it
 on later, as it does moves under way when the observatory stops. A move on
 Bitcoin that failed after its payout is counted at its quote, as its value
 may still be on its way.
@@ -154,7 +154,7 @@ CLI beside it, and let the observatory take the payment on:
 
 ```sh
 export LICASH_WALLET=./observatory/signet/wallet.sqlite
-licash-wallet invoice 20000 --hub https://hub.example   # pay it from any node
+licash-wallet invoice 20000 --hub https://hub.example --via https://swaps.example   # pay it from any node
 licash-wallet balance
 ```
 
@@ -188,7 +188,7 @@ docker build -f apps/observatory/Dockerfile -t licash-observatory .
 docker run -d --name observatory -p 8350:8350 -v licash-observatory:/data \
   licash-observatory run --network signet --budget 5000
 docker exec -e LICASH_WALLET=/data/signet/wallet.sqlite observatory \
-  licash-wallet invoice 20000 --hub https://hub.example
+  licash-wallet invoice 20000 --hub https://hub.example --via https://swaps.example
 ```
 
 The image listens on `0.0.0.0:8350` and keeps its records, wallet and

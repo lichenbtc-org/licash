@@ -24,7 +24,9 @@ pub enum Kind {
     Hub,
     /// A move of notes from one hub to another, through a swap provider.
     Swap,
-    /// A payment from one hub to an invoice of another, over Lightning.
+    /// A payment from one hub to an invoice of another, over Lightning:
+    /// no longer made, as hubs pay and make no invoices, and kept for the
+    /// moves recorded before.
     Lightning,
     /// A payout on Bitcoin to a deposit address of a hub, through a swap
     /// provider: out of Licash and back in.
