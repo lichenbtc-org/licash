@@ -732,8 +732,7 @@ async fn bridged(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     phone.fill_id("app-name", "Zapper").await?;
     phone.tap_id("connect").await?;
     phone.tap_id("copy-uri").await?;
-    // A button's label is its own view, untagged.
-    phone.wait("Copied", 10).await?;
+    phone.copied().await?;
     phone.tap_id("connected-done").await?;
     phone.by_id("bridge-app", 30).await?;
     phone.back().await?;
@@ -918,7 +917,7 @@ async fn restored(phone: &Phone, hub: &str, silent: &str) -> anyhow::Result<()> 
         .collect::<anyhow::Result<Vec<_>>>()?;
     // Copied too, to keep them elsewhere.
     phone.tap_id("copy-words").await?;
-    phone.wait("Copied", 10).await?;
+    phone.copied().await?;
     phone.tap_id("words-done").await?;
     phone.tap_id("backup-file").await?;
     phone.tap_id("save-backup").await?;

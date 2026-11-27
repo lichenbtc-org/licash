@@ -288,6 +288,26 @@ impl Phone {
         self.tap_view(&view).await
     }
 
+    /// Wait for the app to say it copied something, then for the
+    /// system's clipboard preview to go: from Android 13 it covers the
+    /// bottom left for some 6 s, and a tap there opens its editor instead.
+    pub async fn copied(&self) -> anyhow::Result<()> {
+        self.wait("Copied", 10).await?;
+        let shown = || async {
+            let windows = self.shell("dumpsys window windows").await?;
+            Ok::<_, anyhow::Error>(windows.contains("ClipboardOverlay"))
+        };
+        // Shown once the clip changed, a moment after the app says so.
+        let _ = until("the clipboard preview", 3, || async {
+            Ok(shown().await?.then_some(()))
+        })
+        .await;
+        until("the clipboard preview gone", 20, || async {
+            Ok((!shown().await?).then_some(()))
+        })
+        .await
+    }
+
     /// Whether a view tagged `id` is on screen now.
     pub async fn has(&self, id: &str) -> anyhow::Result<bool> {
         Ok(self.views().await?.iter().any(|v| v.id == id))
