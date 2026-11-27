@@ -1280,7 +1280,7 @@ fn owners_deposit_on_bitcoin_and_take_back_what_was_never_received() {
 
 #[test]
 fn owners_deposit_on_bitcoin_through_a_provider() {
-    let hub = Server::with_deposits(FEE);
+    let hub = Server::with_tweaks(FEE);
     let swaps = Swaps::depositing(&[&hub], 3_000, hub.esplora());
     let dir = tempfile::tempdir().unwrap();
     let (alice, _) = party(dir.path(), "alice", Some(&hub));
@@ -1322,6 +1322,45 @@ fn owners_deposit_on_bitcoin_through_a_provider() {
     assert_eq!(sent.len(), 1, "{sent:?}");
     let spent = sent[0].input.iter().map(|i| i.previous_output);
     assert!(spent.collect::<Vec<_>>().contains(&paid));
+    hub.confirm_sent();
+
+    // A coin paid to her silent payment address, moved whole through it.
+    let chain = hub.esplora().to_owned();
+    let (_, sp, _) = on_bitcoin(&alice);
+    hub.pay_silent(&sp, 450, 2);
+    hub.round();
+    let scan = ["--json", "onchain", "--chain", &chain, "scan"];
+    let scanned: Value = serde_json::from_str(&ok(wallet(&alice, &scan, None))).unwrap();
+    assert_eq!(values(&scanned["found"]), [450]);
+    let moving = [
+        "--json",
+        "onchain",
+        "--chain",
+        &chain,
+        "move",
+        "--via",
+        &provider,
+        "--fee-rate",
+        "1",
+    ];
+    let moved: Value = serde_json::from_str(&ok(wallet(&alice, &moving, None))).unwrap();
+    assert_eq!(
+        (moved["state"].as_str(), moved["provider"].as_str()),
+        (Some("open"), Some(provider.as_str()))
+    );
+    let amount = moved["amount"].as_u64().unwrap();
+    let coin = hub.sent();
+    assert_eq!((coin.len(), coin[0].output.len()), (1, 1));
+    assert_eq!(coin[0].output[0].value.to_sat(), amount + 201);
+    hub.confirm_sent();
+    hub.mine(1, None);
+    let resumed = resume();
+    let received = resumed["deposits"].as_array().unwrap();
+    assert!(
+        received.iter().any(|d| d["state"] == "received"),
+        "{resumed}"
+    );
+    assert_eq!(available(&alice), (140 + amount, 0));
 }
 
 #[test]

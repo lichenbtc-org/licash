@@ -230,6 +230,10 @@ coins first up to the chain's height, as `scan` does. Coins are never joined: a 
 one coin alone (`--coin TXID:VOUT`, by default the largest, `--all` all of
 it), and a move deposits one coin whole, leaving no change (`--coin`, by
 default the largest), refused if the hub takes less than all of it.
+`onchain move --via <provider>` deposits it through a swap provider taking
+deposits instead, for its notes at `--hub` (by default the first trusted);
+`resume --chain` then finds the payment and claims the notes, as for
+`deposit --via`.
 
 A broadcast error can follow successful relay. The signed transaction and
 its inputs stay reserved, and `onchain scan` rebroadcasts that same spend.
