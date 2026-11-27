@@ -608,7 +608,11 @@ mod tests {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { return };
                 let _ = stream.read(&mut [0; 4096]);
-                let head = format!("HTTP/1.1 200 OK\r\ncontent-length: {len}\r\n\r\n");
+                // Each connection closed once answered, as said: else the
+                // client may reuse it, pooled, and find it closed.
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {len}\r\nconnection: close\r\n\r\n"
+                );
                 let _ = stream.write_all(head.as_bytes());
                 let _ = stream.write_all(&vec![b'0'; len]);
             }
