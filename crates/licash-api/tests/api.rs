@@ -587,6 +587,7 @@ fn swap_bodies_name_hubs_by_address_and_locks_by_id() {
         lightning: None,
         donations: None,
         receive: None,
+        deposits: None,
         features: Vec::new(),
     };
     assert_eq!(json(&info), info);
@@ -979,6 +980,69 @@ fn a_provider_says_the_receipts_over_lightning_it_takes() {
     assert_eq!(
         (swaps::RECEIVES, swaps::RECEIVE_STATE),
         ("/v1/swaps/receive", "/v1/swaps/receive/{hash}")
+    );
+}
+
+#[test]
+fn a_provider_says_the_deposits_on_bitcoin_it_takes() {
+    use licash_api::swaps;
+    use serde_json::json;
+
+    let hub = OwnerKeys::from_seed(&[1; 32]).unwrap();
+    // As an older provider answers: none.
+    let info: swaps::Info = serde_json::from_value(json!({
+        "address": hub.address(), "fee": {"base": 0, "ppm": 0}, "min": 1,
+        "max": 10, "margin": 12, "hubs": []
+    }))
+    .unwrap();
+    assert_eq!(info.deposits, None);
+    assert!(!serde_json::to_string(&info).unwrap().contains("deposits"));
+    let deposits = swaps::Deposits {
+        fee: Fee { base: 2, ppm: 5000 },
+        miner: 300,
+        min: 10_000,
+        max: 1_000_000,
+        depth: 3,
+        window: 12,
+        timeout: 400,
+    };
+    let taking = swaps::Info {
+        deposits: Some(deposits),
+        ..info
+    };
+    let value = serde_json::to_value(&taking).unwrap();
+    assert_eq!(
+        value["deposits"],
+        json!({"fee": {"base": 2, "ppm": 5000}, "miner": 300, "min": 10_000,
+               "max": 1_000_000, "depth": 3, "window": 12, "timeout": 400})
+    );
+    assert_eq!(json(&taking), taking);
+    // The coin pays the amount, the fee on it and the claim's miners.
+    assert_eq!(deposits.pays(20_000), 20_000 + 102 + 300);
+    let request = swaps::DepositRequest {
+        hub: hub.address(),
+        address: hub.address(),
+        amount: 20_000,
+        hash: Hex(vec![7; 32]),
+        refund: Hex(vec![8; 32]),
+    };
+    assert_eq!(json(&request), request);
+    assert_eq!(
+        (request.hash().unwrap(), request.refund().unwrap()),
+        ([7; 32], [8; 32])
+    );
+    let short = swaps::DepositRequest {
+        refund: Hex(vec![8; 31]),
+        ..request
+    };
+    assert!(short.refund().is_err());
+    assert_eq!(
+        swaps::deposit_state(&[0xab; 32]),
+        format!("/v1/swaps/deposit/{}", "ab".repeat(32))
+    );
+    assert_eq!(
+        (swaps::DEPOSITS, swaps::DEPOSIT_STATE),
+        ("/v1/swaps/deposit", "/v1/swaps/deposit/{hash}")
     );
 }
 

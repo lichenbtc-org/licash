@@ -234,7 +234,7 @@ impl<T: Transport> Provider<T> {
 
     /// The rate to pay a transaction at, `left` blocks before its deadline
     /// ([`deadline::rate`]).
-    async fn deadline_rate(&self, chain: &impl Chain, left: u32) -> FeeRate {
+    pub(crate) async fn deadline_rate(&self, chain: &impl Chain, left: u32) -> FeeRate {
         deadline::rate(self.estimate(chain, left).await, self.floor(), left)
     }
 

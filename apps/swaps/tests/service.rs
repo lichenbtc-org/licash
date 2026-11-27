@@ -595,6 +595,55 @@ async fn receipts_over_lightning_are_asked_and_followed_through_the_api() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test]
+async fn deposits_on_bitcoin_are_declined_through_the_api_without_a_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let wallet = Wallet::create(
+        &dir.path().join("wallet.sqlite"),
+        &[5; 32],
+        ChainProfile::Core30DefaultRegtest,
+        Offline,
+    )
+    .unwrap();
+    let address = wallet.address();
+    let provider = Provider::create(wallet, Config::default())
+        .unwrap()
+        .take_deposits(licash_swaps::DepositTerms::default())
+        .unwrap();
+    let router = licash_swaps_service::router(Arc::new(provider), Default::default());
+    // With no chain to follow its coins on, its info tells of none.
+    let (status, info) = call(&router, swaps::SWAPS_INFO, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let info: serde_json::Value = serde_json::from_slice(&info).unwrap();
+    assert!(info.get("deposits").is_none(), "{info}");
+    let request = swaps::DepositRequest {
+        hub: address,
+        address,
+        amount: 20_000,
+        hash: licash_api::Hex(vec![1; 32]),
+        refund: licash_api::Hex(vec![2; 32]),
+    };
+    let body = serde_json::to_string(&request).unwrap();
+    let (status, answer) = call(&router, swaps::DEPOSITS, Some(&body)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(problem(&answer).code, Code::Declined);
+    let funding = licash_api::Funding {
+        txid: "00".repeat(32),
+        vout: 0,
+        height: 10,
+    };
+    let body = serde_json::to_string(&funding).unwrap();
+    let (status, answer) = call(&router, &swaps::deposit_state(&[1; 32]), Some(&body)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(problem(&answer).code, Code::Declined);
+    // None under a hash never asked; not a hash.
+    let (status, answer) = call(&router, &swaps::deposit_state(&[1; 32]), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(problem(&answer).code, Code::UnknownLock);
+    let (status, _) = call(&router, "/v1/swaps/deposit/nonsense", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 /// Behind a proxy it trusts, the provider counts receipts and donations
 /// by the client the proxy names, and refuses a chain it cannot read,
 /// over LNURL as LNURL asks; another peer's chain is not read at all.

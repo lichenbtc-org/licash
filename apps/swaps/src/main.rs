@@ -17,7 +17,7 @@ use licash_contracts::holder::Node;
 use licash_lightning::{lnd::Lnd, Node as LightningNode};
 use licash_nostr::Route;
 use licash_notify::{Message, Priority, Target};
-use licash_swaps::{Config, DonationTerms, Provider, ReceiveTerms};
+use licash_swaps::{Config, DepositTerms, DonationTerms, Provider, ReceiveTerms};
 use licash_swaps_service::{
     dashboard,
     keeper::{self, Keeper},
@@ -543,6 +543,79 @@ impl ReceiveArgs {
     }
 }
 
+/// Deposits on Bitcoin for wallets, with `--deposits` and `--chain`.
+#[derive(Args)]
+struct DepositArgs {
+    /// Take deposits on Bitcoin for wallets, on the chain of `--chain`:
+    /// coins hash-locked to the provider, paid on as locks of its notes to
+    /// the wallets at its hubs, claimed once the wallets claim.
+    #[arg(long, env = "LICASH_SWAPS_DEPOSITS", requires = "chain")]
+    deposits: bool,
+    /// The fee on each deposit, paid on top, in satoshis: the hub's fee on
+    /// the lock comes out of it.
+    #[arg(long, env = "LICASH_SWAPS_DEPOSIT_FEE_BASE",
+          default_value_t = DepositTerms::default().fee.base)]
+    deposit_fee_base: u64,
+    /// The fee on each deposit, in parts per million of it.
+    #[arg(long, env = "LICASH_SWAPS_DEPOSIT_FEE_PPM",
+          default_value_t = DepositTerms::default().fee.ppm,
+          value_parser = clap::value_parser!(u64).range(0..=1_000_000))]
+    deposit_fee_ppm: u64,
+    /// What each deposit's coin pays on top for the miners of the
+    /// provider's claim of it, in satoshis.
+    #[arg(long, env = "LICASH_SWAPS_DEPOSIT_MINER",
+          default_value_t = DepositTerms::default().miner)]
+    deposit_miner: u64,
+    /// The smallest deposit, in satoshis.
+    #[arg(long, env = "LICASH_SWAPS_DEPOSIT_MIN", default_value_t = DepositTerms::default().min)]
+    deposit_min: u64,
+    /// The largest deposit, in satoshis.
+    #[arg(long, env = "LICASH_SWAPS_DEPOSIT_MAX", default_value_t = DepositTerms::default().max)]
+    deposit_max: u64,
+    /// Confirmations a deposit's coin needs before the provider locks.
+    #[arg(long, env = "LICASH_SWAPS_DEPOSIT_DEPTH",
+          default_value_t = DepositTerms::default().depth)]
+    deposit_depth: u32,
+    /// Blocks from a request within which its coin must confirm.
+    #[arg(long, env = "LICASH_SWAPS_DEPOSIT_WINDOW",
+          default_value_t = DepositTerms::default().window)]
+    deposit_window: u32,
+    /// The most blocks from a request to its coin's timeout: deposits at
+    /// hubs whose windows need more are declined.
+    #[arg(long, env = "LICASH_SWAPS_DEPOSIT_TIMEOUT",
+          default_value_t = DepositTerms::default().timeout)]
+    deposit_timeout: u32,
+    /// Blocks within which the provider's claim of a coin confirms once it
+    /// holds the preimage, its fee rising as they run out.
+    #[arg(long, env = "LICASH_SWAPS_DEPOSIT_SWEEP",
+          default_value_t = DepositTerms::default().sweep)]
+    deposit_sweep: u32,
+    /// The most deposits under way at once.
+    #[arg(long, env = "LICASH_SWAPS_DEPOSIT_MAX_OPEN",
+          default_value_t = DepositTerms::default().max_open)]
+    deposit_max_open: u64,
+}
+
+impl DepositArgs {
+    /// Its terms, if it takes deposits.
+    fn terms(&self) -> Option<DepositTerms> {
+        self.deposits.then_some(DepositTerms {
+            fee: Fee {
+                base: self.deposit_fee_base,
+                ppm: self.deposit_fee_ppm,
+            },
+            miner: self.deposit_miner,
+            min: self.deposit_min,
+            max: self.deposit_max,
+            depth: self.deposit_depth,
+            window: self.deposit_window,
+            timeout: self.deposit_timeout,
+            sweep: self.deposit_sweep,
+            max_open: self.deposit_max_open,
+        })
+    }
+}
+
 impl DonationArgs {
     /// The provider's public URL and its terms, if it takes donations.
     fn terms(&self) -> anyhow::Result<Option<(String, DonationTerms)>> {
@@ -758,6 +831,10 @@ enum Command {
         /// Lightning for wallets too.
         #[command(flatten)]
         receives: ReceiveArgs,
+        /// With --deposits and --chain, the provider takes deposits on
+        /// Bitcoin for wallets too.
+        #[command(flatten)]
+        deposits: DepositArgs,
         #[command(flatten)]
         contracts: ContractArgs,
     },
@@ -873,6 +950,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             lightning,
             donations,
             receives,
+            deposits,
             contracts,
         } => {
             let config = terms.config()?;
@@ -912,6 +990,18 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                     anyhow::ensure!(
                         open == 0,
                         "{open} payouts on Bitcoin under way: they need --chain"
+                    );
+                    provider
+                }
+            };
+            let provider = match (deposits.terms(), &source) {
+                (Some(terms), Some(_)) => provider.take_deposits(terms)?,
+                (Some(_), None) => anyhow::bail!("--deposits needs --chain"),
+                (None, _) => {
+                    let open = provider.open_deposits()?;
+                    anyhow::ensure!(
+                        open == 0,
+                        "{open} deposits on Bitcoin under way: they need --deposits and --chain"
                     );
                     provider
                 }
@@ -1149,8 +1239,21 @@ async fn serve(
         tracing::info!("paying out on Bitcoin");
         critical.spawn(
             "the payouts' follower",
-            licash_swaps_service::follow(provider.clone(), chain, every),
+            licash_swaps_service::follow(provider.clone(), chain.clone(), every),
         );
+        if let Some(terms) = provider.deposit_terms() {
+            tracing::info!(
+                fee_base = terms.fee.base,
+                fee_ppm = terms.fee.ppm,
+                min = terms.min,
+                max = terms.max,
+                "taking deposits on Bitcoin for wallets"
+            );
+            critical.spawn(
+                "the deposits' follower",
+                licash_swaps_service::take_deposits(provider.clone(), chain, every),
+            );
+        }
     }
     if let Some(terms) = provider.lightning_terms().cloned() {
         tracing::debug!(

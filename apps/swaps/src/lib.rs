@@ -1,8 +1,8 @@
 //! The swap provider service: a [`Provider`] behind the HTTP API of
 //! [`licash_api::swaps`], the steps that take its swaps on, the chain its
 //! payouts on Bitcoin follow, the node its Lightning payments and receipts
-//! follow, the donations it takes over LNURL-pay (`lnurl`), and its
-//! announcement on Nostr.
+//! follow, the deposits on Bitcoin it takes, the donations it takes over
+//! LNURL-pay (`lnurl`), and its announcement on Nostr.
 
 pub mod dashboard;
 pub mod keeper;
@@ -20,10 +20,10 @@ use axum::{
 use bitcoin::{BlockHash, Transaction};
 use licash_api::{
     swaps::{
-        self, ChainRequest, ChainSwap, LightningRequest, LightningSwap, ReceiveRequest, Request,
-        Swap,
+        self, ChainRequest, ChainSwap, DepositRequest, LightningRequest, LightningSwap,
+        ReceiveRequest, Request, Swap,
     },
-    Code, Problem, ReceiveStatus, Receiving,
+    Code, Depositing, Funding, Problem, ReceiveStatus, Receiving,
 };
 use licash_chain_client::Source;
 use licash_nostr::{Announcement, Announcer, Role, Route};
@@ -81,7 +81,8 @@ impl Chain for ChainView {
 struct Served<T: Transport, C> {
     provider: Arc<Provider<T>>,
     nostr: Option<String>,
-    /// The chain payouts are paid on, if the provider pays out.
+    /// The chain payouts are paid on and deposits paid to, if the provider
+    /// takes them.
     chain: Option<Arc<C>>,
 }
 
@@ -90,8 +91,8 @@ struct Served<T: Transport, C> {
 pub struct Serving {
     /// The key it announces itself under on Nostr, which its info names.
     pub nostr: Option<String>,
-    /// The chain it pays out on Bitcoin on ([`Provider::pay_out`]), if it
-    /// does.
+    /// The chain it pays out on Bitcoin on ([`Provider::pay_out`]) and
+    /// takes deposits on ([`Provider::take_deposits`]), if it does.
     pub chain: Option<Arc<ChainView>>,
     /// The proxies in front of it whose clients it admits by: the receipts
     /// and donations asked and not paid are bounded by source
@@ -145,6 +146,11 @@ fn paths<T: Transport + 'static, C: Chain + Send + 'static>(
         .route(swaps::LIGHTNING_SWAP_STATE, get(invoice_state::<T, C>))
         .route(swaps::RECEIVES, post(take_receive::<T, C>))
         .route(swaps::RECEIVE_STATE, get(receive_state::<T, C>))
+        .route(swaps::DEPOSITS, post(take_deposit::<T, C>))
+        .route(
+            swaps::DEPOSIT_STATE,
+            get(deposit_state::<T, C>).post(deposit_funded::<T, C>),
+        )
         .with_state(Arc::new(served))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
 }
@@ -253,6 +259,7 @@ async fn info<T: Transport + 'static, C>(State(served): Shared<T, C>) -> Answer<
         .map_err(|e| Failure(Problem::new(Code::Unavailable, e.to_string())))??;
     if served.chain.is_none() {
         info.chain = None;
+        info.deposits = None;
     }
     // Up to what its node's channels pay now.
     info.lightning = served.provider.lightning_now().await;
@@ -367,6 +374,61 @@ async fn receive_state<T: Transport + 'static, C>(
     }
 }
 
+/// Take a deposit on Bitcoin, declined unless the provider takes them
+/// ([`Provider::take_deposits`]) on a chain.
+async fn take_deposit<T: Transport + 'static, C: Chain>(
+    State(served): Shared<T, C>,
+    Admission(source): Admission,
+    body: Result<Json<DepositRequest>, JsonRejection>,
+) -> Answer<Depositing> {
+    let Json(request) = body?;
+    let Some(chain) = &served.chain else {
+        return Err(Problem::new(Code::Declined, "no deposits on Bitcoin").into());
+    };
+    let source = source.as_ref().map(AdmissionSource::as_bytes);
+    let depositing = served
+        .provider
+        .deposit(&request, source, chain.as_ref())
+        .await
+        .inspect_err(|p| {
+            tracing::debug!(code = ?p.code, message = %p.message, "deposit declined");
+        })?;
+    Ok(Json(depositing))
+}
+
+async fn deposit_state<T: Transport + 'static, C>(
+    State(served): Shared<T, C>,
+    Path(hash): Path<String>,
+) -> Answer<ReceiveStatus> {
+    let hash = licash_api::hash_of(&hash)?;
+    match served.provider.deposit_status(&hash)? {
+        Some(status) => Ok(Json(status)),
+        None => Err(Problem::new(Code::UnknownLock, "no deposit under this hash").into()),
+    }
+}
+
+/// The wallet of a deposit tells of its coin: the provider locks once it
+/// checked it.
+async fn deposit_funded<T: Transport + 'static, C: Chain>(
+    State(served): Shared<T, C>,
+    Path(hash): Path<String>,
+    body: Result<Json<Funding>, JsonRejection>,
+) -> Answer<ReceiveStatus> {
+    let hash = licash_api::hash_of(&hash)?;
+    let Json(funding) = body?;
+    let Some(chain) = &served.chain else {
+        return Err(Problem::new(Code::Declined, "no deposits on Bitcoin").into());
+    };
+    let status = served
+        .provider
+        .deposit_funded(&hash, &funding, chain.as_ref())
+        .await
+        .inspect_err(|p| {
+            tracing::debug!(code = ?p.code, message = %p.message, "deposit's coin refused");
+        })?;
+    Ok(Json(status))
+}
+
 /// Take the swaps of `provider` on every `every`, and alert of the hubs it
 /// holds too little at to swap to, for good.
 pub async fn step<T: Transport + 'static>(provider: Arc<Provider<T>>, every: Duration) {
@@ -415,6 +477,27 @@ pub async fn follow<T: Transport + 'static, C: Chain>(
                 }
             }
             Err(e) => tracing::warn!("following the payouts: {e}"),
+        }
+        tokio::time::sleep(every).await;
+    }
+}
+
+/// Follow the deposits on Bitcoin of `provider` on `chain` every `every`,
+/// for good: lock each told of to its wallet, and claim its coin once the
+/// wallet claimed.
+pub async fn take_deposits<T: Transport + 'static, C: Chain>(
+    provider: Arc<Provider<T>>,
+    chain: Arc<C>,
+    every: Duration,
+) {
+    loop {
+        match provider.follow_deposits(chain.as_ref()).await {
+            Ok(pending) => {
+                for (hash, reason) in pending {
+                    tracing::debug!(%hash, reason, "deposit pending");
+                }
+            }
+            Err(e) => tracing::warn!("following the deposits: {e}"),
         }
         tokio::time::sleep(every).await;
     }

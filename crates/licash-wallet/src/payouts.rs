@@ -1598,10 +1598,9 @@ async fn block_at(chain: &impl Blocks, height: u32) -> Result<Block, Error> {
     checked_block(chain, &hash).await
 }
 
-pub(crate) async fn checked_block(
-    chain: &impl Blocks,
-    hash: &bitcoin::BlockHash,
-) -> Result<Block, Error> {
+/// The block of `hash`, checked against it: its header's hash and its
+/// transactions' merkle root.
+pub async fn checked_block(chain: &impl Blocks, hash: &bitcoin::BlockHash) -> Result<Block, Error> {
     let block = chain.block(hash).await.map_err(Error::Chain)?;
     if block.block_hash() != *hash || !block.check_merkle_root() {
         return Err(Error::Chain(format!(

@@ -315,6 +315,7 @@ impl Desk {
             lightning: None,
             donations: None,
             receive: None,
+            deposits: None,
             features: Vec::new(),
         }
     }

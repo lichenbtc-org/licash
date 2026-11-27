@@ -405,7 +405,8 @@ impl<T: Transport> Provider<T> {
                         .exists([hash])?
                         || tx
                             .prepare("SELECT 1 FROM provider_donations WHERE hash = ?1")?
-                            .exists([hash])?;
+                            .exists([hash])?
+                        || crate::deposits::holds_hash(tx, &hash)?;
                     if other {
                         return Ok(Some(declined("a hash taken before")));
                     }

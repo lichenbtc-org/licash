@@ -105,8 +105,8 @@ pub use lightning::{
 pub use locks::{Incoming, Lock, LockState, Via, CLAIM_MARGIN, PROTECTED_MARGIN};
 pub use payment_note::{note_text, PaymentNote, MAX_NOTE};
 pub use payouts::{
-    first_spend, payout_depth, Payout, PayoutProgress, PayoutQuote, PayoutState, CLAIM_ROOM,
-    PAYOUT_WINDOW,
+    checked_block, first_spend, payout_depth, Payout, PayoutProgress, PayoutQuote, PayoutState,
+    CLAIM_ROOM, PAYOUT_WINDOW,
 };
 pub use shaping::{Optimization, OptimizationQuote};
 pub use silent::{least_deposited, Blocks, Payee, Scanned, SilentCoin, SilentSpend, SilentTweaks};

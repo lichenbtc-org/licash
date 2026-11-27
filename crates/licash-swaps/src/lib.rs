@@ -43,6 +43,7 @@
 //! [`Config::own_lead`] blocks before the client's, between hubs of any
 //! windows.
 
+mod deposits;
 mod donations;
 mod invoices;
 mod issue;
@@ -73,6 +74,7 @@ use serde::{Deserialize, Serialize};
 /// `max_open` alone.
 pub const PER_SOURCE: u32 = 8;
 
+pub use deposits::{Deposit, DepositState, DepositTerms};
 pub use donations::{
     Donation, DonationState, DonationTerms, INVOICE_CLTV, INVOICE_EXPIRY, METADATA, SETTLE_MARGIN,
     START_ROOM,
@@ -533,6 +535,8 @@ pub struct Provider<T: Transport> {
     donations: Option<donations::Receiver>,
     /// Receipts over Lightning taken, if any ([`Provider::take_receives`]).
     receives: Option<receives::Taker>,
+    /// Deposits on Bitcoin taken, if any ([`Provider::take_deposits`]).
+    deposits: Option<deposits::Taker>,
 }
 
 /// The swaps into the provider's own hub under way, whose clients' locks
@@ -593,7 +597,7 @@ fn read_swaps(path: &Path) -> Result<Option<rusqlite::Connection>, Error> {
     }
 }
 
-/// Any recorded swap, donation or receipt reserves its hash, even terminal or not
+/// Any recorded swap, donation, receipt or deposit reserves its hash, even terminal or not
 /// yet locked: a donation's invoice, public, must never back a receipt of
 /// a gateway sharing the provider's node, whose notes its settling would
 /// pay.
@@ -607,7 +611,11 @@ pub fn holds_hash(path: &Path, hash: &[u8; 32]) -> Result<bool, Error> {
     let donation = conn
         .prepare("SELECT 1 FROM provider_donations WHERE hash = ?1")?
         .exists([hash])?;
-    Ok(swap || donation || receives::holds_hash(&conn, hash)?)
+    Ok(
+        swap || donation
+            || receives::holds_hash(&conn, hash)?
+            || deposits::holds_hash(&conn, hash)?,
+    )
 }
 
 /// A recorded lock id proves swap ownership. A reserved hash alone does
@@ -696,6 +704,7 @@ impl<T: Transport> Provider<T> {
             lightning: None,
             donations: None,
             receives: None,
+            deposits: None,
         }
     }
 
@@ -776,6 +785,7 @@ impl<T: Transport> Provider<T> {
             chain: self.chain_info()?,
             donations: self.donations(),
             receive: self.receive_terms(),
+            deposits: self.deposit_terms(),
             lightning: self.lightning_terms().cloned(),
             features: (self.receive_terms().iter())
                 .map(|_| swaps::FEATURE_RECEIVE_EXACT.to_owned())
@@ -1002,8 +1012,8 @@ impl<T: Transport> Provider<T> {
         Ok(true)
     }
 
-    /// What the swaps accepted and the receipts paid, not locked yet,
-    /// will lock at `url`.
+    /// What the swaps accepted, the receipts paid and the deposits told
+    /// of, not locked yet, will lock at `url`.
     fn reserved(&self, url: &str) -> Result<u64, Error> {
         self.store.read(|c| {
             let swaps = c.query_row(
@@ -1012,7 +1022,9 @@ impl<T: Transport> Provider<T> {
                 [url],
                 |r| r.get::<_, i64>(0),
             )? as u64;
-            Ok(swaps.saturating_add(receives::reserved(c, url)?))
+            Ok(swaps
+                .saturating_add(receives::reserved(c, url)?)
+                .saturating_add(deposits::reserved(c, url)?))
         })
     }
 }
