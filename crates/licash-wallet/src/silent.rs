@@ -1878,13 +1878,59 @@ impl<T: Transport> Wallet<T> {
         let offer = info
             .deposits
             .ok_or_else(|| Error::Invalid(format!("hub {url} takes no deposits")))?;
+        let least = least_deposited(&offer, rate);
+        let (amount, pays) = self.whole(coin, rate, (offer.min, offer.max), least, &url, |a| {
+            offer.pays(a)
+        })?;
+        let deposit = self
+            .deposit_answered(hub, &info, (amount, pays), None)
+            .await?;
+        self.pay_deposit(deposit, coin, rate)
+    }
+
+    /// Deposit the coin at `coin`, whole and alone, through the swap
+    /// provider at `provider` for notes at the hub at `url`
+    /// ([`Wallet::deposit_through`]), as [`Wallet::deposit_silent`] does
+    /// at a hub: the provider's fee and its claim's miners on top. A
+    /// deposit the provider did not answer is kept, asked again on
+    /// resuming, and lapses unpaid: the coin stays free.
+    pub async fn deposit_silent_through(
+        &self,
+        provider: &str,
+        url: &str,
+        coin: OutPoint,
+        rate: FeeRate,
+    ) -> Result<(Deposit, Transaction), Error> {
+        let offer = self.deposit_offer(provider, url).await?;
+        let terms = offer.terms;
+        let least = least_deposited_through(&terms, rate);
+        let (amount, _) = self.whole(coin, rate, (terms.min, offer.max), least, provider, |a| {
+            Some(terms.pays(a))
+        })?;
+        let deposit = self.deposit_through(provider, url, amount).await?;
+        self.pay_deposit(deposit, coin, rate)
+    }
+
+    /// The most notes, within `min..=max`, a deposit paid by the coin at
+    /// `coin` whole buys, the fee at `rate` and `pays` saying what each
+    /// asks, and that payment: refused if the coin pays less than `least`,
+    /// or more than `taker` takes at once.
+    fn whole(
+        &self,
+        coin: OutPoint,
+        rate: FeeRate,
+        (min, max): (u64, u64),
+        least: u64,
+        taker: &str,
+        pays: impl Fn(u64) -> Option<u64>,
+    ) -> Result<(u64, u64), Error> {
         // What the coin pays a taproot output, as a deposit's is.
         let taproot = any_taproot();
         let held = Coins::One(coin).of(self.store.read(free_coins)?)?;
         let total = held.iter().map(|h| h.value).sum::<u64>();
         let available = plan(&held, &taproot, None, rate).map_or(0, |p| p.pay);
-        let fits = |amount: u64| offer.pays(amount).is_some_and(|pays| pays <= available);
-        let (mut amount, mut over) = (0, offer.max.saturating_add(1));
+        let fits = |amount: u64| pays(amount).is_some_and(|pays| pays <= available);
+        let (mut amount, mut over) = (0, max.saturating_add(1));
         while over - amount > 1 {
             let mid = amount + (over - amount) / 2;
             match fits(mid) {
@@ -1892,23 +1938,30 @@ impl<T: Transport> Wallet<T> {
                 false => over = mid,
             }
         }
-        if amount < offer.min {
+        if amount < min {
             return Err(Error::Insufficient {
-                needed: least_deposited(&offer, rate),
+                needed: least,
                 available: total,
             });
         }
         // All of it, or not at all: none left as change.
-        let pays = offer.pays(amount).unwrap_or(u64::MAX);
+        let pays = pays(amount).unwrap_or(u64::MAX);
         if plan(&held, &taproot, Some(pays), rate).is_ok_and(|p| p.change.is_some()) {
             return Err(Error::Invalid(format!(
-                "a coin of {total} sat: more than {url} takes at once ({} sat of notes at most)",
-                offer.max
+                "a coin of {total} sat: more than {taker} takes at once ({max} sat of notes at most)"
             )));
         }
-        let deposit = self
-            .deposit_answered(hub, &info, (amount, pays), None)
-            .await?;
+        Ok((amount, pays))
+    }
+
+    /// The transaction paying `deposit` with the coin at `coin`, whole, at
+    /// `rate`: signed and recorded as spending it.
+    fn pay_deposit(
+        &self,
+        deposit: Deposit,
+        coin: OutPoint,
+        rate: FeeRate,
+    ) -> Result<(Deposit, Transaction), Error> {
         let terms = match (&deposit.state, &deposit.terms) {
             (DepositState::Open, Some(terms)) => terms,
             (state, _) => {
@@ -1933,6 +1986,7 @@ impl<T: Transport> Wallet<T> {
             rate,
             Coins::Whole(coin),
         )?;
+        let amount = deposit.amount;
         tracing::info!(hash = %deposit.hash, amount, txid = %tx.compute_txid(), "silent payment coins deposited");
         Ok((deposit, tx))
     }
@@ -1956,6 +2010,18 @@ pub fn least_deposited(offer: &licash_api::Deposits, rate: FeeRate) -> u64 {
     offer
         .pays(offer.min)
         .map_or(u64::MAX, |p| p.saturating_add(fee))
+}
+
+/// The least a coin deposited whole through a provider offering `offer`
+/// holds, its fee at `rate`: in sat.
+pub fn least_deposited_through(offer: &licash_api::swaps::Deposits, rate: FeeRate) -> u64 {
+    let output = TxOut {
+        value: Amount::ZERO,
+        script_pubkey: any_taproot(),
+    };
+    offer
+        .pays(offer.min)
+        .saturating_add(fee(1, &[output], rate))
 }
 
 /// Which of the wallet's free coins a spend may take.

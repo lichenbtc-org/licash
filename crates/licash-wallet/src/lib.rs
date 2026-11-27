@@ -111,7 +111,10 @@ pub use payouts::{
     CLAIM_ROOM, PAYOUT_WINDOW,
 };
 pub use shaping::{Optimization, OptimizationQuote};
-pub use silent::{least_deposited, Blocks, Payee, Scanned, SilentCoin, SilentSpend, SilentTweaks};
+pub use silent::{
+    least_deposited, least_deposited_through, Blocks, Payee, Scanned, SilentCoin, SilentSpend,
+    SilentTweaks,
+};
 use store::{now, sql, Owner, Store};
 pub use swaps::{Swap, SwapLimits, SwapQuote, SwapState, SWAP_ROOM, SWAP_WINDOW};
 
