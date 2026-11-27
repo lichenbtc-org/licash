@@ -27,6 +27,20 @@ use licash_wallet::Wallet;
 
 use super::Server;
 
+/// Deposits on Bitcoin of 100 to 5,000 (to 150 as it swaps), its fee of 1 and 200 for its
+/// claim's miners on top, at 2 confirmations, confirmed within 10 blocks.
+pub const DEPOSITS: licash_swaps::DepositTerms = licash_swaps::DepositTerms {
+    fee: licash_api::Fee { base: 1, ppm: 0 },
+    miner: 200,
+    min: 100,
+    max: 5_000,
+    depth: 2,
+    window: 10,
+    timeout: 1_008,
+    sweep: 6,
+    max_open: 10,
+};
+
 /// Its fee of 1 and 1%, swapping 5 to 150, its locks expiring 6 blocks
 /// before its clients'.
 pub const CONFIG: Config = Config {
@@ -60,12 +74,19 @@ impl Swaps {
     /// `node` too, on the default terms, as the service does with
     /// `--receive`.
     pub fn receiving(hubs: &[&Server], stock: u64, node: Arc<Fake>) -> Self {
-        Self::started(hubs, stock, 0x50, CONFIG, Some(node))
+        Self::started(hubs, stock, 0x50, CONFIG, (Some(node), None))
+    }
+
+    /// [`Swaps::start`], taking deposits on Bitcoin for wallets on
+    /// [`DEPOSITS`] too, on the chain of the Esplora at `chain`, as the
+    /// service does with `--deposits --chain`.
+    pub fn depositing(hubs: &[&Server], stock: u64, chain: &str) -> Self {
+        Self::started(hubs, stock, 0x50, CONFIG, (None, Some(chain.to_owned())))
     }
 
     /// [`Swaps::start`], its wallet of seed `seed`, on terms `config`.
     pub fn with(hubs: &[&Server], stock: u64, seed: u8, config: Config) -> Self {
-        Self::started(hubs, stock, seed, config, None)
+        Self::started(hubs, stock, seed, config, (None, None))
     }
 
     fn started(
@@ -73,7 +94,7 @@ impl Swaps {
         stock: u64,
         seed: u8,
         config: Config,
-        receiving: Option<Arc<Fake>>,
+        (receiving, depositing): (Option<Arc<Fake>>, Option<String>),
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wallet.sqlite");
@@ -108,6 +129,12 @@ impl Swaps {
                         .unwrap(),
                     None => provider,
                 };
+                let chain = depositing
+                    .map(|url| Arc::new(licash_swaps_service::ChainView(url.parse().unwrap())));
+                let provider = match &chain {
+                    Some(_) => provider.take_deposits(DEPOSITS).unwrap(),
+                    None => provider,
+                };
                 let provider = Arc::new(provider);
                 let nostr = licash_nostr::public_key(&provider.nostr_secret().unwrap()).unwrap();
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -118,6 +145,11 @@ impl Swaps {
                 let stepping = tokio::spawn(licash_swaps_service::step(provider.clone(), every));
                 let following = receives.then(|| {
                     tokio::spawn(licash_swaps_service::take_receives(provider.clone(), every))
+                });
+                let depositing = chain.clone().map(|chain| {
+                    let following =
+                        licash_swaps_service::take_deposits(provider.clone(), chain, every);
+                    tokio::spawn(following)
                 });
                 let refusing = move |request: Request, next: Next| {
                     let refuse =
@@ -135,6 +167,7 @@ impl Swaps {
                     provider,
                     licash_swaps_service::Serving {
                         nostr: Some(nostr),
+                        chain,
                         ..Default::default()
                     },
                 )
@@ -146,7 +179,7 @@ impl Swaps {
                     .await
                     .unwrap();
                 stepping.abort();
-                if let Some(following) = following {
+                for following in [following, depositing].into_iter().flatten() {
                     following.abort();
                 }
             });

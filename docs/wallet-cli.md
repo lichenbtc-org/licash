@@ -194,6 +194,15 @@ adds it (until 20 numbers in a row are unknown there), keeps those the hub
 answers as they were asked (other notes or another payment are another
 hash, and not kept), then takes them on or refunds them as any.
 
+`deposit <amount> --via <provider>` asks a swap provider taking deposits on
+Bitcoin instead: the URI pays its address, its fee and its claim's miners on
+top. The provider looks for no payment: `resume --chain <url>` finds it once
+it has the provider's confirmations and tells the provider, which then locks
+its own notes to the wallet at the hub, and the wallet claims them as a hub's
+deposit's. A deposit through a provider is refunded the same way. Its
+preimage and refund key are drawn at random, not from the seed: pay it only
+from this wallet's file, and resume within the blocks after.
+
 `code` prints `licash:<code>`, naming the wallet's mailbox and at most three
 of its hubs: by default those whose contracts have the most room to protect
 more than is held there, then those holding the least. `code --onchain`

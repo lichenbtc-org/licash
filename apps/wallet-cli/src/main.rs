@@ -220,7 +220,8 @@ enum Command {
     Resume {
         /// The chain, for its height: a protected invoice's payment, or a
         /// deposit's, is taken only at a height the wallet knows of itself
-        /// (this, or the last block it scanned), not on its hub's word.
+        /// (this, or the last block it scanned), not on its hub's word. The
+        /// payments of deposits through a provider are looked for there.
         #[arg(long, env = "LICASH_WALLET_CHAIN")]
         chain: Option<String>,
     },
@@ -325,14 +326,19 @@ enum Command {
     /// The Lightning invoices asked for, newest first.
     Invoices,
     /// Get AMOUNT in notes for coins paid on Bitcoin: the address and the
-    /// exact amount to pay, the hub's fee on top, as a BIP21 URI (the
-    /// deposit's hash on stderr). `resume` takes the notes once the
-    /// payment confirmed.
+    /// exact amount to pay, the fee on top, as a BIP21 URI (the deposit's
+    /// hash on stderr). `resume` takes the notes once the payment
+    /// confirmed (`resume --chain` for one through a provider).
     Deposit {
         amount: u64,
         /// At this hub [default: the only one trusted].
         #[arg(long)]
         hub: Option<String>,
+        /// Through the swap provider at this URL, which locks its notes at
+        /// the hub once told of the payment: it sees the amount and the
+        /// wallet's address. Without it, the hub takes the deposit.
+        #[arg(long, value_name = "URL")]
+        via: Option<String>,
         /// Also draw the URI as a QR code, on a terminal.
         #[arg(long)]
         qr: bool,
@@ -1111,6 +1117,15 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
         Command::Resume { chain } => {
             if let Some(chain) = &chain {
                 contract::saw_tip(&wallet, chain).await?;
+                let blocks = onchain::Blocks(payout::source(chain)?);
+                match wallet.find_deposit_payments(&blocks).await {
+                    Ok(pending) => {
+                        for (hash, reason) in pending {
+                            tracing::info!(hash, reason, "deposit through a provider pending");
+                        }
+                    }
+                    Err(e) => tracing::warn!("looking for the deposits' payments: {e}"),
+                }
             }
             let resumed = resume(&wallet, json).await;
             // The payments it made among them.
@@ -1368,12 +1383,20 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
                 lines.join("\n"),
             );
         }
-        Command::Deposit { amount, hub, qr } => {
+        Command::Deposit {
+            amount,
+            hub,
+            via,
+            qr,
+        } => {
             let hub = match hub {
                 Some(hub) => hub,
                 None => only_hub(&wallet)?,
             };
-            let deposit = wallet.deposit(&hub, amount).await?;
+            let deposit = match &via {
+                Some(via) => wallet.deposit_through(via, &hub, amount).await?,
+                None => wallet.deposit(&hub, amount).await?,
+            };
             let text = match (&deposit.terms, &deposit.state) {
                 (Some(terms), DepositState::Open) => {
                     eprintln!(
@@ -2639,7 +2662,7 @@ fn deposit_json(deposit: &Deposit) -> serde_json::Value {
     json!({
         "hash": deposit.hash, "hub": deposit.hub, "amount": deposit.amount, "terms": terms,
         "funding": funding, "state": deposit_state(&deposit.state),
-        "created_at": deposit.created_at,
+        "created_at": deposit.created_at, "provider": deposit.provider,
     })
 }
 
@@ -2653,8 +2676,9 @@ fn deposit_line(deposit: &Deposit) -> String {
         ),
         None => String::new(),
     };
+    let via = (deposit.provider.as_ref()).map_or_else(String::new, |p| format!(" via {p}"));
     format!(
-        "{}  deposit {}  {}  at {}  {}{terms}",
+        "{}  deposit {}  {}  at {}{via}  {}{terms}",
         say::when(deposit.created_at),
         deposit_state(&deposit.state),
         say::sat(deposit.amount),

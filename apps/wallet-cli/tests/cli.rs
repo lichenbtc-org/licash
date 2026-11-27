@@ -1279,6 +1279,52 @@ fn owners_deposit_on_bitcoin_and_take_back_what_was_never_received() {
 }
 
 #[test]
+fn owners_deposit_on_bitcoin_through_a_provider() {
+    let hub = Server::with_deposits(FEE);
+    let swaps = Swaps::depositing(&[&hub], 3_000, hub.esplora());
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = party(dir.path(), "alice", Some(&hub));
+    let provider = swaps.url();
+    // Asked for 140 in notes, within the most it locks to a client: pay
+    // 341 on Bitcoin, the provider's fee and its claim's miners on top.
+    let asked = wallet(&alice, &["deposit", "140", "--via", &provider], None);
+    let stderr = String::from_utf8_lossy(&asked.stderr).into_owned();
+    assert!(stderr.contains("pay exactly 341 sat"), "{stderr}");
+    let uri = ok(asked).trim().to_owned();
+    let (address, _) = uri
+        .strip_prefix("bitcoin:")
+        .and_then(|rest| rest.split_once("?amount="))
+        .unwrap();
+    let text = ok(wallet(&alice, &["deposits"], None));
+    assert!(text.contains(&format!("via {provider}")), "{text}");
+    // Paid: found once deep enough on resuming with the chain, told to the
+    // provider, which locks its notes, claimed.
+    let paid = hub.pay_onchain(address, 341, 1);
+    let resume = || json(&alice, &["resume", "--chain", hub.esplora()]);
+    assert_eq!(resume()["deposits"][0]["state"], "open");
+    hub.mine(1, None);
+    let resumed = resume();
+    assert_eq!(resumed["deposits"][0]["state"], "received", "{resumed}");
+    assert_eq!(
+        resumed["deposits"][0]["funding"]["outpoint"],
+        paid.to_string()
+    );
+    assert_eq!(available(&alice), (140, 0));
+    // The provider claims the coin with the preimage the claim showed.
+    let mut sent = Vec::new();
+    for _ in 0..100 {
+        sent = hub.sent();
+        if !sent.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let spent = sent[0].input.iter().map(|i| i.previous_output);
+    assert!(spent.collect::<Vec<_>>().contains(&paid));
+}
+
+#[test]
 fn owners_pay_payment_codes_through_mailboxes_or_by_hand() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let (_relay, relay) = support::relay(&runtime);
