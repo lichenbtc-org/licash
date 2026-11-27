@@ -41,7 +41,7 @@ class DetailsTest {
 
     private fun swap(lock: String?) = Details.Swap(
         from = "https://a.example", to = "https://b.example", provider = "https://swaps.example", lock = lock,
-        theirs = null, failure = null, providerFee = 0u, lockFee = 0u,
+        theirs = null, failure = null, providerFee = 0u, lockFee = 0u, expiry = null,
     )
 
     @Test

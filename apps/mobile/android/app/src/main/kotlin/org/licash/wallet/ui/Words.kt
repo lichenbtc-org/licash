@@ -19,6 +19,7 @@ import org.licash.core.RecoveryStage
 import org.licash.core.State
 import org.licash.core.Transfer
 import org.licash.wallet.credit
+import org.licash.wallet.digits
 import org.licash.wallet.host
 import org.licash.wallet.percent
 import org.licash.wallet.sat
@@ -153,6 +154,32 @@ fun span(blocks: Long, blockSecs: UInt = BITCOIN_BLOCK_SECONDS): String {
 /** The minutes `blocks` take, `blockSecs` each, rounded and at least one. */
 fun minutes(blocks: Long, blockSecs: UInt = BITCOIN_BLOCK_SECONDS): Long =
     maxOf(1L, (blocks * blockSecs.toLong() + 30) / 60)
+
+/**
+ * A timelock's block `height`, for advanced mode: the block, then, from
+ * the `tip` the light client reached (0 if not yet known: the block alone),
+ * `blockSecs` a block, about when it comes and how long until then:
+ * `Block 912,345 · about Dec 3, 14:20 · in 6 days`. Once reached,
+ * `Block 912,345 · passed`. Blocks come when they come: about.
+ */
+fun atBlock(
+    height: UInt,
+    tip: Int,
+    blockSecs: UInt,
+    now: Long,
+    zone: ZoneId = ZoneId.systemDefault(),
+    locale: Locale = Locale.getDefault(),
+): String {
+    val block = "Block ${digits(height.toULong())}"
+    if (tip <= 0) return block
+    val left = height.toLong() - tip
+    if (left <= 0) return "$block · passed"
+    val at = Instant.ofEpochSecond(now + left * blockSecs.toLong()).atZone(zone)
+    val sameYear = at.year == Instant.ofEpochSecond(now).atZone(zone).year
+    val date = at.format(DateTimeFormatter.ofPattern(if (sameYear) "MMM d" else "MMM d, yyyy", locale))
+    val time = at.format(DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT).withLocale(locale))
+    return "$block · about $date, $time · in ${span(left, blockSecs)}"
+}
 
 /**
  * When `seconds` since 1970 was, as short as `now` lets it be said: the

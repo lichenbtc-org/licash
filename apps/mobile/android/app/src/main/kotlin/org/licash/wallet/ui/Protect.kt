@@ -254,8 +254,9 @@ private fun Unfolded(
     }
     if (developer) {
         Line("Paid from", "A coin of ${sat(c.paidFrom)}")
-        Line("Protects until", "block ${c.protectsUntil}")
-        Line("Closes at", "block ${c.closesAt}")
+        val now = System.currentTimeMillis() / 1000
+        Line("Protects until", atBlock(c.protectsUntil, height, blockSeconds(network), now))
+        Line("Closes at", atBlock(c.closesAt, height, blockSeconds(network), now))
         c.funding?.let { Line("Funding", it.take(16) + "…") }
         Line("Id", c.id.take(16) + "…")
     }
@@ -295,12 +296,14 @@ private fun Forced(r: Recovery, developer: Boolean, giveUp: () -> Unit, allowFee
         r.error?.let { Line("Stopped by", it) }
     }
     if (developer) {
-        r.nextAt?.let { Line("Next step at", "block $it") }
+        val blockSecs = LocalBlockSeconds.current
+        val now = System.currentTimeMillis() / 1000
+        r.nextAt?.let { Line("Next step at", atBlock(it, height, blockSecs, now)) }
         r.request?.let { Line("Request", it.take(16) + "…") }
         r.publication?.let { Line("Claim", it.take(16) + "…") }
         r.timeout?.let { Line("Payback", it.take(16) + "…") }
         r.response?.let { Line("Hub's answer", it.take(16) + "…") }
-        r.deadline?.let { Line("Hub proves by", "block $it") }
+        r.deadline?.let { Line("Hub proves by", atBlock(it, height, blockSecs, now)) }
         r.assertion?.let { Line("Hub's proof", it.take(16) + "…") }
         r.payout?.let { Line("Payout", it.take(16) + "…") }
         r.sweep?.let { Line("Sweep", it.take(16) + "…") }

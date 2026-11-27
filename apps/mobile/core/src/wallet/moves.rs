@@ -264,11 +264,8 @@ pub(super) fn details(
         _ => None,
     };
     let locks = wallet.locks()?;
-    let lock_fee = swap
-        .lock
-        .as_ref()
-        .and_then(|id| locks.iter().find(|l| &l.id == id))
-        .map_or(0, |l| l.fee);
+    let lock = (swap.lock.as_ref()).and_then(|id| locks.iter().find(|l| &l.id == id));
+    let lock_fee = lock.map_or(0, |l| l.fee);
     Ok(Details::Swap {
         from: swap.from,
         to: swap.to,
@@ -278,6 +275,7 @@ pub(super) fn details(
         failure,
         provider_fee: swap.fee,
         lock_fee,
+        expiry: lock.map(|l| l.expiry),
     })
 }
 

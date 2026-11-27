@@ -149,7 +149,7 @@ fun ActivityDetails(engine: Engine, ui: Ui, shown: Activity, back: () -> Unit) {
                 payout?.let { PayoutTimeline(activity, it, ui.developer, engine::explorerLink, view) }
                 flow?.let { Group("") { NotesFlow(activity, it) } }
                 if (ui.developer) {
-                    Technical(activity, details, copy)
+                    Technical(activity, details, ui.chain.height, copy)
                     notes?.takeIf { it.spent.isNotEmpty() || it.made.isNotEmpty() }?.let {
                         NotesGroup(activity, it, copy)
                     }
@@ -496,9 +496,19 @@ private fun confirmations(tx: Onchain, details: Details?): String {
     }
 }
 
-/** Everything known of it, in advanced mode: a tap copies a value. */
+/**
+ * Everything known of it, in advanced mode: a tap copies a value. Each
+ * timelock as its block, about when it comes and how long until then,
+ * from the light client's `tip` ([atBlock]).
+ */
 @Composable
-private fun Technical(activity: Activity, details: Details?, copy: (String, String) -> Unit) {
+private fun Technical(activity: Activity, details: Details?, tip: Int, copy: (String, String) -> Unit) {
+    val blockSecs = LocalBlockSeconds.current
+    val now = System.currentTimeMillis() / 1000
+    // Copied as its number.
+    val lock: @Composable (String, UInt) -> Unit = { label, height ->
+        Fact(label, atBlock(height, tip, blockSecs, now), copy, "$height")
+    }
     Group("Advanced") {
         when (details) {
             is Details.Notes -> {
@@ -512,8 +522,8 @@ private fun Technical(activity: Activity, details: Details?, copy: (String, Stri
                 details.pays?.let { Fact("Pays", sat(it), copy, "$it") }
                 details.payment?.let { Transaction(it, copy) }
                 details.depth?.let { Fact("Confirmations needed", "$it", copy) }
-                details.fundBy?.let { Fact("Confirmed by block", "$it", copy) }
-                details.timeout?.let { Fact("Refundable after block", "$it", copy) }
+                details.fundBy?.let { lock("Confirmed by block", it) }
+                details.timeout?.let { lock("Refundable after block", it) }
                 details.refund?.let { Fact("Refund", it, copy) }
             }
             is Details.Coin -> {
@@ -529,7 +539,7 @@ private fun Technical(activity: Activity, details: Details?, copy: (String, Stri
                 details.preimage?.let { Fact("Preimage", it, copy) }
                 details.failure?.let { Fact("Failure", it, copy) }
                 details.provider?.let { Fact("Provider", it, copy) }
-                details.expiry?.let { Fact("Expiry", "$it", copy) }
+                details.expiry?.let { lock("Lock expires, your notes back if unpaid", it) }
             }
             is Details.Payout -> {
                 Fact("Payout hash", activity.id, copy)
@@ -542,9 +552,9 @@ private fun Technical(activity: Activity, details: Details?, copy: (String, Stri
                 p.claim?.let { Fact("Claim", it, copy) }
                 p.claimHeight?.let { Fact("The claim's block", "$it", copy) }
                 p.lock?.let { Fact("Lock", it.name.lowercase(), copy) }
-                p.lockExpiry?.let { Fact("Lock refunded from block", "$it", copy) }
-                p.timeout?.let { Fact("Provider takes its coin back from block", "$it", copy) }
-                p.claimBy?.let { Fact("Claimed by block", "$it", copy) }
+                p.lockExpiry?.let { lock("Lock refunded from block", it) }
+                p.timeout?.let { lock("Provider takes its coin back from block", it) }
+                p.claimBy?.let { lock("Claimed by block", it) }
                 Fact("Confirmations needed", "${p.depth}", copy)
                 details.failure?.let { Fact("Failure", it, copy) }
             }
@@ -566,6 +576,7 @@ private fun Technical(activity: Activity, details: Details?, copy: (String, Stri
                 Fact("Provider", details.provider, copy)
                 details.lock?.let { Fact("Your lock", it, copy) }
                 details.theirs?.let { Fact("The provider's lock", it, copy) }
+                details.expiry?.let { lock("Your lock expires, your notes back if it fails", it) }
                 details.failure?.let { Fact("Failure", it, copy) }
             }
             null -> Fact("Id", activity.id, copy)

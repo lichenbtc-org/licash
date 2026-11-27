@@ -481,12 +481,15 @@ fn a_phone_moves_its_notes_to_another_of_its_hubs_through_a_provider() {
             failure,
             provider_fee,
             lock_fee,
+            expiry,
         } => {
             assert_eq!(
                 (from, to, provider),
                 (hubs.url(0), hubs.url(1), swaps.url())
             );
             assert!(lock.is_some() && theirs.is_some() && failure.is_none());
+            // Its lock's expiry, when its notes would come back.
+            assert!(expiry.is_some_and(|e| e > 0), "{expiry:?}");
             // Its fee's parts as recorded: the provider's 4, the hub's 1.
             assert_eq!((provider_fee, lock_fee), (4, 1));
         }

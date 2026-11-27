@@ -1150,7 +1150,8 @@ pub enum Details {
     /// why it failed, if it did, the notes locked back once the lock
     /// expires.
     /// Its fee's parts as recorded: the provider's, and the hub's on the
-    /// lock, 0 until the lock is made.
+    /// lock, 0 until the lock is made. The block the wallet's lock expires
+    /// at, once made: should the move fail, its notes come back then.
     Swap {
         from: String,
         to: String,
@@ -1160,6 +1161,7 @@ pub enum Details {
         failure: Option<String>,
         provider_fee: u64,
         lock_fee: u64,
+        expiry: Option<u32>,
     },
     /// Notes at `hub` paid out to `address`, on Bitcoin, through
     /// `provider`: the transaction of its coin, once the wallet found it,

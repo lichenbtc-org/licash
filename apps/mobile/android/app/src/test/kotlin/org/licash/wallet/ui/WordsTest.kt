@@ -160,6 +160,25 @@ class WordsTest {
     }
 
     @Test
+    fun a_timelock_says_its_block_when_it_comes_and_how_long_until_then() {
+        val zone = java.time.ZoneId.of("UTC")
+        val us = java.util.Locale.US
+        // 2026-11-15 12:00 UTC.
+        val now = 1_794_744_000L
+        fun said(height: UInt, tip: Int, secs: UInt = 600u) = atBlock(height, tip, secs, now, zone, us).replace('\u202f', ' ')
+        // 144 blocks of 10 minutes: a day from now.
+        assertEquals("Block 900,144 · about Nov 16, 12:00 PM · in 24 hours", said(900_144u, 900_000))
+        // Mutinynet's 30 s blocks: the same blocks, a twentieth of the time.
+        assertEquals("Block 900,144 · about Nov 15, 1:12 PM · in 1 hour", said(900_144u, 900_000, 30u))
+        // Into another year: said with it.
+        assertEquals("Block 908,000 · about Jan 10, 2027, 1:20 AM · in 56 days", said(908_000u, 900_000))
+        // Reached, or the tip not known yet.
+        assertEquals("Block 900,000 · passed", said(900_000u, 900_000))
+        assertEquals("Block 899,000 · passed", said(899_000u, 900_000))
+        assertEquals("Block 900,144", said(900_144u, 0))
+    }
+
+    @Test
     fun paying_through_a_provider_says_how_long_its_sats_may_wait() {
         assertEquals(
             "If the provider declines or fails the payment, your sats come back by themselves, in about 33 hours.",
