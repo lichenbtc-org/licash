@@ -587,6 +587,82 @@ async fn a_claim_reveals_the_preimage_only_well_before_expiry() {
     assert_eq!(bob.claim(HUB, &lock.id, &PREIMAGE).await.unwrap().amount, 4);
 }
 
+/// The notes a settled lock issues, shown with their evidence cut short
+/// or with a false proof of their denomination's key, are taken by
+/// neither payee nor payer: nothing is kept, the lock stands as it was,
+/// and asked again for the hub's true issuances each takes its own, as
+/// on a lock never tampered with.
+#[tokio::test]
+async fn a_locks_issuances_with_missing_or_false_evidence_are_never_taken() {
+    let changes: [Option<net::Tamper>; 3] =
+        [None, Some(net::evidence_missing), Some(net::evidence_false)];
+    for change in changes {
+        let (net, alice, bob) = parties().await;
+        let tamper = |path| {
+            if let Some(change) = change {
+                net.fail(path, Fault::Tampered(change));
+            }
+        };
+        let paid = alice
+            .lock(HUB, &bob.address(), 10, hash(), None)
+            .await
+            .unwrap();
+        tamper(licash_api::SETTLE);
+        let claimed = bob.claim(HUB, &paid.id, &PREIMAGE).await;
+        if change.is_some() {
+            assert!(
+                matches!(claimed, Err(Error::Unavailable { .. })),
+                "{claimed:?}"
+            );
+            assert_eq!(bob.receipts().unwrap(), []);
+            assert_eq!(bob.notes().unwrap(), []);
+            assert_eq!(
+                bob.claim(HUB, &paid.id, &PREIMAGE).await.unwrap().amount,
+                10
+            );
+        } else {
+            assert_eq!(claimed.unwrap().amount, 10);
+        }
+        assert_eq!(available(&bob), (10, 0));
+        // Her change, of the same issuances.
+        tamper(licash_api::SETTLE);
+        let followed = alice.follow_lock(&paid.id).await;
+        if change.is_some() {
+            assert!(
+                matches!(&followed, Err(Error::Pending { reason, .. }) if reason.contains("unavailable")),
+                "{followed:?}"
+            );
+            assert_eq!(alice.locks().unwrap()[0].state, LockState::Locked);
+            assert_eq!(available(&alice), (0, 64));
+        }
+        let followed = alice.follow_lock(&paid.id).await.unwrap();
+        assert_eq!(followed.state, LockState::Paid(PREIMAGE));
+        assert_eq!(available(&alice), (52, 0));
+
+        // A refund, of a lock never paid.
+        let refunded = alice
+            .lock(HUB, &bob.address(), 10, hash(), Some(8))
+            .await
+            .unwrap();
+        net.mine(HUB, 6, None);
+        tamper(licash_api::REFUND);
+        let followed = alice.follow_lock(&refunded.id).await;
+        if change.is_some() {
+            assert!(
+                matches!(&followed, Err(Error::Pending { reason, .. }) if reason.contains("unavailable")),
+                "{followed:?}"
+            );
+            let lock = alice.locks().unwrap();
+            let lock = lock.iter().find(|l| l.id == refunded.id).unwrap();
+            assert_eq!(lock.state, LockState::Locked);
+            assert_eq!(available(&alice), (20, 32));
+        }
+        let followed = alice.follow_lock(&refunded.id).await.unwrap();
+        assert_eq!(followed.state, LockState::Refunded);
+        assert_eq!(available(&alice), (50, 0));
+    }
+}
+
 #[tokio::test]
 async fn a_lock_its_hub_refuses_is_given_up() {
     let (net, alice, bob) = parties().await;

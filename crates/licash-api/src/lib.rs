@@ -394,6 +394,12 @@ impl Info {
     /// key it announces itself under on Nostr and its keysets, in order. A
     /// payer knowing a hub by its address only tells by it the hub's
     /// keysets from those another server says under the same address.
+    ///
+    /// It authenticates which keysets are the hub's, not that the hub
+    /// holds their keys or uses no other: that each note is issued under
+    /// its denomination's key is proved by each grant and issuance itself
+    /// (their seal and DLEQ proofs), which wallets verify before they sign
+    /// or keep anything.
     pub fn identity(&self, network: ChainProfile) -> Result<[u8; 32], Problem> {
         let (named, nostr) = match &self.nostr {
             Some(key) => {

@@ -364,6 +364,71 @@ async fn a_hub_that_shows_no_proof_of_a_spend_drops_nothing() {
     assert_eq!(copy.check().await.unwrap().dropped, 64);
 }
 
+/// An offer whose issuance evidence is cut short, or whose proof that its
+/// denomination's key seals an output is false, is never signed: the send
+/// stays offered, its notes held and none spent, and resumed against the
+/// hub's true offer it finishes as one never tampered with.
+#[tokio::test]
+async fn an_offer_with_missing_or_false_issuance_evidence_is_never_signed() {
+    // Each refused for its own reason: undecodable, or a proof that fails.
+    let changes: [Option<(net::Tamper, &str)>; 3] = [
+        None,
+        Some((net::evidence_missing, "exceeds its bytes")),
+        Some((net::evidence_false, "its offer")),
+    ];
+    for change in changes {
+        let net = network();
+        let (alice, bob) = (party(&net, 1).await, party(&net, 2).await);
+        alice.receive(&net.pay(HUB, &alice.address(), 64)).unwrap();
+        let Some((change, why)) = change else {
+            let paid = alice.send(HUB, &bob.address(), 10).await.unwrap();
+            assert_eq!(bob.receive(&paid.payment).unwrap().amount, 10);
+            assert_eq!(available(&alice), (52, 0));
+            continue;
+        };
+        net.fail(OFFER, Fault::Tampered(change));
+        let sent = alice.send(HUB, &bob.address(), 10).await;
+        let Err(Error::Pending { id, reason }) = sent else {
+            panic!("signed for a tampered offer: {sent:?}");
+        };
+        assert!(reason.contains(why), "{reason}");
+        assert_eq!(alice.sends().unwrap()[0].state, State::Offered);
+        assert_eq!(available(&alice), (0, 64));
+        assert!(matches!(alice.payment(&id), Err(Error::Pending { .. })));
+        let resumed = alice.resume().await.unwrap();
+        assert_eq!(resumed.paid[0].id, id);
+        assert_eq!(bob.receive(&resumed.paid[0].payment).unwrap().amount, 10);
+        assert_eq!(available(&alice), (52, 0));
+    }
+}
+
+/// A payment whose unlock or signed release is cut short, or whose unlock
+/// is not its grant's, is received as nothing: no receipt and no note,
+/// and the payment as made is received in full after.
+#[tokio::test]
+async fn a_payment_with_missing_or_false_evidence_is_received_as_nothing() {
+    let net = network();
+    let (alice, bob) = (party(&net, 1).await, party(&net, 2).await);
+    alice.receive(&net.pay(HUB, &alice.address(), 64)).unwrap();
+    let payment = alice.send(HUB, &bob.address(), 10).await.unwrap().payment;
+    let mut unlock_cut = payment.clone();
+    unlock_cut.unlock.0.pop();
+    let mut unlock_false = payment.clone();
+    unlock_false.unlock.0[31] ^= 1;
+    let mut signed_cut = payment.clone();
+    signed_cut.release.signed.0.pop();
+    for changed in [unlock_cut, unlock_false, signed_cut] {
+        assert!(
+            matches!(bob.receive(&changed), Err(Error::Invalid(_))),
+            "{changed:?}"
+        );
+        assert_eq!(bob.receipts().unwrap(), []);
+        assert_eq!(bob.notes().unwrap(), []);
+    }
+    assert_eq!(bob.receive(&payment).unwrap().amount, 10);
+    assert_eq!(available(&bob), (10, 0));
+}
+
 #[tokio::test]
 async fn a_signed_send_refused_otherwise_stays_pending_and_finishes() {
     let net = network();

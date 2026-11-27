@@ -46,6 +46,46 @@ pub enum Fault {
     /// An inquiry the hub answers with no evidence of any note, as a hub
     /// that says nothing and shows nothing would.
     Hushed,
+    /// The hub serves it, and its answer reaches the wallet changed so, as
+    /// a hub that shows evidence missing or false would.
+    #[allow(dead_code)]
+    Tampered(Tamper),
+}
+
+/// How [`Fault::Tampered`] changes an answer.
+pub type Tamper = fn(&[u8]) -> Vec<u8>;
+
+/// An answer of an offer (its grant) or of issuances (the first of them)
+/// with its evidence changed by `change`.
+fn evidence_changed(body: &[u8], change: fn(&mut Vec<u8>)) -> Vec<u8> {
+    let mut answer: serde_json::Value = serde_json::from_slice(body).unwrap();
+    let field = match answer.get_mut("grant") {
+        Some(grant) => grant,
+        None => &mut answer["issuances"][0],
+    };
+    let mut bytes = hex::decode(field.as_str().unwrap()).unwrap();
+    change(&mut bytes);
+    *field = hex::encode(bytes).into();
+    serde_json::to_vec(&answer).unwrap()
+}
+
+/// An answer whose evidence is cut short by a byte ([`Fault::Tampered`]).
+#[allow(dead_code)]
+pub fn evidence_missing(body: &[u8]) -> Vec<u8> {
+    evidence_changed(body, |bytes| {
+        bytes.pop();
+    })
+}
+
+/// An answer whose last proof is false: a bit flipped in its last
+/// response scalar, which both a grant's seal and an issuance's DLEQ end
+/// with, before the nonce commitment's two points ([`Fault::Tampered`]).
+#[allow(dead_code)]
+pub fn evidence_false(body: &[u8]) -> Vec<u8> {
+    evidence_changed(body, |bytes| {
+        let at = bytes.len() - 2 * 33 - 1;
+        bytes[at] ^= 1;
+    })
 }
 
 /// What a hub serving a lock's state leaves out of it, or lies about.
@@ -312,7 +352,13 @@ impl Net {
             _ => {}
         }
         Ok(match answer {
-            Ok(body) => Response { status: 200, body },
+            Ok(body) => match fault {
+                Some(Fault::Tampered(change)) => Response {
+                    status: 200,
+                    body: change(&body),
+                },
+                _ => Response { status: 200, body },
+            },
             Err(problem) => Response {
                 status: problem.code.status(),
                 body: serde_json::to_vec(&problem).unwrap(),
