@@ -15,9 +15,12 @@ use bitcoin::{
     OutPoint, Transaction, TxIn, TxOut, Txid,
 };
 use licash::spend::{lock_hash, ChainProfile};
-use licash_api::{swaps::DepositRequest, Code, Fee, Funding, Hex, ReceiveState};
+use licash_api::{
+    swaps::{self, DepositRequest},
+    Code, Fee, Funding, Hex, Problem, ReceiveState,
+};
 use licash_swaps::{Chain, Config, DepositState, DepositTerms, Notice, Provider, RECEIVE_BLOCKS};
-use licash_wallet::{Blocks, Wallet};
+use licash_wallet::{Blocks, Response, Transport, Wallet};
 use net::{Fault, Link, Net, View};
 
 const A: &str = "http://a.test";
@@ -141,7 +144,7 @@ fn refund_key() -> [u8; 32] {
 struct Eco {
     net: Arc<Net>,
     _dir: tempfile::TempDir,
-    provider: Provider<Link>,
+    provider: Arc<Provider<Link>>,
     payee: Wallet<Link>,
     pool: Pool,
 }
@@ -168,6 +171,7 @@ impl Eco {
             .unwrap()
             .take_deposits(terms)
             .unwrap();
+        let provider = Arc::new(provider);
         let payee = Wallet::create(
             &dir.path().join("payee.sqlite"),
             &[0xd0; 32],
@@ -592,5 +596,263 @@ impl Eco {
     /// A script of the payee's on Bitcoin.
     fn payee_script(&self) -> bitcoin::ScriptBuf {
         self.payee.fallback_address().unwrap().script_pubkey()
+    }
+}
+
+/// Where a wallet reaches the provider.
+const PROVIDER: &str = "http://provider.test";
+
+/// A wallet's way to the hubs and the provider, which follows A's chain.
+#[derive(Clone)]
+struct Client {
+    net: Arc<Net>,
+    provider: Arc<Provider<Link>>,
+    pool: Pool,
+}
+
+impl Client {
+    async fn serve(&self, path: &str, body: Option<Vec<u8>>) -> Result<Vec<u8>, Problem> {
+        let provider = &self.provider;
+        let json = |v: &dyn erased::Json| v.json();
+        match (path, body) {
+            (swaps::SWAPS_INFO, None) => Ok(json(&provider.info().unwrap())),
+            (swaps::DEPOSITS, Some(body)) => {
+                let request: DepositRequest = serde_json::from_slice(&body).unwrap();
+                Ok(json(&provider.deposit(&request, None, &self.pool).await?))
+            }
+            (path, body) => {
+                let hash = licash_api::hash_of(&path[swaps::DEPOSITS.len() + 1..])?;
+                if let Some(body) = body {
+                    let funding: Funding = serde_json::from_slice(&body).unwrap();
+                    let status = provider.deposit_funded(&hash, &funding, &self.pool);
+                    return Ok(json(&status.await?));
+                }
+                match provider.deposit_status(&hash).unwrap() {
+                    Some(status) => Ok(json(&status)),
+                    None => Err(Problem::new(Code::UnknownLock, "no deposit")),
+                }
+            }
+        }
+    }
+}
+
+mod erased {
+    pub trait Json {
+        fn json(&self) -> Vec<u8>;
+    }
+
+    impl<T: serde::Serialize> Json for T {
+        fn json(&self) -> Vec<u8> {
+            serde_json::to_vec(self).unwrap()
+        }
+    }
+}
+
+impl Transport for Client {
+    fn request(
+        &self,
+        url: &str,
+        body: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = Result<Response, String>> + Send {
+        let (client, url) = (self.clone(), url.to_owned());
+        async move {
+            let Some(path) = url.strip_prefix(PROVIDER) else {
+                return client.net.serve(&url, body);
+            };
+            Ok(match client.serve(path, body).await {
+                Ok(body) => Response { status: 200, body },
+                Err(problem) => Response {
+                    status: problem.code.status(),
+                    body: serde_json::to_vec(&problem).unwrap(),
+                },
+            })
+        }
+    }
+}
+
+impl Eco {
+    /// A wallet at A reaching the provider at [`PROVIDER`].
+    async fn client(&self, seed: u8) -> Wallet<Client> {
+        let client = Client {
+            net: self.net.clone(),
+            provider: self.provider.clone(),
+            pool: self.pool.clone(),
+        };
+        let wallet = Wallet::create(
+            &self._dir.path().join(format!("client-{seed}.sqlite")),
+            &[seed; 32],
+            ChainProfile::Core30DefaultRegtest,
+            client,
+        )
+        .unwrap();
+        wallet.add_hub(A).await.unwrap();
+        wallet
+    }
+
+    /// A coin paying `value` to `address`, confirmed now.
+    fn pay_to(&self, address: &str, value: u64) -> Txid {
+        let address: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
+            address.parse().unwrap();
+        let tx = made_up(TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: address.assume_checked().script_pubkey(),
+        });
+        let txid = tx.compute_txid();
+        self.net.confirm(A, vec![tx]);
+        txid
+    }
+}
+
+#[tokio::test]
+async fn a_wallet_deposits_on_bitcoin_through_a_provider_and_claims_its_notes() {
+    let eco = Eco::new(TERMS).await;
+    let wallet = eco.client(0x61).await;
+    let offer = wallet.deposit_offer(PROVIDER, A).await.unwrap();
+    // What it holds at A, but A's fee on its lock.
+    assert_eq!((offer.terms.min, offer.max), (100, HELD - 1));
+    let refused = wallet.deposit_through(PROVIDER, A, 99).await;
+    assert!(matches!(refused, Err(licash_wallet::Error::Invalid(_))));
+    let tip = eco.height();
+    let deposit = wallet.deposit_through(PROVIDER, A, 1_000).await.unwrap();
+    assert_eq!(deposit.provider.as_deref(), Some(PROVIDER));
+    assert_eq!(deposit.state, licash_wallet::DepositState::Open);
+    let terms = deposit.terms.clone().unwrap();
+    assert_eq!((terms.pays, terms.timeout), (1_201, tip + TIMEOUT));
+    let hash: [u8; 32] = hex::decode(&deposit.hash).unwrap().try_into().unwrap();
+    // A coin of another amount is no payment of it.
+    eco.pay_to(&terms.address, terms.pays - 1);
+    eco.mine(TERMS.depth).await;
+    let (followed, _) = wallet.follow_deposits_through(&eco.pool).await.unwrap();
+    assert_eq!(followed.len(), 1);
+    assert_eq!(followed[0].funding, None);
+    // Paid exactly: told of once deep enough, then locked and claimed.
+    let txid = eco.pay_to(&terms.address, terms.pays);
+    let paid_at = eco.height();
+    let (followed, _) = wallet.follow_deposits_through(&eco.pool).await.unwrap();
+    assert_eq!(followed[0].funding, None);
+    assert_eq!(eco.state(&hash), DepositState::Open);
+    eco.mine(TERMS.depth - 1).await;
+    let (followed, pending) = wallet.follow_deposits_through(&eco.pool).await.unwrap();
+    assert!(pending.is_empty(), "{pending:?}");
+    let deposit = &followed[0];
+    assert_eq!(deposit.state, licash_wallet::DepositState::Received);
+    assert_eq!(deposit.funding, Some((OutPoint::new(txid, 0), paid_at)));
+    let balance = wallet.balance().unwrap();
+    assert_eq!(
+        balance.iter().find(|b| b.hub == A).unwrap().available,
+        1_000
+    );
+    // The provider claims the coin with the preimage the claim showed.
+    eco.follow().await;
+    assert_eq!(eco.state(&hash), DepositState::Paid);
+    assert_eq!(eco.pool.waiting().len(), 1);
+    // Done: nothing more is followed.
+    let (followed, _) = wallet.follow_deposits_through(&eco.pool).await.unwrap();
+    assert!(followed.is_empty());
+    assert!(wallet.deposits_to_refund(terms.timeout).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_deposit_never_paid_through_a_provider_is_canceled_and_a_late_payment_refunded() {
+    let eco = Eco::new(TERMS).await;
+    let wallet = eco.client(0x61).await;
+    let deposit = wallet.deposit_through(PROVIDER, A, 1_000).await.unwrap();
+    let terms = deposit.terms.clone().unwrap();
+    let hash: [u8; 32] = hex::decode(&deposit.hash).unwrap().try_into().unwrap();
+    // Paid after its window: never told of, and given up by the provider.
+    eco.mine(TERMS.window + 1).await;
+    let txid = eco.pay_to(&terms.address, terms.pays);
+    eco.mine(TERMS.depth + RECEIVE_BLOCKS).await;
+    eco.follow().await;
+    assert_eq!(eco.state(&hash), DepositState::Canceled);
+    let (followed, _) = wallet.follow_deposits_through(&eco.pool).await.unwrap();
+    assert!(matches!(
+        followed[0].state,
+        licash_wallet::DepositState::Canceled(_)
+    ));
+    assert!(wallet.locks().unwrap().is_empty());
+    // Its payer takes the coin back after its timeout.
+    assert!(wallet
+        .deposits_to_refund(terms.timeout - 1)
+        .unwrap()
+        .is_empty());
+    let due = wallet.deposits_to_refund(terms.timeout).unwrap();
+    assert_eq!(due.len(), 1);
+    let to = wallet.fallback_address().unwrap().script_pubkey();
+    let refund = wallet
+        .refund_deposit(
+            &deposit.hash,
+            OutPoint::new(txid, 0),
+            Amount::from_sat(terms.pays),
+            to,
+            FeeRate::from_sat_per_vb_u32(1),
+        )
+        .unwrap();
+    assert_eq!(refund.lock_time.to_consensus_u32(), terms.timeout);
+    assert!(matches!(
+        wallet.deposit_of(&deposit.hash).unwrap().state,
+        licash_wallet::DepositState::Refunded(_)
+    ));
+}
+
+#[tokio::test]
+async fn terms_a_provider_answers_for_another_payment_are_never_paid() {
+    let eco = Eco::new(TERMS).await;
+    let wallet = eco.client(0x61).await;
+    // The provider asks more for its claim's miners than it says.
+    let mut info = eco.provider.info().unwrap();
+    info.deposits.as_mut().unwrap().miner = 100;
+    let lying = Wallet::create(
+        &eco._dir.path().join("lied-to.sqlite"),
+        &[0x62; 32],
+        ChainProfile::Core30DefaultRegtest,
+        Lying {
+            client: wallet_client(&eco),
+            info,
+        },
+    )
+    .unwrap();
+    lying.add_hub(A).await.unwrap();
+    let deposit = lying.deposit_through(PROVIDER, A, 1_000).await.unwrap();
+    match &deposit.state {
+        licash_wallet::DepositState::Canceled(why) => {
+            assert!(why.contains("of 1201 for 1101"), "{why}")
+        }
+        state => panic!("{state:?}"),
+    }
+    assert!(deposit.terms.is_none());
+    drop(wallet);
+}
+
+fn wallet_client(eco: &Eco) -> Client {
+    Client {
+        net: eco.net.clone(),
+        provider: eco.provider.clone(),
+        pool: eco.pool.clone(),
+    }
+}
+
+/// A provider saying `info` of itself, answering as [`Client`] otherwise.
+#[derive(Clone)]
+struct Lying {
+    client: Client,
+    info: licash_api::swaps::Info,
+}
+
+impl Transport for Lying {
+    fn request(
+        &self,
+        url: &str,
+        body: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = Result<Response, String>> + Send {
+        let this = self.clone();
+        let url = url.to_owned();
+        async move {
+            if url == format!("{PROVIDER}{}", swaps::SWAPS_INFO) {
+                let body = serde_json::to_vec(&this.info).unwrap();
+                return Ok(Response { status: 200, body });
+            }
+            this.client.request(&url, body).await
+        }
     }
 }

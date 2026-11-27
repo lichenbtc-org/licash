@@ -237,7 +237,9 @@ impl Deposit {
             refund: key(&self.refund)?,
             timeout: self.timeout,
             wait: None,
-            sized: true,
+            // As a hub's deposits: the provider claims with the preimage
+            // the wallet's claim of its lock showed, whatever its size.
+            sized: false,
         })
     }
 

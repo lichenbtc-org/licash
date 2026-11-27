@@ -33,6 +33,10 @@
 //! at most one contract that confirms, as each is spent whole in its
 //! funding: two contracts' closes never pay one deposit, whatever a hub
 //! hides from a wallet restored from its seed.
+//!
+//! A deposit may be asked of a swap provider instead, which pays it on
+//! with a lock of its own notes at the hub (`deposits_via`): recorded
+//! alike, its secrets drawn at random.
 
 use bitcoin::{
     hashes::Hash,
@@ -54,7 +58,7 @@ use crate::{each_at_most, hub_url, invalid, now, sql, unavailable, Error, Transp
 
 /// Blocks a hub's tip may move between its info and its answer: the
 /// timeout it answers may be that much later than its info promises.
-const TIP_MARGIN: u32 = 6;
+pub(crate) const TIP_MARGIN: u32 = 6;
 
 /// Numbers in a row a hub knows no deposit under, after which a wallet
 /// looking for its deposits there stops: asks that never reached it
@@ -196,6 +200,9 @@ pub struct Deposit {
     /// Whether it returns a contract's reserve, which its payer takes back
     /// [`CLOSE_WAIT`] blocks after its payment, not at a height.
     pub close: bool,
+    /// The swap provider it was asked of, in place of its hub
+    /// ([`Wallet::deposit_through`]).
+    pub provider: Option<String>,
 }
 
 impl Deposit {
@@ -273,7 +280,7 @@ fn closes(body: &str) -> bool {
     serde_json::from_str::<licash_api::Deposit>(body).is_ok_and(|asked| asked.close.is_some())
 }
 
-fn hash_id(hash: &str) -> Result<[u8; 32], Error> {
+pub(crate) fn hash_id(hash: &str) -> Result<[u8; 32], Error> {
     let mut bytes = [0; 32];
     hex::decode_to_slice(hash, &mut bytes)
         .map_err(|_| Error::Invalid(format!("not a deposit's hash: {hash}")))?;
@@ -896,7 +903,7 @@ impl Asked {
 
 /// Record `terms`, checked to be those of `htlc`, as the hub's answer to
 /// the deposit of `hash`.
-fn keep_terms(
+pub(crate) fn keep_terms(
     tx: &rusqlite::Transaction,
     hash: &[u8; 32],
     htlc: &Htlc,
@@ -972,6 +979,12 @@ impl<T: Transport> Wallet<T> {
         let key = x_only(&refund).serialize();
         if !open {
             return Ok(());
+        }
+        if let Some(via) = self.store.read(|c| crate::deposits_via::via(c, hash))? {
+            let asked = (preimage, &refund, (amount as u64, pays as u64));
+            return self
+                .advance_deposit_via(hash, (&url, &via), asked, &body, answered)
+                .await;
         }
         // What was asked, which a deposit answered need not read again: of a
         // body it cannot, it is no contract's close.
@@ -1162,7 +1175,7 @@ impl<T: Transport> Wallet<T> {
         Ok(htlc)
     }
 
-    fn cancel_deposit(&self, hash: &[u8; 32], reason: &str) -> Result<(), Error> {
+    pub(crate) fn cancel_deposit(&self, hash: &[u8; 32], reason: &str) -> Result<(), Error> {
         tracing::warn!(hash = %hex::encode(hash), reason, "deposit canceled");
         self.store.write(|tx| {
             tx.execute(
@@ -1279,7 +1292,8 @@ impl<T: Transport> Wallet<T> {
     pub fn deposits(&self) -> Result<Vec<Deposit>, Error> {
         self.store.read(|c| {
             let mut stmt = c.prepare(&format!(
-                "{DEPOSITS} ORDER BY d.created_at DESC, d.rowid DESC"
+                "{} ORDER BY d.created_at DESC, d.rowid DESC",
+                deposits(c)?
             ))?;
             let rows = stmt.query_map([], deposit_of)?;
             Ok(rows.collect::<Result<_, _>>()?)
@@ -1291,9 +1305,10 @@ impl<T: Transport> Wallet<T> {
         self.deposit_record(&hash_id(hash)?)
     }
 
-    fn deposit_record(&self, hash: &[u8; 32]) -> Result<Deposit, Error> {
+    pub(crate) fn deposit_record(&self, hash: &[u8; 32]) -> Result<Deposit, Error> {
         self.store.read(|c| {
-            c.query_row(&format!("{DEPOSITS} WHERE d.hash = ?1"), [hash], deposit_of)
+            let query = format!("{} WHERE d.hash = ?1", deposits(c)?);
+            c.query_row(&query, [hash], deposit_of)
                 .optional()?
                 .ok_or_else(|| Error::UnknownPayment(hex::encode(hash)))
         })
@@ -1313,12 +1328,22 @@ impl<T: Transport> Wallet<T> {
     }
 }
 
-const DEPOSITS: &str = "SELECT d.hash, r.url, d.amount, t.address, t.timeout_height, d.pays,
-    t.fund_by_height, f.txid, f.vout, f.height, d.done_at IS NOT NULL, d.canceled, d.refund,
-    d.created_at, d.lock, d.body
-    FROM deposits d JOIN reach r ON r.hub = d.hub
-    LEFT JOIN deposit_terms t ON t.hash = d.hash
-    LEFT JOIN deposit_fundings f ON f.hash = d.hash";
+/// The query of the deposits, read by [`deposit_of`]: with the provider
+/// each was asked of, in a file whose wallet asked any of one.
+fn deposits(c: &rusqlite::Connection) -> Result<String, Error> {
+    let provider = match crate::deposits_via::kept(c)? {
+        true => "(SELECT p.provider FROM deposit_providers p WHERE p.hash = d.hash)",
+        false => "NULL",
+    };
+    Ok(format!(
+        "SELECT d.hash, r.url, d.amount, t.address, t.timeout_height, d.pays,
+            t.fund_by_height, f.txid, f.vout, f.height, d.done_at IS NOT NULL, d.canceled,
+            d.refund, d.created_at, d.lock, d.body, {provider}
+         FROM deposits d JOIN reach r ON r.hub = d.hub
+         LEFT JOIN deposit_terms t ON t.hash = d.hash
+         LEFT JOIN deposit_fundings f ON f.hash = d.hash"
+    ))
+}
 
 fn deposit_of(r: &Row<'_>) -> rusqlite::Result<Deposit> {
     let terms = match (r.get(3)?, r.get(4)?, r.get(6)?) {
@@ -1369,6 +1394,7 @@ fn deposit_of(r: &Row<'_>) -> rusqlite::Result<Deposit> {
         state,
         created_at: r.get(13)?,
         close: closes(&r.get::<_, String>(15)?),
+        provider: r.get(16)?,
     })
 }
 
