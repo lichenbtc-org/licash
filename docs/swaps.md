@@ -169,8 +169,11 @@ hub the provider holds notes at, and not pay, each holding its place for
 about 11 minutes, until its invoice expires and is canceled. Past them, new
 donations are refused, not those under way. An unpaid one holds none of
 the provider's notes, only its place, and one source (a client's address,
-or its Tor circuit over the onion service) holds at most 8 unpaid at once,
-leaving the rest to paying donors. A provider with donations under way refuses to start without `--lnurl-url`
+or its Tor circuit over the onion service) holds at most 8 unpaid at once.
+That only slows a client with many addresses or circuits, which can still
+take every place for free: to keep places for paying donors, also limit
+how often one client may call the callback, at a reverse proxy in front of
+it. A provider with donations under way refuses to start without `--lnurl-url`
 and `--lnd`. The provider must stay up while donations are under way: down
 past an HTLC's expiry, it may have paid the payee and lose the donation.
 
