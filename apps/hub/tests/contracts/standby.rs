@@ -102,3 +102,204 @@ async fn a_standby_without_the_seed_meets_a_stale_claim_as_its_hub_would() -> Re
     eprintln!("a standby without the seed: a challenged claim of 131071 paid {received}, alerts {alerts:?}");
     Ok(())
 }
+
+/// The standby in `copy` as its entrypoint starts it, the hub's data in
+/// `at`: its ledger restored from the hub's newest copy (and marked
+/// restored, as the entrypoint does), unless it acted on its own, then
+/// opened as a standby, deferring its steps.
+async fn standby_started(
+    rt: &Regtest,
+    at: &Path,
+    copy: &Path,
+    keys: &Path,
+) -> Result<(Arc<Openings>, Told)> {
+    if !copy.join(licash_contracts::hub::STANDBY_ACTED).exists() {
+        if copy.exists() {
+            std::fs::remove_dir_all(copy)?;
+        }
+        backed_up(at, copy, true)?;
+        std::fs::remove_file(copy.join("seed"))?;
+        std::fs::write(copy.join(licash_contracts::hub::STANDBY_RESTORED), "")?;
+    }
+    let ledger = Hub::open_standby(keys, &copy.join("hub.sqlite"), Policy::default())?;
+    let standby = copy_answering(rt, copy, Arc::new(ledger)).await?;
+    let told = told(&standby);
+    standby.defer_as_standby();
+    Ok((standby, told))
+}
+
+/// What [`beside`] saw: her claim's end, how often the standby was
+/// restored, whether it marked itself acted, the hub's and the standby's
+/// data, and the standby's alerts.
+struct Beside {
+    done: licash_contracts::holder::recovery::Recovery,
+    restarts: usize,
+    acted: bool,
+    at: std::path::PathBuf,
+    copy: std::path::PathBuf,
+    alerts: Vec<String>,
+    _dir: tempfile::TempDir,
+}
+
+/// Her stale claim (of `seed`) met by a hub with a standby beside it,
+/// restored from the hub's newest copy each time it stops for one, until
+/// she is paid. If `lost`, the hub's machine is lost once it asserted (as
+/// she contests, `Doubting`) and plays no more; while it plays, the
+/// standby never marks itself acted.
+async fn beside(seed: [u8; 32], lost: bool) -> Result<Beside> {
+    use licash_contracts::holder::recovery::{self, Stage};
+
+    let Stale {
+        rt,
+        _dir: dir,
+        hub: _,
+        openings: master,
+        chain,
+        wallet,
+        mine,
+        rate,
+    } = stale_claim(seed).await?;
+    let (at, copy) = (dir.path().join("hub"), dir.path().join("standby"));
+    let keys = dir.path().join("standby.json");
+    licash_hub::write_standby_keys(&at.join("seed"), &at.join("hub.sqlite"), &keys)?;
+    let acted = copy.join(licash_contracts::hub::STANDBY_ACTED);
+    master.refuse_evidence();
+    let told_master = told(&master);
+    let _doubting = lost.then(Doubting::of);
+    let mut master = Some(master);
+    let (mut standby, mut told_standby) = standby_started(&rt, &at, &copy, &keys).await?;
+    let (mut restarts, mut done) = (0, None);
+    for _ in 0..800 {
+        if let Some(master) = &master {
+            let round = master.answer_requests().await?;
+            ensure!(
+                round.failed == 0,
+                "the hub: {round:?} {:?}",
+                told_master.lock().unwrap()
+            );
+        }
+        let round = standby.answer_requests().await?;
+        ensure!(
+            round.failed == 0,
+            "the standby: {round:?} {:?}",
+            told_standby.lock().unwrap()
+        );
+        if standby.stale() {
+            restarts += 1;
+            drop(standby);
+            (standby, told_standby) = standby_started(&rt, &at, &copy, &keys).await?;
+        }
+        rt.mine(1)?;
+        let r =
+            recovery::advance(&wallet, &chain, &mine.join("wallet.sqlite"), rate).await?[0].clone();
+        ensure!(r.stage != Stage::Lost, "{r:?}");
+        if master.is_some() {
+            ensure!(
+                !acted.exists(),
+                "the standby acted beside its live hub: {r:?} {:?}",
+                told_standby.lock().unwrap()
+            );
+        }
+        if lost && r.assertion.is_some() && master.is_some() {
+            // Its machine lost: it plays no more.
+            master = None;
+        }
+        if r.stage == Stage::Done {
+            done = Some(r);
+            break;
+        }
+    }
+    let done = done.context("never paid")?;
+    ensure!(
+        !lost || master.is_none(),
+        "the hub never asserted: {done:?}"
+    );
+    // Her contract's ending steps (its close, sweeps) are past them too.
+    if let Some(master) = &master {
+        for _ in 0..40 {
+            master.answer_requests().await?;
+            standby.answer_requests().await?;
+            if standby.stale() {
+                restarts += 1;
+                drop(standby);
+                (standby, told_standby) = standby_started(&rt, &at, &copy, &keys).await?;
+            }
+            rt.mine(1)?;
+            ensure!(!acted.exists(), "the standby acted at its end: {done:?}");
+        }
+    }
+    let alerts = told_standby.lock().unwrap().clone();
+    Ok(Beside {
+        done,
+        restarts,
+        acted: acted.exists(),
+        at,
+        copy,
+        alerts,
+        _dir: dir,
+    })
+}
+
+/// A standby runs beside its hub. Through her stale claim's response,
+/// contest and assertion, the live hub takes every step and the standby
+/// none: it never marks itself acted. The hub's machine lost once it
+/// asserted, the standby answers her challenge, halfway through the
+/// blocks to answer in, on a ledger restored after the hub's last act:
+/// marked acted first, it signed no response of its own, and she is paid
+/// by its answer, not by a timeout.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_standby_beside_its_live_hub_takes_no_step_and_answers_once_it_is_lost() -> Result<()> {
+    let _witnessed = Witnessed::by(2);
+    let b = beside([48; 32], true).await?;
+    let done = &b.done;
+    ensure!(b.restarts > 0, "the standby never stopped for a newer copy");
+    ensure!(b.acted, "the standby answered unmarked");
+    ensure!(
+        done.assertion.is_some() && done.challenge.is_some(),
+        "{done:?}"
+    );
+    ensure!(done.payout.is_some() && done.timeout.is_none(), "{done:?}");
+    // The one response signed is the hub's.
+    let request = done.request.context("no request")?;
+    let ours = responses_to(&b.at, &request)?;
+    ensure!(
+        ours.len() == 1,
+        "{} responses signed by the hub",
+        ours.len()
+    );
+    ensure!(
+        responses_to(&b.copy, &request)? == ours,
+        "the standby signed another response"
+    );
+    ensure!(
+        b.alerts
+            .iter()
+            .all(|m| !m.contains("disagree") && !m.contains("no longer hold")),
+        "{:?}",
+        b.alerts
+    );
+    eprintln!(
+        "a standby beside its hub: restored {} times, alerts {:?}",
+        b.restarts, b.alerts
+    );
+    Ok(())
+}
+
+/// A standby beside a hub alive throughout her stale claim, which she
+/// leaves uncontested: whatever the hub's response discloses or not, it
+/// takes no step of its own to the claim's end and past it, never marked
+/// acted, as a live hub has taken each by its midpoint.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_standby_beside_a_hub_alive_throughout_never_acts() -> Result<()> {
+    let _witnessed = Witnessed::by(2);
+    let b = beside([49; 32], false).await?;
+    ensure!(!b.acted, "the standby marked itself acted: {:?}", b.alerts);
+    ensure!(b.done.challenge.is_none(), "{:?}", b.done);
+    eprintln!(
+        "a standby beside a live hub: restored {} times, alerts {:?}, {:?}",
+        b.restarts, b.alerts, b.done
+    );
+    Ok(())
+}
