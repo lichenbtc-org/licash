@@ -128,9 +128,12 @@ returns once settled. Revoking a connection ends it for good.
 
 The bridge answers a request at most 5 minutes behind or ahead of its own
 clock, and each request of a live connection once: it remembers what it
-answered for those 5 minutes, up to 65,536 requests, and answers none past
-that until older ones age out, rather than forgetting one that could be
-replayed. Requests of no live connection are answered with an error and
+answered for those 5 minutes, up to 1,024 requests of one account's
+connections and 65,536 in all, and answers none of that account's, or
+none at all, past that until older ones age out, rather than forgetting
+one that could be replayed. One account flooding the bridge thus stops
+only its own; on an open bridge, 64 accounts flooding together still fill
+it, which `--max-accounts` and `--registrations-per-hour` bound. Requests of no live connection are answered with an error and
 not remembered. It remembers them only while it runs, so it answers no
 request made before it started, which a run before may have answered: a
 client whose clock is behind may see its first requests after a restart

@@ -4,7 +4,7 @@
 //! methods it serves and both ciphers.
 
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
@@ -36,6 +36,12 @@ pub const METHODS: [Method; 6] = [
 /// it, those of live connections are not answered until older ones are
 /// past [`MAX_AGE`], rather than forgotten while they could be replayed.
 const REMEMBERED: usize = 65_536;
+
+/// The most requests of one account's connections remembered at once,
+/// about 3 a second for [`MAX_AGE`]: past it, that account's are not
+/// answered until older ones are past their age, so that one account's
+/// flood does not fill [`REMEMBERED`] for every other's.
+const SHARE: usize = 1_024;
 
 /// How much a request's time may be ahead of the bridge's, in seconds.
 const AHEAD: u64 = 300;
@@ -339,12 +345,15 @@ fn lookup(a: licash_api::bridge::Activity) -> LookupInvoiceResponse {
     }
 }
 
-/// The requests of live connections answered lately, by id: each until
-/// it is past [`MAX_AGE`], and so not answered again anyway.
+/// The requests of live connections answered lately, by id, with the
+/// account they are of: each until it is past [`MAX_AGE`], and so not
+/// answered again anyway.
 #[derive(Default)]
 struct Answered {
-    ids: HashSet<EventId>,
+    ids: HashMap<EventId, i64>,
     by_time: BTreeSet<(Timestamp, EventId)>,
+    /// How many of `ids` each account's are.
+    of: HashMap<i64, usize>,
 }
 
 /// The requests answered since the bridge was opened, kept across
@@ -364,16 +373,23 @@ impl Answering {
     }
 
     /// Note the request `id` of `created_at` answered `now`, of a live
-    /// connection if `live`: only those are remembered, as another's is
-    /// refused anyway.
-    fn admit(&self, id: EventId, created_at: Timestamp, now: Timestamp, live: bool) -> Admission {
+    /// connection of `account` if any: only those are remembered, as
+    /// another's is refused anyway.
+    fn admit(
+        &self,
+        id: EventId,
+        created_at: Timestamp,
+        now: Timestamp,
+        account: Option<i64>,
+    ) -> Admission {
         if created_at < self.since {
             return Admission::Before;
         }
-        if !live {
+        let Some(account) = account else {
             return Admission::First;
-        }
-        (self.answered.lock().unwrap_or_else(PoisonError::into_inner)).admit(id, created_at, now)
+        };
+        let mut answered = self.answered.lock().unwrap_or_else(PoisonError::into_inner);
+        answered.admit(id, account, created_at, now)
     }
 }
 
@@ -387,25 +403,46 @@ enum Admission {
     Again,
     /// [`REMEMBERED`] are kept: not answered, rather than one forgotten.
     Full,
+    /// [`SHARE`] of its account's are kept: not answered, as above.
+    Busy,
 }
 
 impl Answered {
-    /// Note the request `id` of `created_at` answered `now`.
-    fn admit(&mut self, id: EventId, created_at: Timestamp, now: Timestamp) -> Admission {
+    /// Note the request `id` of `account`'s, of `created_at`, answered
+    /// `now`.
+    fn admit(
+        &mut self,
+        id: EventId,
+        account: i64,
+        created_at: Timestamp,
+        now: Timestamp,
+    ) -> Admission {
         while let Some(&(at, old)) = self.by_time.first() {
             if at + MAX_AGE >= now {
                 break;
             }
             self.by_time.pop_first();
-            self.ids.remove(&old);
+            if let Some(of) = self.ids.remove(&old) {
+                if let Some(count) = self.of.get_mut(&of) {
+                    *count -= 1;
+                    if *count == 0 {
+                        self.of.remove(&of);
+                    }
+                }
+            }
         }
-        if self.ids.contains(&id) {
+        if self.ids.contains_key(&id) {
             return Admission::Again;
         }
         if self.ids.len() >= REMEMBERED {
             return Admission::Full;
         }
-        self.ids.insert(id);
+        let count = self.of.entry(account).or_default();
+        if *count >= SHARE {
+            return Admission::Busy;
+        }
+        *count += 1;
+        self.ids.insert(id, account);
         self.by_time.insert((created_at, id));
         Admission::First
     }
@@ -470,8 +507,11 @@ pub async fn run<T: Transport + 'static>(
         if !addressed(&bridge, &event, now) {
             continue;
         }
-        let live = bridge.link(&event.pubkey.to_bytes()).is_ok();
-        match (bridge.answering()).admit(event.id, event.created_at, now, live) {
+        let account = bridge
+            .link(&event.pubkey.to_bytes())
+            .ok()
+            .map(|l| l.account);
+        match (bridge.answering()).admit(event.id, event.created_at, now, account) {
             Admission::First => {}
             Admission::Again => continue,
             Admission::Before => {
@@ -480,6 +520,13 @@ pub async fn run<T: Transport + 'static>(
             }
             Admission::Full => {
                 tracing::warn!("{REMEMBERED} NWC requests answered lately: one not answered");
+                continue;
+            }
+            Admission::Busy => {
+                tracing::debug!(
+                    ?account,
+                    "{SHARE} NWC requests of an account answered lately: one not answered"
+                );
                 continue;
             }
         }
@@ -572,17 +619,17 @@ mod tests {
     fn a_request_is_answered_once_within_its_age() {
         let mut answered = Answered::default();
         let (at, now) = (Timestamp::from_secs(10_000), Timestamp::from_secs(10_100));
-        assert_eq!(answered.admit(id(1), at, now), Admission::First);
-        assert_eq!(answered.admit(id(1), at, now), Admission::Again);
+        assert_eq!(answered.admit(id(1), 1, at, now), Admission::First);
+        assert_eq!(answered.admit(id(1), 1, at, now), Admission::Again);
         // Kept as long as it is not too old to be answered.
         let last = at + MAX_AGE;
-        assert_eq!(answered.admit(id(1), at, last), Admission::Again);
+        assert_eq!(answered.admit(id(1), 1, at, last), Admission::Again);
         // Ahead of the bridge's clock: kept until past its own age.
         let ahead = now + AHEAD;
-        assert_eq!(answered.admit(id(2), ahead, now), Admission::First);
+        assert_eq!(answered.admit(id(2), 1, ahead, now), Admission::First);
         // Past its age, let go: it is not answered anyway.
-        assert_eq!(answered.admit(id(2), ahead, last + 1), Admission::Again);
-        assert!(!answered.ids.contains(&id(1)));
+        assert_eq!(answered.admit(id(2), 1, ahead, last + 1), Admission::Again);
+        assert!(!answered.ids.contains_key(&id(1)));
         assert_eq!(answered.by_time.len(), 1);
     }
 
@@ -595,24 +642,24 @@ mod tests {
         let since = answering.since;
         let before = Timestamp::from_secs(since.as_secs() - 1);
         assert_eq!(
-            answering.admit(id(1), before, since, true),
+            answering.admit(id(1), before, since, Some(1)),
             Admission::Before
         );
         assert_eq!(
-            answering.admit(id(1), before, since, false),
+            answering.admit(id(1), before, since, None),
             Admission::Before
         );
-        assert_eq!(answering.admit(id(2), since, since, true), Admission::First);
-        assert_eq!(answering.admit(id(2), since, since, true), Admission::Again);
+        assert_eq!(
+            answering.admit(id(2), since, since, Some(1)),
+            Admission::First
+        );
+        assert_eq!(
+            answering.admit(id(2), since, since, Some(1)),
+            Admission::Again
+        );
         // Another's connection: answered with an error, not remembered.
-        assert_eq!(
-            answering.admit(id(3), since, since, false),
-            Admission::First
-        );
-        assert_eq!(
-            answering.admit(id(3), since, since, false),
-            Admission::First
-        );
+        assert_eq!(answering.admit(id(3), since, since, None), Admission::First);
+        assert_eq!(answering.admit(id(3), since, since, None), Admission::First);
     }
 
     /// A zap receipt reaches the relays its payer names through the route
@@ -643,19 +690,48 @@ mod tests {
     fn past_the_most_remembered_requests_wait_rather_than_one_is_forgotten() {
         let mut answered = Answered::default();
         let now = Timestamp::from_secs(10_000);
+        // Of as many accounts as fill it, each its share.
         for n in 0..REMEMBERED as u64 {
             let mut bytes = [0; 32];
             bytes[..8].copy_from_slice(&n.to_be_bytes());
             let at = Timestamp::from_secs(now.as_secs() - n % 100);
-            let first = answered.admit(EventId::from_byte_array(bytes), at, now);
+            let account = (n / SHARE as u64) as i64;
+            let first = answered.admit(EventId::from_byte_array(bytes), account, at, now);
             assert_eq!(first, Admission::First);
         }
-        assert_eq!(answered.admit(id(1), now, now), Admission::Full);
+        let another = (REMEMBERED / SHARE) as i64;
+        assert_eq!(answered.admit(id(1), another, now, now), Admission::Full);
         let zero = EventId::from_byte_array([0; 32]);
-        assert_eq!(answered.admit(zero, now, now), Admission::Again);
+        assert_eq!(answered.admit(zero, 0, now, now), Admission::Again);
         // Once the oldest are past their age, room again.
         let later = now + MAX_AGE - 98;
-        assert_eq!(answered.admit(id(1), later, later), Admission::First);
+        assert_eq!(
+            answered.admit(id(1), another, later, later),
+            Admission::First
+        );
         assert_eq!(answered.ids.len(), answered.by_time.len());
+        assert_eq!(answered.of.values().sum::<usize>(), answered.ids.len());
+    }
+
+    /// One account's connections flooding the bridge with requests fill
+    /// only its share: another account's are answered all the same, and
+    /// one answered is not answered again.
+    #[test]
+    fn one_accounts_flood_leaves_the_others_answered() {
+        let mut answered = Answered::default();
+        let now = Timestamp::from_secs(10_000);
+        for n in 0..SHARE as u64 {
+            let mut bytes = [0xff; 32];
+            bytes[..8].copy_from_slice(&n.to_be_bytes());
+            let flood = EventId::from_byte_array(bytes);
+            assert_eq!(answered.admit(flood, 1, now, now), Admission::First);
+        }
+        assert_eq!(answered.admit(id(1), 1, now, now), Admission::Busy);
+        assert_eq!(answered.admit(id(2), 2, now, now), Admission::First);
+        assert_eq!(answered.admit(id(2), 2, now, now), Admission::Again);
+        // Once its flood is past its age, the account is answered again.
+        let later = now + MAX_AGE + 1;
+        assert_eq!(answered.admit(id(1), 1, later, later), Admission::First);
+        assert_eq!(answered.of.get(&1), Some(&1));
     }
 }
