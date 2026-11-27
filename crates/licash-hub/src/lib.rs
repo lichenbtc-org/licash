@@ -30,6 +30,7 @@ mod citable;
 mod claims;
 mod evidence;
 mod forwards;
+pub mod generation;
 mod locks;
 mod records;
 mod store;

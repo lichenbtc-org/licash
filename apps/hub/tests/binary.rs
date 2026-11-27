@@ -223,6 +223,66 @@ fn a_hub_is_created_run_watched_and_stopped() {
     assert_eq!(stats(&data)["events"], 2);
 }
 
+/// A copy of a hub's ledger, restored or moved to another data directory,
+/// serves no wallet until its operator, with the hub stopped and its seed,
+/// promotes it: it would take again the notes spent since it was copied.
+#[test]
+fn a_restored_ledger_serves_wallets_only_once_promoted() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("hub");
+    assert!(output(&data, &["init", "--max-pow", "6"]).status.success());
+    let serve = |data: &Path| {
+        let port = free_port();
+        let running = Running(
+            hub(data, &["run", "--listen", &format!("127.0.0.1:{port}")])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        until("health", || get(port, "/health"));
+        let info = get(port, licash_api::INFO).unwrap();
+        (running, info.starts_with("HTTP/1.1 200"))
+    };
+    // Its first start binds the ledger to its directory; it serves.
+    let (running, served) = serve(&data);
+    assert!(served);
+    drop(running);
+    assert!(data.join("ledger-generation").exists());
+    // Restored elsewhere, with the seed and not the directory's own file.
+    let copy = dir.path().join("restored");
+    std::fs::create_dir(&copy).unwrap();
+    rusqlite::Connection::open(data.join("hub.sqlite"))
+        .unwrap()
+        .execute(
+            "VACUUM INTO ?1",
+            [copy.join("hub.sqlite").to_str().unwrap()],
+        )
+        .unwrap();
+    std::fs::copy(data.join("seed"), copy.join("seed")).unwrap();
+    let (running, served) = serve(&copy);
+    assert!(!served, "a copy served wallets");
+    // Alerted, and refused promotion while it runs.
+    let events = stdout(&copy, &["events"]);
+    assert!(events.contains("responding only"), "{events}");
+    let out = output(&copy, &["ledger-promote"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("another hub"));
+    drop(running);
+    // Never without the seed.
+    let keys = dir.path().join("standby.json");
+    stdout(&data, &["standby-keys", keys.to_str().unwrap()]);
+    let standby = ["--standby-keys", keys.to_str().unwrap(), "ledger-promote"];
+    let out = output(&copy, &standby);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("does not promote a ledger"));
+    assert!(stdout(&copy, &["ledger-promote"]).contains("serves wallets"));
+    let (_running, served) = serve(&copy);
+    assert!(served);
+    // Only copies are held: the directory it was copied from serves its
+    // own still, which is why a restore fences it first.
+    assert!(serve(&data).1);
+}
+
 #[test]
 fn failures_exit_nonzero_and_log_as_asked() {
     let dir = tempfile::tempdir().unwrap();
@@ -429,6 +489,12 @@ fn a_standby_runs_on_keys_its_hub_wrote_and_is_refused_what_its_seed_alone_does(
         String::from_utf8_lossy(&out.stderr).into_owned()
     };
     assert!(failed(&data, &["standby-keys", keys]).contains("exists"));
+    // Bound to its data directory, as by the hub's first start.
+    let (seed, db) = (data.join("seed"), data.join("hub.sqlite"));
+    Hub::open(&seed, &db, Policy::default())
+        .unwrap()
+        .bind(&db)
+        .unwrap();
     // The hub's data on another machine, all but its seed.
     let copy = dir.path().join("standby");
     std::fs::create_dir(&copy).unwrap();
@@ -508,6 +574,9 @@ fn a_standby_runs_on_keys_its_hub_wrote_and_is_refused_what_its_seed_alone_does(
     let stderr = failed(&copy, &with(&standby, &run));
     assert!(stderr.contains("responding only: a standby"), "{stderr}");
     assert!(stderr.contains("hub started"), "{stderr}");
+    // A copy, held from serving wallets, which a standby never does: no
+    // alert to promote it.
+    assert!(!stderr.contains("ledger-promote"), "{stderr}");
     // Its keys or the seed, never both.
     let both = ["--seed", "seed", "--standby-keys", keys, "witness-key"];
     assert!(failed(&copy, &both).contains("cannot be used with"));

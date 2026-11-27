@@ -120,7 +120,9 @@ stopped) holds all of them as of one moment. It is not all of `<data>`:
 
 Never back up, sync or restore `contracts-instance`: it names the copy of
 the hub that took its contracts over ([Taking over](#taking-over)), and
-a copy holding another's would lead beside it.
+a copy holding another's would lead beside it. Nor `ledger-generation`:
+it binds `hub.sqlite` to the data directory that serves wallets from it
+(below), and a copy holding it would serve beside it.
 
 Copy the database first, then the files: an instance or a receipt is
 written before the database names it, and none is removed, so files
@@ -149,7 +151,8 @@ dbs:
 
 Sync the other files of `<data>` beside it, every few seconds (as with
 `rsync`), leaving out the databases, their `-wal`, `-shm` and `.lock`
-files, Litestream's `.hub.sqlite-litestream` and `contracts-instance`: a file synced later
+files, Litestream's `.hub.sqlite-litestream`, `contracts-instance` and
+`ledger-generation`: a file synced later
 than the database that names it is missing from a restore, which the
 hub's alert at start tells of. Restore with `litestream restore -o
 <data>/hub.sqlite file:///REPLICA/hub` first, then the files. Keep Litestream
@@ -190,9 +193,28 @@ Restoring on another host, while contracts may be in dispute:
    deposits (and an earlier release's Lightning receipts and swaps) are
    owed, which no one collects while it responds only. Go on to step 5 before the earliest of their
    locks expires.
-5. Start it as a whole (without `--respond-only`), and open its public
-   route, only once the copy is known to be the newest: an older ledger
-   takes spent notes again.
+5. Only once the copy is known to be the newest (an older ledger takes
+   spent notes again) and no other copy serves wallets, stop it, promote
+   it with `licash-hub ledger-promote` (the seed's, with the hub stopped),
+   start it as a whole (without `--respond-only`), and open its public
+   route.
+
+The hub's first start serving wallets binds `hub.sqlite` to its data
+directory: a random generation, kept in the ledger and in
+`<data>/ledger-generation`. A ledger restored or copied into another data
+directory finds its generation without that file there, and `run` holds
+it to responding only (as `--respond-only`, contracts or not), with an
+alert, until `ledger-promote` gives it a new one. It holds a copy, not
+the directory it was copied from: that one serves its own ledger still
+wherever it starts, which is why step 1 fences it. A crash of the first
+start between the two writes holds the ledger too; promote it.
+
+Restoring in place, on the same host, leave `<data>/ledger-generation`
+as it is: a copy taken before the hub's first start under this release
+has no generation, and is held until promoted, but a later copy has the
+one the file names, and serves. Nothing tells that copy from the ledger
+it replaced: start it only once it is known to be the newest, as step 5
+says.
 
 A contract's response window (12 blocks at least on signet, 144 on
 Mutinynet, 72 minutes there) is how long the hub may be down
@@ -950,7 +972,7 @@ and fed by the hub.
 It runs as `--respond-only` does, asked or not: no API but `/health`, its
 responder, fee bumping and alerts on. With no seed it issues no note,
 releases and locks no spend, claims no deposit and announces nothing, and
-`init`, `standby-keys`, `contracts-takeover` and `contracts-witness-import` refuse
+`init`, `standby-keys`, `contracts-takeover`, `contracts-witness-import` and `ledger-promote` refuse
 its keys. It is refused without `--contracts` and their witnesses.
 
 What it holds:
@@ -1278,6 +1300,13 @@ Before starting it:
   lacking one responds to none of its contested claims.
 - Expect no migration: a database or file of an earlier layout is refused
   by name, never read nor replaced.
+- The first start of this release serving wallets binds `hub.sqlite` to
+  `<data>` (the component `generation`, and the file `ledger-generation`):
+  a ledger of a release before has neither, and serves as it did. Leave
+  `ledger-generation` out of backups and syncs, and in place on a
+  restore: the backup taken before the upgrade, restored in place, is then
+  held until promoted (`licash-hub ledger-promote`). A release before
+  ignores both.
 - The first start of this release keeps in `hub.sqlite` the unlock of each
   spend the hub released before (the component `unlocks`, a hash for each,
   in one transaction): until then the hub derived it from its seed each

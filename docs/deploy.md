@@ -138,8 +138,9 @@ restore and play the same dispute from where the main one left it.
 The standby answers what is due, on its own from then on (its
 `standby-acted`): never restore the hub from its copy. Restore the hub
 from its seed and its newest backup (the standby's `replica/` is one, as
-of the last feed), take its contracts over and start it
-([Taking over](hub.md#taking-over)). Leave the standby running until the
+of the last feed), take its contracts over, promote its ledger
+(`licash-hub ledger-promote`, as a restored ledger serves no wallet
+until then) and start it ([Taking over](hub.md#taking-over)). Leave the standby running until the
 contracts it acted on have ended, then remove its `standby-acted` and
 `hub.sqlite`: it is restored from the hub's replica again at its next
 start. What it swept or collected is in its own wallet.

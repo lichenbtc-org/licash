@@ -14,7 +14,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use licash::spend::ChainProfile;
 use licash_chain_client::Source;
 use licash_contracts::hub::Openings;
-use licash_hub::{Fee, Hub, Ledger, Policy, Timing};
+use licash_hub::{generation::Serving, Fee, Hub, Ledger, Policy, Timing};
 use licash_hub_service::{
     announce::announce,
     dashboard, deposit,
@@ -907,6 +907,13 @@ enum Command {
         #[command(flatten)]
         witnesses: WitnessArgs,
     },
+    /// Make this copy of `hub.sqlite` the one that serves wallets, with
+    /// the hub stopped and its seed: a copy restored or moved here, which
+    /// `run` holds to responding only, as a ledger older than the one last
+    /// served, or a second one beside it, would take again the notes spent
+    /// since. Only once this copy is the newest, and every other is
+    /// stopped for good: those keep serving where they started.
+    LedgerPromote,
     /// The hub's events as JSON lines, oldest first.
     Events {
         /// Only events after this sequence number.
@@ -997,6 +1004,8 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             notify_kinds,
             respond_only,
         } => {
+            // Held, not asked: told, as its operator must promote it.
+            let asked = respond_only || matches!(keys, Keys::Standby(_));
             let respond_only = match responding_only(respond_only, &chain, &keys, &cli.data)? {
                 Some(why) => {
                     tracing::warn!("responding only: {why}");
@@ -1085,6 +1094,21 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 Some(notifier)
             };
             let hub = Arc::new(keys.open(&db, policy)?);
+            match respond_only {
+                // Bound now, should it be new, as it serves wallets.
+                false => hub
+                    .bind(&db)
+                    .context("bind the ledger to its data directory")?,
+                true if asked => {}
+                true => {
+                    if let Serving::Held(why) = licash_hub::generation::serving(&db)? {
+                        let message = format!("responding only: {why}");
+                        if let Err(e) = hub.alert(&message) {
+                            tracing::error!("notifying an alert: {e:#}");
+                        }
+                    }
+                }
+            }
             if respond_only {
                 // What its gateways and swaps owe is collected by the copy
                 // that leads, if one does: told, as no one here does.
@@ -1348,6 +1372,17 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             println!(
                 "took the contracts over at epoch {epoch}: every other copy of the hub answers \
                  their disputes only"
+            );
+            Ok(())
+        }
+        Command::LedgerPromote => {
+            let seed = keys.seed("promote a ledger")?;
+            licash_hub::generation::promote(seed, &db).context("promote the ledger")?;
+            println!(
+                "{} serves wallets from {} from its next start. Keep every other copy of the \
+                 hub stopped: those serve where they started.",
+                db.display(),
+                cli.data.display()
             );
             Ok(())
         }
@@ -1765,7 +1800,8 @@ fn superseded(epoch: u64) -> String {
 
 /// Why `run` responds only, if it does: asked (`respond_only`, or a
 /// standby's keys, which do no more: refused without contracts and
-/// witnesses), or another copy of the hub took the
+/// witnesses), its ledger a copy not promoted
+/// ([`licash_hub::generation`]), or another copy of the hub took the
 /// contracts over, as its witnesses say. Not known (a witness unreachable),
 /// it responds only if it last saw itself superseded
 /// ([`licash_contracts::hub::superseded`]), else runs as asked: as its
@@ -1795,6 +1831,9 @@ fn responding_only(
              needs --contracts and their witnesses"
         );
         return Ok(Some("asked (--respond-only)".into()));
+    }
+    if let Serving::Held(why) = licash_hub::generation::serving(&data.join("hub.sqlite"))? {
+        return Ok(Some(why));
     }
     if !witnessed {
         return Ok(None);
@@ -2207,6 +2246,32 @@ mod tests {
         std::fs::write(&marker, "3").unwrap();
         let why = responding_only(false, &chain, &seed, dir.path()).unwrap();
         assert!(why.unwrap().contains("epoch 3"));
+    }
+
+    /// A ledger not bound to its data directory where it was bound to
+    /// another, as one restored or copied, responds only, witnesses or
+    /// not; bound by the hub's first start, it runs as asked.
+    #[test]
+    fn a_restored_ledger_responds_only_until_promoted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (seed, db) = (dir.path().join("seed"), dir.path().join("hub.sqlite"));
+        licash_hub::Hub::init(&seed, &db, 6).unwrap();
+        let args = ["licash-hub", "run"];
+        let Command::Run { chain, .. } = Cli::try_parse_from(args).unwrap().command else {
+            unreachable!()
+        };
+        let keys = Keys::Seed(seed.clone());
+        let only = || responding_only(false, &chain, &keys, dir.path()).unwrap();
+        assert_eq!(only(), None);
+        let hub = keys.open(&db, licash_hub::Policy::default()).unwrap();
+        hub.bind(&db).unwrap();
+        drop(hub);
+        assert_eq!(only(), None);
+        let file = dir.path().join(licash_hub::generation::FILE);
+        std::fs::remove_file(&file).unwrap();
+        assert!(only().unwrap().contains("ledger-promote"));
+        licash_hub::generation::promote(&seed, &db).unwrap();
+        assert_eq!(only(), None);
     }
 
     #[test]
