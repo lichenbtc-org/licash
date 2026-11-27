@@ -118,6 +118,17 @@ jobs:
       - run: docker build -f apps/hub/Dockerfile .
       # Its standby (apps/hub/standby.sh), on the layers just built.
       - run: docker build -f apps/hub/Dockerfile --target standby .
+  # The standby's feed end to end (deploy/test.sh): Litestream, the feed
+  # and the standby's entrypoint, on this runner.
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: docker build -q deploy/hub/sync
+      - run: deploy/test.sh
   chain:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -284,7 +295,7 @@ jobs:
   # Each platform's images on a runner of its architecture where there is
   # one, pushed by digest only: images-tag names them.
   images:
-    needs: [rust, apps, r0, hub-image, chain, android, e2e, app-e2e, regtest]
+    needs: [rust, apps, r0, hub-image, deploy, chain, android, e2e, app-e2e, regtest]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     strategy:
       matrix:
@@ -351,6 +362,21 @@ jobs:
             mkdir -p "$RUNNER_TEMP/digests/$image"
             touch "$RUNNER_TEMP/digests/$image/${digest#sha256:}"
           done
+      # The hub's standby, on the hub's layers: where Litestream's image
+      # is (x86-64 and arm64).
+      - if: matrix.platform != 'linux/arm/v7'
+        name: Hub standby image
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          docker buildx build --platform "$PLATFORM" --file apps/hub/Dockerfile --target standby \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --output "type=image,name=${PREFIX}hub-standby,push-by-digest=true,name-canonical=true,push=true" \
+            --metadata-file "$RUNNER_TEMP/hub-standby.json" .
+          digest=$(jq -er '."containerimage.digest"' "$RUNNER_TEMP/hub-standby.json")
+          mkdir -p "$RUNNER_TEMP/digests/hub-standby"
+          touch "$RUNNER_TEMP/digests/hub-standby/${digest#sha256:}"
       - uses: actions/upload-artifact@v7
         with:
           name: digests-${{ matrix.slug }}
@@ -365,7 +391,7 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        image: [hub, wallet, swaps, observatory, bridge]
+        image: [hub, hub-standby, wallet, swaps, observatory, bridge]
     permissions:
       contents: read
       packages: write
@@ -400,7 +426,7 @@ jobs:
 
   # The app signed, on the main-build prerelease, replaced on each push.
   publish-app:
-    needs: [rust, apps, r0, hub-image, chain, android, e2e, app-e2e, regtest]
+    needs: [rust, apps, r0, hub-image, deploy, chain, android, e2e, app-e2e, regtest]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
