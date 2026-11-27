@@ -649,6 +649,22 @@ impl Phone {
         Ok(())
     }
 
+    /// [`Self::back_to`] just after a sheet closed: a press that its
+    /// window, still going, took instead of the screen under it is made
+    /// again, up to 3 times, each given 10 s to show `id`.
+    pub async fn back_past_sheet_to(&self, id: &str) -> anyhow::Result<()> {
+        for _ in 0..2 {
+            self.back().await?;
+            if self.by_id(id, 10).await.is_ok() {
+                return Ok(());
+            }
+            eprintln!("back pressed, no view {id:?} yet: pressed again");
+        }
+        self.back().await?;
+        self.by_id(id, 10).await?;
+        Ok(())
+    }
+
     /// The payment code Receive shows, for any amount, back on Home after.
     pub async fn code(&self) -> anyhow::Result<String> {
         self.tap_id("receive").await?;

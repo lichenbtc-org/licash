@@ -751,7 +751,8 @@ async fn bridged(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     phone.copied().await?;
     phone.tap_id("connected-done").await?;
     phone.by_id("bridge-app", 30).await?;
-    phone.back().await?;
+    // The bridges' page, its sheet gone.
+    phone.back_past_sheet_to("bridge").await?;
     phone.scroll_to_id("import-text").await?;
     let pasted = phone.paste_id("import-text").await?;
     ensure!(
@@ -773,7 +774,7 @@ async fn bridged(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
         .tagged("bridge-address", &format!("phone@{host}"), 30)
         .await?;
     // Shown on Receive, under More.
-    phone.back().await?;
+    phone.back_past_sheet_to("bridge").await?;
     phone.tap("Back").await?;
     phone.back_to("receive").await?;
     phone.tap_id("receive").await?;
