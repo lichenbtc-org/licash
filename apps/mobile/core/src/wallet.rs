@@ -693,8 +693,11 @@ impl Wallet {
         if serde_json::from_str::<licash_api::Payment>(text).is_ok() {
             return Ok(Scanned::Payment);
         }
+        if let Some((_, payee)) = licash_wallet::lnurl_pay_target(text, self.wallet.network()) {
+            return Ok(Scanned::Lnurl { payee });
+        }
         Err(LicashError::invalid(
-            "neither a Licash address, a Lightning invoice nor a payment",
+            "neither a Licash address, a Lightning invoice, a Lightning Address nor a payment",
         ))
     }
 

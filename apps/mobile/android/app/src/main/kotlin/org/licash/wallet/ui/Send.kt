@@ -57,6 +57,7 @@ import org.licash.core.ExtraCode
 import org.licash.core.FeesRaised
 import org.licash.core.InvoiceQuote
 import org.licash.core.LicashException
+import org.licash.core.LnurlPay
 import org.licash.core.PayQuote
 import org.licash.core.PayoutQuote
 import org.licash.core.Scanned
@@ -92,6 +93,8 @@ private sealed interface Step {
     ) : Step
     data class Visit(val code: String, val asked: ULong?) : Step
     data class Invoice(val text: String, val quote: InvoiceQuote) : Step
+    /** A Lightning Address or LNURL, what it takes known: how much, to choose. */
+    data class Lnurl(val pay: LnurlPay) : Step
     data class Address(val address: String) : Step
     data class Payout(val quote: PayoutQuote, val asked: ULong? = null) : Step
     data object Busy : Step
@@ -216,6 +219,19 @@ fun Send(
         scope.launch { step = quoting(address, amount) }
     }
 
+    // An invoice of `amount` asked of the payee's service, then quoted as any.
+    suspend fun invoicing(pay: LnurlPay, amount: ULong): Step {
+        step = Step.Quoting
+        val invoice = engine.lnurlInvoice(pay, amount).getOrElse { return Step.Failed(explain(it)) }
+        return engine.invoiceQuote(invoice).fold({ Step.Invoice(invoice, it) }, { tooLittle(it) })
+    }
+
+    // What it takes asked first: an amount to choose, unless it takes one only.
+    suspend fun asking(text: String): Step {
+        val pay = engine.lnurlPay(text).getOrElse { return Step.Failed(explain(it), "Can't pay this") }
+        return if (pay.min == pay.max) invoicing(pay, pay.min) else Step.Lnurl(pay)
+    }
+
     fun read(text: String) {
         step = Step.Busy
         scope.launch {
@@ -244,6 +260,7 @@ fun Send(
                             { Step.Invoice(text, it) },
                             { Step.Failed(explain(it)) },
                         )
+                        scanned is Scanned.Lnurl -> asking(text)
                         else -> Step.Failed("Nothing to pay there.", "Nothing to pay")
                     }
                 },
@@ -450,6 +467,7 @@ fun Send(
                                     }
                                 }
                             }
+                            is Step.Lnurl -> ToLnurl(s.pay) { amount -> scope.launch { step = invoicing(s.pay, amount) } }
                             is Step.Address -> ToAddress(
                                 s.address,
                                 own = s.address == own,
@@ -877,6 +895,53 @@ private fun ToAddress(address: String, own: Boolean, prefill: ULong?, all: Strin
         BigButton(all, Modifier.fillMaxWidth().testTag("all"), quiet = true) { quote(null) }
     }
 }
+
+/**
+ * A Lightning Address or LNURL to pay: how much, within what its service
+ * takes, said under it with what it says is paid for.
+ */
+@Composable
+private fun ToLnurl(pay: LnurlPay, invoice: (ULong) -> Unit) {
+    var amount by remember { mutableStateOf<Long?>(null) }
+    val ok = takes(pay, amount)
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        Spacer(Modifier.height(32.dp))
+        AmountField(amount, { amount = it }, action = ImeAction.Go) { if (ok) amount?.let { invoice(it.toULong()) } }
+        Text(
+            "To ${pay.payee}",
+            modifier = Modifier.testTag("to"),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        pay.description?.let {
+            Text(
+                it,
+                modifier = Modifier.padding(top = 4.dp).testTag("for"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                maxLines = 3,
+            )
+        }
+        Text(
+            takesWords(pay),
+            modifier = Modifier.padding(top = 4.dp).testTag("takes"),
+            style = MaterialTheme.typography.bodySmall,
+            color = if (amount != null && !ok) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(32.dp))
+        BigButton("Continue", Modifier.fillMaxWidth().testTag("continue"), enabled = ok) {
+            amount?.let { invoice(it.toULong()) }
+        }
+    }
+}
+
+/** Whether the service of `pay` takes `amount`. */
+internal fun takes(pay: LnurlPay, amount: Long?): Boolean =
+    amount != null && amount > 0 && amount.toULong() in pay.min..pay.max
+
+/** What the service of `pay` takes, in words. */
+internal fun takesWords(pay: LnurlPay): String = "From ${sat(pay.min)} to ${sat(pay.max)}"
 
 /**
  * A payout on Bitcoin to confirm: what the address gets, all it costs on

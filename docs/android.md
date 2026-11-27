@@ -313,6 +313,14 @@ a hub it names if the app trusts none. An amount no provider pays out offers
 about the most one does instead (its largest coin less the claim's fee, and
 no more than the notes there pay), with a button to send that.
 
+A Lightning Address (`name@domain`) or an LNURL-pay code (`lnurl1…`, with
+or without `lightning:`) is paid as an invoice its payee's service makes: the
+app asks the service what it takes (over HTTPS, or HTTP to an onion service,
+over Tor when on), asks for the amount chosen within it, and pays the
+invoice only if it asks exactly that amount, on the wallet's network, and
+commits to what the service showed. Only paying: no LNURL withdrawals,
+comments or success messages.
+
 Lightning invoices are paid the cheapest way found: through a trusted hub's
 gateway, or through a swap provider announced the same way that pays
 invoices from its own node (`licash-swaps run --lnd URL --lnd-macaroon

@@ -905,6 +905,51 @@ pub enum Scanned {
         amount: u64,
         description: Option<String>,
     },
+    /// An LNURL-pay code or a Lightning Address, naming `payee`: what it
+    /// takes asked of its service ([`Wallet::lnurl_pay`]), then an invoice
+    /// of the amount chosen ([`Wallet::lnurl_invoice`]), paid as any.
+    Lnurl { payee: String },
+}
+
+/// What the payee of an LNURL-pay code or a Lightning Address takes, as its
+/// service answered ([`Wallet::lnurl_pay`]): handed back as is to ask it for
+/// an invoice ([`Wallet::lnurl_invoice`]).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct LnurlPay {
+    /// The Lightning Address, or the service's host.
+    pub payee: String,
+    /// The least and the most it takes, in whole sat.
+    pub min: u64,
+    pub max: u64,
+    /// What it says is paid for, if it says.
+    pub description: Option<String>,
+    /// Where its invoices are asked for, and the metadata they commit to.
+    pub callback: String,
+    pub metadata: String,
+}
+
+impl LnurlPay {
+    fn of(pay: licash_wallet::LnurlPayRequest) -> Self {
+        LnurlPay {
+            min: pay.min_sat(),
+            max: pay.max_sat(),
+            payee: pay.payee,
+            description: pay.description,
+            callback: pay.callback,
+            metadata: pay.metadata,
+        }
+    }
+
+    fn request(&self) -> licash_wallet::LnurlPayRequest {
+        licash_wallet::LnurlPayRequest {
+            callback: self.callback.clone(),
+            min_msat: self.min * 1000,
+            max_msat: self.max * 1000,
+            metadata: self.metadata.clone(),
+            description: self.description.clone(),
+            payee: self.payee.clone(),
+        }
+    }
 }
 
 /// A Lightning invoice the wallet asked a hub for, to be paid with

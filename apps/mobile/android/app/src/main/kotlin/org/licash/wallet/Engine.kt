@@ -69,6 +69,7 @@ import org.licash.core.InvoiceQuote
 import org.licash.core.Kind
 import org.licash.core.LicashException
 import org.licash.core.LightningInvoice
+import org.licash.core.LnurlPay
 import org.licash.core.MoveQuote
 import org.licash.core.Network
 import org.licash.core.NoteOptimization
@@ -1739,6 +1740,12 @@ class Engine(context: Context) {
      * through a swap provider, as hubs pay no invoices.
      */
     suspend fun invoiceQuote(text: String): Result<InvoiceQuote> = io { local { it.invoiceQuote(text) } }
+
+    /** What the payee of the LNURL or Lightning Address `text` takes, its service asked. */
+    suspend fun lnurlPay(text: String): Result<LnurlPay> = io { local { it.lnurlPay(text) } }
+
+    /** An invoice of `amount` from the service of `pay`, checked, to pay as any. */
+    suspend fun lnurlInvoice(pay: LnurlPay, amount: ULong): Result<String> = io { local { it.lnurlInvoice(pay, amount) } }
 
     /** Every way to pay the Lightning invoice `text`, the cheapest first. */
     suspend fun invoiceOffers(text: String): Result<List<InvoiceQuote>> = io { local { it.invoiceOffers(text) } }

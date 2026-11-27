@@ -1088,6 +1088,30 @@ fn a_phone_born_before_its_hubs_tweaks_looks_in_each_block_once() {
 }
 
 #[test]
+fn a_lightning_address_or_an_lnurl_is_read_as_one_asking_nothing() {
+    let net = Net::new(true);
+    let alice = net.wallet("alice", net.height());
+    let lnurl = |payee: &str| Scanned::Lnurl {
+        payee: payee.into(),
+    };
+    assert_eq!(
+        alice.scanned(" Bob@Pay.Example ".into()).unwrap(),
+        lnurl("bob@pay.example")
+    );
+    let hrp = bitcoin::bech32::Hrp::parse("lnurl").unwrap();
+    let url = b"https://pay.example/lnurlp/bob";
+    let code = bitcoin::bech32::encode_upper::<bitcoin::bech32::Bech32>(hrp, url).unwrap();
+    assert_eq!(alice.scanned(code.clone()).unwrap(), lnurl("pay.example"));
+    assert_eq!(
+        alice.scanned(format!("lightning:{code}")).unwrap(),
+        lnurl("pay.example")
+    );
+    // Neither: said so.
+    let why = invalid(alice.scanned("bob@".into()));
+    assert!(why.contains("Lightning Address"), "{why}");
+}
+
+#[test]
 fn a_phone_pays_out_to_bitcoin_addresses_and_codes_of_hubs_it_does_not_trust() {
     let net = Net::new(true);
     let light = Light::new(&net);

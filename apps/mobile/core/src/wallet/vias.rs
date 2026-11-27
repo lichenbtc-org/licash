@@ -16,7 +16,30 @@ use licash_nostr::wallet::{
 use licash_wallet::{Payable, SwapLimits};
 
 use super::Wallet;
-use crate::{Activity, InvoiceQuote, LicashError, ViaProvider};
+use crate::{Activity, InvoiceQuote, LicashError, LnurlPay, ViaProvider};
+
+/// LNURL-pay codes and Lightning Addresses: an invoice asked of the
+/// payee's service, then paid as any.
+#[uniffi::export]
+impl Wallet {
+    /// What the payee of the LNURL-pay code or Lightning Address `text`
+    /// takes, its service asked, over Tor if the wallet is.
+    pub fn lnurl_pay(&self, text: String) -> Result<LnurlPay, LicashError> {
+        let _timed = crate::log::timed("lnurl_pay");
+        let asked = self.wallet.lnurl_pay_request(&text);
+        Ok(LnurlPay::of(self.runtime.block_on(asked)?))
+    }
+
+    /// An invoice of `amount` from the service of `pay`, checked to ask
+    /// exactly that, of the wallet's network, for what it showed: to pay
+    /// as any ([`Wallet::invoice_quote`]).
+    pub fn lnurl_invoice(&self, pay: LnurlPay, amount: u64) -> Result<String, LicashError> {
+        let _timed = crate::log::timed("lnurl_invoice");
+        let pay = pay.request();
+        let asked = self.wallet.lnurl_invoice(&pay, amount);
+        Ok(self.runtime.block_on(asked)?)
+    }
+}
 
 /// Lightning invoices through providers.
 #[uniffi::export]
