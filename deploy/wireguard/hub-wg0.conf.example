@@ -1,0 +1,22 @@
+# The hub's end (/etc/wireguard/wg0.conf, `wg-quick up wg0`): it dials each
+# standby, main and spare, and opens no port of its own. Its standbys'
+# addresses are here only, never announced.
+[Interface]
+Address = 10.73.0.1/32
+PrivateKey = HUB_PRIVATE_KEY
+
+# The main standby.
+[Peer]
+PublicKey = STANDBY_PUBLIC_KEY
+PresharedKey = HUB_STANDBY_PSK
+Endpoint = STANDBY_PUBLIC_IP:51820
+AllowedIPs = 10.73.0.2/32
+PersistentKeepalive = 25
+
+# A spare, fed the same, its standby started by hand.
+[Peer]
+PublicKey = SPARE_PUBLIC_KEY
+PresharedKey = HUB_SPARE_PSK
+Endpoint = SPARE_PUBLIC_IP:51820
+AllowedIPs = 10.73.0.3/32
+PersistentKeepalive = 25

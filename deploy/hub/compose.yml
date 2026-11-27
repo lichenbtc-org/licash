@@ -1,0 +1,82 @@
+# The hub, on the machine with the GPU (docs/deploy.md): the hub, Litestream
+# replicating its ledger, and the feed of its standbys over WireGuard.
+name: licash-hub
+
+x-data: &data ${LICASH_DATA:-./data}
+x-replica: &replica ${LICASH_REPLICA:-./replica}
+
+services:
+  hub:
+    image: ghcr.io/lichenbtc-org/licash-hub:${LICASH_TAG:-main}
+    restart: unless-stopped
+    env_file: hub.env
+    volumes:
+      - type: bind
+        source: *data
+        target: /data
+    # Wallets reach it over its onion service (LICASH_HUB_ONION) or a
+    # reverse proxy; this port is the dashboard's and the proxy's.
+    ports:
+      - 127.0.0.1:8338:8338
+    # Its node, on the host.
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    # The GPU proves locally; rented ones join through LICASH_R0_WORKERS.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    stop_grace_period: 1m
+
+  # The ledger, replicated as it is written: the standbys restore it.
+  litestream:
+    image: litestream/litestream:0.5.18@sha256:513bff62a88fc0c86c73d27333c41c54c89fe890a7c32a551600adff9309b11b
+    restart: unless-stopped
+    user: "10001:10001"
+    command: [replicate, -config, /etc/litestream.yml]
+    volumes:
+      - type: bind
+        source: *data
+        target: /data
+      - type: bind
+        source: *replica
+        target: /replica
+      - ./litestream.yml:/etc/litestream.yml:ro
+    depends_on:
+      hub:
+        condition: service_healthy
+
+  standby-sync:
+    build: sync
+    restart: unless-stopped
+    environment:
+      LICASH_STANDBYS: ${LICASH_STANDBYS:?the standbys to feed}
+      LICASH_SYNC_EVERY: ${LICASH_SYNC_EVERY:-10}
+    volumes:
+      # Only what a standby takes of the hub's data: never its seed.
+      - type: bind
+        source: ${LICASH_DATA:-./data}/opening-instances
+        target: /data/opening-instances
+        read_only: true
+      - type: bind
+        source: ${LICASH_DATA:-./data}/header-chain
+        target: /data/header-chain
+        read_only: true
+      - type: bind
+        source: ${LICASH_DATA:-./data}/hp-proofs
+        target: /data/hp-proofs
+        read_only: true
+      - type: bind
+        source: *replica
+        target: /replica
+        read_only: true
+      - ./ssh:/ssh:ro
+      - stage:/stage
+    depends_on:
+      - litestream
+
+volumes:
+  stage:

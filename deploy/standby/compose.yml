@@ -1,0 +1,31 @@
+# The hub's standby, on its own machine, reached only over WireGuard
+# (docs/deploy.md). It publishes no port and is never announced. Its
+# entrypoint restores the ledger the hub feeds to /srv/licash-standby (as
+# LICASH_STANDBY_HOME says) at each start; it restarts it as it asks.
+# A spare standby is fed too, but this is started there only by hand.
+name: licash-standby
+
+services:
+  standby:
+    image: ghcr.io/lichenbtc-org/licash-hub-standby:${LICASH_TAG:-main}
+    restart: unless-stopped
+    env_file: standby.env
+    environment:
+      LICASH_STANDBY_REPLICA: file:///replica/hub
+      LICASH_HUB_STANDBY_KEYS: /keys/standby.json
+    volumes:
+      - type: bind
+        source: ${LICASH_STANDBY_HOME:-/srv/licash-standby}/data
+        target: /data
+      - type: bind
+        source: ${LICASH_STANDBY_HOME:-/srv/licash-standby}/replica
+        target: /replica
+        read_only: true
+      - type: bind
+        source: ${LICASH_STANDBY_HOME:-/srv/licash-standby}/standby.json
+        target: /keys/standby.json
+        read_only: true
+    # Its node, on the host.
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    stop_grace_period: 1m

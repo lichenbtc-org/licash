@@ -1,0 +1,7 @@
+# The hub's ledger, replicated to /replica/hub as it is written
+# (docs/hub.md, backups). standby-sync feeds it to the standbys.
+dbs:
+  - path: /data/hub.sqlite
+    replica:
+      type: file
+      path: /replica/hub

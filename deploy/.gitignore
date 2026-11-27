@@ -1,0 +1,8 @@
+# An operator's settings, keys and data, never committed.
+.env
+*.env
+!*.env.example
+data/
+replica/
+ssh/
+standby.json

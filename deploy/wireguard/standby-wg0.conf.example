@@ -1,0 +1,13 @@
+# The standby's end (/etc/wireguard/wg0.conf, `wg-quick up wg0`): it
+# listens, and answers no packet but its peers', so a scan finds nothing.
+# Its sshd listens only here (ListenAddress 10.73.0.2): the hub feeds it.
+[Interface]
+Address = 10.73.0.2/32
+ListenPort = 51820
+PrivateKey = STANDBY_PRIVATE_KEY
+
+# The hub, from wherever it is: it dials out.
+[Peer]
+PublicKey = HUB_PUBLIC_KEY
+PresharedKey = HUB_STANDBY_PSK
+AllowedIPs = 10.73.0.1/32
