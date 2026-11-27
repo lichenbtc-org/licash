@@ -218,14 +218,15 @@ async fn a_receipt_paid_is_locked_to_the_wallet_and_settled_once_it_claims() {
     assert_eq!(invoice.payment_hash().as_ref() as &[u8], &hash[..]);
     assert_eq!(eco.node.held_cltv(hash), Some(CLTV.into()));
     assert!(licash_swaps::holds_hash(&eco.path(), &hash).unwrap());
-    // What it is to lock is set aside from what it swaps.
+    // Unpaid, it sets nothing aside from what the provider swaps: anyone
+    // may ask for one.
     let max = |eco: &Eco| eco.provider().info().unwrap().hubs[0].max;
     let before = max(&eco);
     eco.provider()
         .receive(&eco.request(10, 9), None)
         .await
         .unwrap();
-    assert_eq!(max(&eco), before - 10);
+    assert_eq!(max(&eco), before);
     // Nothing is locked until its invoice is paid.
     eco.follow().await;
     assert_eq!(eco.state(&hash), ReceiptState::Open);
@@ -253,6 +254,25 @@ async fn a_receipt_paid_is_locked_to_the_wallet_and_settled_once_it_claims() {
     assert_eq!(status.state, ReceiveState::Settled);
     // Only the other, unpaid, is under way.
     assert_eq!(eco.provider().open_receives().unwrap(), 1);
+    assert!(eco.alerts().is_empty());
+}
+
+/// Receipts asked for more than the provider holds at once are each
+/// taken, as none sets anything aside unpaid: paid, one is locked, and the
+/// other, for which too little is left, failed back with nothing locked.
+#[tokio::test]
+async fn a_receipt_paid_once_too_little_is_left_is_failed_back_unlocked() {
+    let eco = Eco::new().await;
+    let (_, first) = eco.receive(500, 5).await;
+    let (_, second) = eco.receive(500, 6).await;
+    eco.pay(first, CLTV);
+    eco.pay(second, CLTV);
+    eco.follow().await;
+    assert_eq!(eco.state(&first), ReceiptState::Locked);
+    assert_eq!(eco.state(&second), ReceiptState::Canceled);
+    assert_eq!(eco.node.held(second).unwrap().0, HeldState::Canceled);
+    let locks = eco.provider().wallet().locks().unwrap();
+    assert_eq!(locks.len(), 1);
     assert!(eco.alerts().is_empty());
 }
 
@@ -406,10 +426,14 @@ async fn receipts_are_asked_within_the_terms_once_under_each_hash() {
         ..eco.request(100, 6)
     };
     assert_eq!(refused(provider.receive(&memo, None).await), Code::Invalid);
-    // More than the provider holds beside what it is to lock.
-    eco.receive(500, 6).await;
+    // More than the provider holds beside what it locked for a receipt
+    // paid: an unpaid one sets nothing aside.
+    let (_, paid) = eco.receive(500, 6).await;
+    eco.pay(paid, CLTV);
+    eco.follow().await;
+    assert_eq!(eco.state(&paid), ReceiptState::Locked);
     assert_eq!(
-        refused(provider.receive(&eco.request(450, 7), None).await),
+        refused(provider.receive(&eco.request(500, 7), None).await),
         Code::Declined
     );
     // At most three under way.

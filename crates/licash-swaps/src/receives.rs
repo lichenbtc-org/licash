@@ -236,14 +236,17 @@ pub(crate) fn holds_hash(c: &Connection, hash: &[u8; 32]) -> Result<bool, Error>
     )
 }
 
-/// What receipts not locked yet will lock at hub `url`, in the file of `c`.
+/// What receipts paid and not locked yet will lock at hub `url`, in the
+/// file of `c`: those whose expiry is recorded, once their payment was
+/// held ([`Provider::accepted_receipt`]). An unpaid receipt sets nothing
+/// aside, as anyone may ask for one for free.
 pub(crate) fn reserved(c: &Connection, url: &str) -> Result<u64, Error> {
     if !kept(c)? {
         return Ok(0);
     }
     Ok(c.query_row(
         "SELECT coalesce(sum(amount), 0) FROM provider_receives
-         WHERE hub = ?1 AND state = 'open' AND lock IS NULL",
+         WHERE hub = ?1 AND state = 'open' AND lock IS NULL AND expiry IS NOT NULL",
         [url],
         |r| r.get::<_, i64>(0),
     )? as u64)
@@ -655,16 +658,34 @@ impl<T: Transport> Provider<T> {
                         .cancel_receipt(taker, hash, "its payment expires too soon to lock")
                         .await;
                 };
-                // Recorded before locking: a lock made, then the provider
-                // stopped, is looked for, never made again blindly.
-                self.store.write(|tx| {
-                    tx.execute(
-                        "UPDATE provider_receives SET expiry = ?2, updated_at = ?3
-                         WHERE hash = ?1 AND expiry IS NULL",
-                        params![hash, expiry, now()],
-                    )?;
-                    Ok(())
-                })?;
+                // Set aside from what swaps lock at its hub only now it is
+                // paid, if the provider holds enough there still: else
+                // failed back, nothing locked. Recorded before locking: a
+                // lock made, then the provider stopped, is looked for,
+                // never made again blindly.
+                let enough = {
+                    let _taking = self.taking.lock().unwrap_or_else(PoisonError::into_inner);
+                    let free = self
+                        .stock()?
+                        .into_iter()
+                        .find(|s| s.url == receipt.hub)
+                        .map_or(0, |s| s.free);
+                    if free >= receipt.amount {
+                        self.store.write(|tx| {
+                            tx.execute(
+                                "UPDATE provider_receives SET expiry = ?2, updated_at = ?3
+                                 WHERE hash = ?1 AND expiry IS NULL",
+                                params![hash, expiry, now()],
+                            )?;
+                            Ok(())
+                        })?;
+                    }
+                    free >= receipt.amount
+                };
+                if !enough {
+                    let why = "the provider holds too little at its hub now";
+                    return self.cancel_receipt(taker, hash, why).await;
+                }
                 return self.lock_receipt(taker, receipt, expiry).await;
             }
             (None, Some(expiry)) => {

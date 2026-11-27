@@ -200,10 +200,13 @@ hub's response window, a block to read the preimage, the provider's margin
 and one), 18 blocks, 15 for the wallet to claim and 3 of slack, about 230
 blocks on a hub with a day's window. A lock that expired, neither paid nor
 refunded, alerts the operator and never cancels the invoice. At most
-`--receive-max-open` receipts are under way at once (100 by default),
-each holding its amount of the provider's notes at the hub aside while
-unpaid, and one source holds at most 8 of them unpaid at once, as
-donations. A provider with receipts under way refuses to start without
+`--receive-max-open` receipts are under way at once (100 by default), and
+one source holds at most 8 of them unpaid at once, as donations. An unpaid
+receipt holds none of the provider's notes, only its place: a receipt is
+asked only if the provider holds its amount at the hub then, and once
+paid, its amount is set aside from what the provider swaps there, if it
+still holds it; if not, the invoice is canceled and the payer refunded.
+A provider with receipts under way refuses to start without
 `--receive` and `--lnd`. Receipts are kept in tables of their own, made in
 the provider's file when first taken: an existing provider's file is
 otherwise as it was.
