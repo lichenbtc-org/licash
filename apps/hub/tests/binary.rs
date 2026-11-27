@@ -708,6 +708,36 @@ fn disabled_gateways_detect_a_lock_made_before_the_gateway_recorded_it() {
 }
 
 #[test]
+fn a_disabled_lightning_gateway_refuses_a_payment_out_still_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("hub");
+    stdout(&data, &["init", "--max-pow", "6"]);
+    let hash = [8; 32];
+    let lock = hex::decode(own_lock(&data, hash)).unwrap();
+    // No receipt table: the gateway only paid out.
+    let conn = rusqlite::Connection::open(data.join("hub.sqlite")).unwrap();
+    conn.execute(
+        "INSERT INTO forwards (lock, hash, request, node, amount, state, created_at)
+         VALUES (?1, ?2, 'lnbcrt1', 'node', 0, 'pending', 0)",
+        rusqlite::params![lock, hash],
+    )
+    .unwrap();
+    let listen = format!("127.0.0.1:{}", free_port());
+    let stderr = refused(&data, &["run", "--listen", &listen]);
+    assert!(
+        stderr.contains("--lnd") && stderr.contains("1 obligations"),
+        "{stderr}"
+    );
+    // Ended: nothing left for the gateway, the lock its own matter.
+    conn.execute(
+        "UPDATE forwards SET state = 'failed', reason = 'no route', resolved_at = 1",
+        [],
+    )
+    .unwrap();
+    drop(serving(&data, free_port(), &["--allow-unbacked-locks"]));
+}
+
+#[test]
 fn unreadable_gateway_state_is_not_assumed_idle() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("hub");

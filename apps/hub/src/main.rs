@@ -1893,8 +1893,15 @@ fn check_gateway_idle(hub: &Hub, db: &Path, deposits: bool) -> anyhow::Result<()
         ("lightning", "lightning_receipts", "--lnd")
     };
     let check = || -> anyhow::Result<(usize, usize)> {
+        // A payment out still pending keeps its lock from a refund until
+        // the gateway learns how it ended. In the hub's own schema, so
+        // whether or not the gateway's tables were made.
+        let forwarding = match deposits {
+            true => 0,
+            false => hub.forwards()?.len(),
+        };
         let Some(conn) = peer::reader(db, component)? else {
-            return Ok((0, 0));
+            return Ok((forwarding, 0));
         };
         // A deposit bound to a contract is a promise of months: owed, though
         // nothing is paid to it yet. None where the table was never made.
@@ -1914,7 +1921,7 @@ fn check_gateway_idle(hub: &Hub, db: &Path, deposits: bool) -> anyhow::Result<()
                 r.get::<_, Option<i64>>(3)?,
             ))
         })?;
-        let (mut required, mut open) = (0, 0);
+        let (mut required, mut open) = (forwarding, 0);
         for row in rows {
             let (hash, lock, state, done) = row?;
             let owes = match state.as_str() {
