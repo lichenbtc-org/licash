@@ -122,6 +122,13 @@ internal fun ways(lightning: Boolean, silent: Boolean, donations: Boolean = fals
     )
 
 /**
+ * Whether Lightning is offered, `found` saying whether a provider takes it:
+ * while still unknown (null), it is, so that a tap on it asks the amount at
+ * once rather than waiting on providers; closed once none is found.
+ */
+internal fun lightningOpen(found: Boolean?): Boolean = found != false
+
+/**
  * The ways not open to the wallet now, each with why: said grayed out
  * under the others, so none is a mystery. `lookingForDonations` and
  * `lookingForLightning` while providers are still asked.
@@ -233,19 +240,26 @@ fun Receive(engine: Engine, back: () -> Unit) {
     var choosing by rememberSaveable { mutableStateOf(false) }
     val ui by engine.ui.collectAsState()
     // A provider's node makes the invoice, hubs making none: looked for
-    // once, out of sight.
-    var providerLightning by remember { mutableStateOf(false) }
-    var lookingForLightning by remember { mutableStateOf(false) }
+    // out of sight, unknown (null) until it answers, the last answer kept
+    // while asked again.
+    var providerLightning by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(ui.hubs) {
-        lookingForLightning = true
         providerLightning = engine.providerTakesLightning().getOrDefault(false)
-        lookingForLightning = false
     }
-    val takesLightning = providerLightning
+    val lookingForLightning = providerLightning == null
+    val takesLightning = lightningOpen(providerLightning)
     val invoicedBy = "the provider"
     val ways = ways(takesLightning, ui.hubs.any { it.silent }, donations != null, address != null)
     // Picked for the amount, unless another way was asked for.
     var chosen by rememberSaveable { mutableStateOf<Way?>(null) }
+    // Chosen while unknown, and none found since: why, in its place.
+    LaunchedEffect(providerLightning) {
+        if (providerLightning == false && chosen == Way.LIGHTNING) {
+            chosen = null
+            editing = false
+            error = closedWays(false, true, true, false).find { it.first == Way.LIGHTNING }?.second
+        }
+    }
     val way = chosen?.takeIf { it in ways } ?: picked(amount, takesLightning)
     val lightning = way == Way.LIGHTNING
     // An invoice, made by a hub: for an amount, paid once.

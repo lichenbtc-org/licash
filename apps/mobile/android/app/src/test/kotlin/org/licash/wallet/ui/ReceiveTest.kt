@@ -59,6 +59,16 @@ class ReceiveTest {
     }
 
     @Test
+    fun lightning_is_open_while_providers_are_still_asked_and_closed_once_none_is_found() {
+        // A tap on it while still asking goes on to the amount at once.
+        assertTrue(lightningOpen(null))
+        assertTrue(lightningOpen(true))
+        assertFalse(lightningOpen(false))
+        assertEquals(Way.LIGHTNING, ways(lightning = lightningOpen(null), silent = false).first())
+        assertEquals(Way.LIGHTNING, picked(amount = 500, lightning = lightningOpen(null)))
+    }
+
+    @Test
     fun a_memo_is_its_words_one_space_apart_and_none_if_blank() {
         assertNull(memoOf(""))
         assertNull(memoOf("  \n\t "))
