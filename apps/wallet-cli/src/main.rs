@@ -278,24 +278,21 @@ enum Command {
         #[arg(long)]
         max_fee: Option<u64>,
     },
-    /// Pay a Lightning invoice through a hub, its fee on top: the hub pays
-    /// it for a lock of notes, refunded if the payment fails. With --via,
-    /// a swap provider pays it instead, for a lock of notes at the hub to
-    /// it, refunded once expired if the payment fails.
+    /// Pay a Lightning invoice through a swap provider, its fee on top: it
+    /// pays the invoice from its own Lightning node for a lock of notes at
+    /// a hub to it, refunded once expired if the payment fails. Hubs pay
+    /// no invoices.
     PayInvoice {
         invoice: String,
-        /// Through this hub, or from notes at it with --via [default: the
-        /// one holding the most].
+        /// From notes at this hub [default: the one holding the most].
         #[arg(long)]
         hub: Option<String>,
-        /// Through the swap provider at this URL, from its own Lightning
-        /// node, rather than through the hub.
+        /// The swap provider at this URL, which sees the payment.
         #[arg(long, value_name = "URL")]
-        via: Option<String>,
-        /// The fee at most, in sat: the provider's with --via [default: 1%
-        /// and 100], else the hub's, with the exact notes it may make
-        /// [default: none]. Asking more, it is asked on a terminal whether
-        /// to pay that, else refused.
+        via: String,
+        /// The provider's fee at most, in sat [default: 1% and 100]. Asking
+        /// more, it is asked on a terminal whether to pay that, else
+        /// refused.
         #[arg(long)]
         max_fee: Option<u64>,
         /// Seconds to wait for the payment to end; `resume` follows it
@@ -303,33 +300,25 @@ enum Command {
         #[arg(long, default_value_t = 60)]
         wait: u64,
     },
-    /// A Lightning invoice paying this wallet AMOUNT through a hub, its fee
-    /// on top, to hand the payer (its hash on stderr). `resume` takes the
-    /// payment once made.
+    /// A Lightning invoice paying this wallet AMOUNT in notes at a hub, made
+    /// by a swap provider, its fee on top, to hand the payer (its hash on
+    /// stderr). `resume` takes the payment once made. Hubs make no
+    /// invoices.
     Invoice {
         amount: u64,
-        /// Through this hub, or paid at it with --via [default: the only one
-        /// trusted].
+        /// Paid at this hub [default: the only one trusted].
         #[arg(long)]
         hub: Option<String>,
-        /// Made by the swap provider at this URL, from its own Lightning
-        /// node, for a hub without a gateway: once paid, it locks its notes
-        /// to the wallet at the hub, its fee on top for the payer. It sees
-        /// the amount, the memo, and which payments go to this wallet.
-        #[arg(long, value_name = "URL", conflicts_with = "chain")]
-        via: Option<String>,
+        /// The swap provider at this URL, from its own Lightning node: once
+        /// paid, it locks its notes to the wallet at the hub. It sees the
+        /// amount, the memo, and which payments go to this wallet.
+        #[arg(long, value_name = "URL")]
+        via: String,
         /// Also draw it as a QR code, on a terminal.
         #[arg(long)]
         qr: bool,
-        /// The chain, to protect the payment where a contract of the
-        /// wallet's at the hub can: its lock's preimage revealed only with
-        /// 6 blocks left, for the wallet to activate the lock on Bitcoin
-        /// should the hub keep the notes (`recoveries --chain`), the payment
-        /// failing back otherwise. Without, the hub is trusted with them.
-        #[arg(long, env = "LICASH_WALLET_CHAIN")]
-        chain: Option<String>,
         /// What the invoice says to its payer, up to 100 characters: the
-        /// hub and its Lightning node read it too.
+        /// provider and its Lightning node read it too.
         #[arg(long)]
         memo: Option<String>,
     },
@@ -1004,7 +993,6 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
                 json,
                 json!({
                     "fees": info.fees, "keysets": info.keysets.len(), "locks": info.locks.is_some(),
-                    "lightning": info.lightning,
                 }),
                 match (fees.spend.base, fees.spend.ppm, fees.output_msat) {
                     (0, 0, 0) => "trusted: it charges no fee".to_owned(),
@@ -1017,17 +1005,12 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
             let rows = hubs.iter().map(|(url, info)| {
                 json!({
                     "url": url, "fees": info.fees, "locks": info.locks.is_some(),
-                    "lightning": info.lightning, "deposits": info.deposits,
+                    "deposits": info.deposits,
                     // What `recover` needs of it, to be kept with the seed.
                     "address": hex::encode(info.address.to_bytes()),
                 })
             });
             let lines = hubs.iter().map(|(url, info)| {
-                let lightning = if info.lightning.is_some() {
-                    "  lightning"
-                } else {
-                    ""
-                };
                 let deposits = match &info.deposits {
                     Some(d) => format!("  deposits {}", say::between(d.min, d.max)),
                     None => String::new(),
@@ -1037,10 +1020,7 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
                     true => "  more than agreed: approve-fees",
                     false => "",
                 };
-                format!(
-                    "{url}  {}{lightning}{deposits}{raised}",
-                    say::payment_fee(&info.fees)
-                )
+                format!("{url}  {}{deposits}{raised}", say::payment_fee(&info.fees))
             });
             show(json, rows.collect(), lines.collect::<Vec<_>>().join("\n"));
         }
@@ -1349,28 +1329,14 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
                 Some(hub) => hub,
                 None => richest(&wallet)?,
             };
-            let lock = match via {
-                Some(provider) => {
-                    let amount = Payable::read(&invoice)?.amount;
-                    let max_fee = max_fee.unwrap_or(SwapLimits::usual(amount).fee);
-                    let paying =
-                        |max_fee| wallet.pay_invoice_via(&provider, &hub, &invoice, max_fee);
-                    match paying(max_fee).await {
-                        Err(e @ licash_wallet::Error::FeeRose { .. }) => {
-                            paying(accept_raise(e, json)?).await?
-                        }
-                        paid => paid?,
-                    }
+            let amount = Payable::read(&invoice)?.amount;
+            let max_fee = max_fee.unwrap_or(SwapLimits::usual(amount).fee);
+            let paying = |max_fee| wallet.pay_invoice_via(&via, &hub, &invoice, max_fee);
+            let lock = match paying(max_fee).await {
+                Err(e @ licash_wallet::Error::FeeRose { .. }) => {
+                    paying(accept_raise(e, json)?).await?
                 }
-                None => {
-                    let paying = |max_fee| wallet.pay_invoice_within(&hub, &invoice, max_fee);
-                    match paying(max_fee).await {
-                        Err(e @ licash_wallet::Error::FeeRose { .. }) => {
-                            paying(Some(accept_raise(e, json)?)).await?
-                        }
-                        paid => paid?,
-                    }
-                }
+                paid => paid?,
             };
             return pay_invoice(&wallet, lock, wait, json).await;
         }
@@ -1379,21 +1345,15 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
             hub,
             via,
             qr,
-            chain,
             memo,
         } => {
             let hub = match hub {
                 Some(hub) => hub,
                 None => only_hub(&wallet)?,
             };
-            let memo = memo.as_deref();
-            let invoice = match (via, chain) {
-                (Some(via), _) => wallet.invoice_through(&via, &hub, amount, memo).await?,
-                (None, Some(chain)) => {
-                    contract::invoice(&wallet, &path, &chain, &hub, amount, memo).await?
-                }
-                (None, None) => wallet.invoice_saying(&hub, amount, memo, false).await?,
-            };
+            let invoice = wallet
+                .invoice_through(&via, &hub, amount, memo.as_deref())
+                .await?;
             eprintln!("invoice {}", invoice.hash);
             let request = invoice.request.clone().unwrap_or_default();
             show_qr(qr && !json && !request.is_empty(), &request);
@@ -1792,19 +1752,14 @@ async fn discover(
         let (key, shown) = (&service.key, &service.announcement.name);
         match &at[0].1 {
             Answer::Hub(info) => {
-                let lightning = if info.lightning.is_some() {
-                    "  lightning"
-                } else {
-                    ""
-                };
                 lines.push(format!(
-                    "{}  {}{lightning}  {name}",
+                    "{}  {}  {name}",
                     urls.join(" "),
                     say::payment_fee(&info.fees)
                 ));
                 rows.push(json!({
                     "key": key, "name": shown, "urls": urls, "fees": info.fees,
-                    "locks": info.locks.is_some(), "lightning": info.lightning,
+                    "locks": info.locks.is_some(),
                 }));
             }
             Answer::Swaps(info) => {

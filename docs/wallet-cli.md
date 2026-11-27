@@ -157,46 +157,27 @@ on Bitcoin, its payer's signatures and the checkpoint it names, both served
 with the lock's state (`/v1/lock/{id}`): a hub leaving either out is
 retried, and learns nothing.
 
-Through a hub with a Lightning gateway, `pay-invoice <bolt11>` pays an
-invoice with a lock refunded if the payment fails, and `invoice <amount>`
-prints an invoice paying the wallet; `resume` takes the payment once made.
-With `--chain <url>`, `invoice` protects the payment where it can: with a
-contract of the wallet's at the hub (v4 or later) whose forced close is
-planned 36 blocks on or later, a coin to activate the lock with, and an
-amount worth more than the activation, the lock's preimage is revealed
-only with 6 blocks left, so a hub keeping the notes is met on Bitcoin
-(`recoveries --chain` activates the lock and the contract's recovery claims
-it); a lock shown later is left to expire and the payment fails back.
-The 6 blocks are counted at the chain's height as the wallet knows it of
-itself, never on its hub's word alone: `resume --chain <url>` tells it, as
-does the last block it scanned, and a protected payment waits, unclaimed,
-for a `resume` that knows neither.
-Without `--chain`, or where it can't, the hub is trusted with the notes.
-`invoice <amount> --memo TEXT` has the invoice say TEXT to its payer (its
-words one space apart, at most 100 characters): asked only of a hub naming
-the `memo` feature in its info, and an invoice without it is canceled, never
-printed. The hub and its Lightning node read it too. `invoices` lists it.
-An invoice another wallet asked the same hub for is paid inside the hub,
-for its amount alone, with no gateway fee.
-`invoice <amount> --via <provider>` has a swap provider taking payments
-for wallets (`licash-swaps run --receive`) make the invoice from its own
-node instead, for a hub without a gateway: it asks the amount and the
-provider's fee exactly, and once paid the provider locks its notes to the
-wallet at `--hub`, which `resume` claims as it claims a hub's. Nothing is
-trusted to the provider, but it sees the amount, the memo and which
-payments go to the wallet. Not with `--chain`.
-`pay-invoice <bolt11> --via <provider>` has a swap provider that pays
-Lightning invoices pay it from its own node instead, for a lock of notes
-at `--hub` to the provider, its fee on top (at most `--max-fee`, 1% and 100
-sat by default). The lock expires soon after the provider's routes end: a
-payment that fails or the provider declines leaves it to be refunded then.
-The wallet records the provider with the lock, and `resume` asks the
-provider again until the payment settles or fails, so a payment interrupted
-before the provider heard of it is still made. Running it again for the
-same invoice follows the same lock. The invoice is not paid through a hub's
-gateway while a provider's lock pays it, nor the other way around. An invoice another wallet asked
-its hub for pays that wallet notes there: notes at one hub pay notes at
-another, with no notes of the provider at the other.
+Hubs pay and make no Lightning invoices: swap providers do, from their own
+nodes. `invoice <amount> --via <provider>` has a provider taking payments
+for wallets (`licash-swaps run --receive`) make an invoice paying the
+wallet: it asks the amount and the provider's fee exactly, and once paid
+the provider locks its notes to the wallet at `--hub`, which `resume`
+claims. Nothing is trusted to the provider, but it sees the amount, the
+memo and which payments go to the wallet. `--memo TEXT` has the invoice say
+TEXT to its payer (its words one space apart, at most 100 characters); the
+provider and its node read it too. `invoices` lists it.
+`pay-invoice <bolt11> --via <provider>` has a provider that pays Lightning
+invoices pay it from its own node, for a lock of notes at `--hub` to the
+provider, its fee on top (at most `--max-fee`, 1% and 100 sat by default).
+The lock expires soon after the provider's routes end: a payment that fails
+or the provider declines leaves it to be refunded then. The wallet records
+the provider with the lock, and `resume` asks the provider again until the
+payment settles or fails, so a payment interrupted before the provider
+heard of it is still made. Running it again for the same invoice follows
+the same lock.
+A wallet that asked a hub's Lightning gateway for an invoice or a payment
+before its hub dropped the gateway keeps following it with `resume`: a
+payment's lock is refunded once expired if it was never paid.
 
 Through a hub taking deposits, `deposit <amount>` prints a BIP21 URI to pay
 on Bitcoin, the hub's fee on top; `resume` takes the notes once the payment

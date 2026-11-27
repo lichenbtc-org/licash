@@ -626,16 +626,11 @@ fn an_invoice_made_by_a_provider_pays_the_wallet_at_a_hub_without_a_gateway() {
     let dir = tempfile::tempdir().unwrap();
     let (alice, _) = party(dir.path(), "alice", Some(&hub));
     let provider = swaps.url();
-    // Protected by a contract, or made by a provider: not both.
-    let both = [
-        "invoice",
-        "100",
-        "--via",
-        &provider,
-        "--chain",
-        "http://chain.test",
-    ];
-    assert_eq!(wallet(&alice, &both, None).status.code(), Some(2));
+    // Made by a provider alone: hubs make none.
+    assert_eq!(
+        wallet(&alice, &["invoice", "100"], None).status.code(),
+        Some(2)
+    );
 
     let asked = wallet(&alice, &["invoice", "100", "--via", &provider], None);
     let stderr = String::from_utf8_lossy(&asked.stderr).into_owned();

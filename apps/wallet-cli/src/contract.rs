@@ -11,7 +11,6 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use licash_contracts::holder::activation;
 use licash_contracts::holder::recovery::{self, Recovery};
 use licash_contracts::holder::{self, Ask, Contract, Node};
 use licash_transport::Http;
@@ -765,31 +764,6 @@ pub async fn saw_tip(wallet: &Wallet<Http>, chain: &str) -> anyhow::Result<()> {
     let tip = node(Some(chain))?.height().await;
     wallet.saw_tip(tip.map_err(|e| anyhow::anyhow!(e))?);
     Ok(())
-}
-
-/// An invoice paying the wallet `amount` through `hub`, protected where a
-/// contract of the wallet's at the hub would claim its lock's notes should
-/// the hub keep them, and a coin of the wallet's activates the lock on
-/// `chain` for less ([`activation::protects`]); else trusting the hub.
-/// Saying `memo` to its payer, if given.
-pub async fn invoice(
-    wallet: &Wallet<Http>,
-    path: &Path,
-    chain: &str,
-    hub: &str,
-    amount: u64,
-    memo: Option<&str>,
-) -> anyhow::Result<licash_wallet::Invoice> {
-    let node = node(Some(chain))?;
-    let tip = node.height().await.map_err(|e| anyhow::anyhow!(e))?;
-    let rate = crate::onchain::rate(&node.0, None).await?;
-    let protected = activation::protects(wallet, path, hub, amount, rate, tip)?;
-    if protected {
-        wallet.saw_tip(tip);
-    } else {
-        tracing::info!(%hub, amount, "no contract at the hub protects the invoice's lock");
-    }
-    Ok(wallet.invoice_saying(hub, amount, memo, protected).await?)
 }
 
 /// The contracts the wallet forced closed: with --chain, each carried on
