@@ -435,6 +435,14 @@ exit circuits ahead. A new circuit to an onion service under load costs a
 proof of work. With Tor off, or through an external SOCKS proxy, requests
 are not split this way.
 
+Swap providers are looked up on the hubs' relays at start and refreshed in
+the background, and while the app is open their terms are asked every few
+minutes and kept for 10 minutes, so a quote (moving notes, paying an
+invoice or on Bitcoin, receiving) asks no provider: it is made from the
+kept terms, the cheapest first. Paying asks the chosen provider again,
+alongside the hub, and is refused if its fee rose; should it fail before
+any notes are locked, the next provider costing no more is tried.
+
 ### Testing against the command line
 
 A counterpart on the command line:
