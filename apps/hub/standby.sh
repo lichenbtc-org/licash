@@ -49,7 +49,8 @@ restore() {
     local code=0
     timeout "$within" "$litestream" restore -o "$part" "$replica" || code=$?
     if [[ $code -eq 0 ]]; then
-        sync
+        # Its file alone, not every disk the machine has.
+        sync -- "$part"
         return 0
     fi
     rm -rf -- "$part" "$part"-* "$part".*
@@ -63,7 +64,7 @@ restore() {
 put() {
     rm -f -- "$db-wal" "$db-shm" "$data/notify.json" "$unrestored"
     mv -- "$part" "$db"
-    sync
+    sync -- "$db" "$data"
     say "restored from $replica"
 }
 
@@ -80,7 +81,7 @@ elif [[ ! -e "$db" ]]; then
     restore
     # Written first: one restored and not yet renamed is restored again.
     touch -- "$restored"
-    sync
+    sync -- "$restored" "$data"
     put
 elif [[ -e "$restored" ]]; then
     if restore; then
