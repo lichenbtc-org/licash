@@ -43,13 +43,11 @@ use axum::{
 use inbox::Inbox;
 use licash_api::{
     Code, Deposit, DepositStatus, Depositing, Evidenced, Info, Inquire, Issued, Lock, LockState,
-    Locked, Offer, Offered, Pay, Paying, Problem, Receive, ReceiveStatus, Receiving, Refund,
-    Released, Settle, TweaksQuery, Unlink, Unlinked,
+    Locked, Offer, Offered, Problem, Refund, Released, Settle, TweaksQuery, Unlink, Unlinked,
 };
 use licash_hub::{Error, Hub, Settled};
 use licash_serve::Admission;
 pub use licash_serve::{AdmissionSource, Ingress};
-use lightning::Gateway;
 use tower_http::trace::TraceLayer;
 use tweaks::Tweaks;
 
@@ -219,7 +217,6 @@ fn lock_checkpoint_height(top: u32, tip: u32, bury: u32) -> anyhow::Result<u32> 
 /// What a hub serves beside its ledger, each if it runs it.
 #[derive(Clone, Default)]
 pub struct Services {
-    pub gateway: Option<Arc<Gateway>>,
     pub deposits: Option<Arc<deposit::Gateway>>,
     pub tweaks: Option<Arc<Tweaks>>,
     /// The payments it keeps for their payees, as their payers ask.
@@ -247,7 +244,6 @@ pub fn responding(hub: Arc<Hub>) -> Router {
 /// The API of `hub`, with the paths of its `services`.
 pub fn router(hub: Arc<Hub>, services: Services) -> Router {
     let Services {
-        gateway,
         deposits,
         tweaks,
         inbox,
@@ -274,15 +270,6 @@ pub fn router(hub: Arc<Hub>, services: Services) -> Router {
         .with_state(hub)
         .merge(info_of)
         .merge(release_of);
-    if let Some(gateway) = gateway {
-        api = api.merge(
-            Router::new()
-                .route(licash_api::LN_PAY, post(ln_pay))
-                .route(licash_api::LN_RECEIVE, post(ln_receive))
-                .route(licash_api::LN_RECEIVE_STATE, get(ln_receive_state))
-                .with_state(gateway),
-        );
-    }
     if let Some(deposits) = deposits {
         api = api.merge(
             Router::new()
@@ -407,11 +394,6 @@ async fn info(State((hub, services)): State<(Arc<Hub>, Services)>) -> Answer<Inf
         Ok(info)
     })
     .await?;
-    info.lightning = services.gateway.and_then(|gateway| gateway.advertise());
-    if info.lightning.is_some() {
-        info.features.push(licash_api::FEATURE_MEMO.into());
-        info.features.push(licash_api::FEATURE_LNURL.into());
-    }
     if services.inbox.is_some() {
         info.features.push(licash_api::inbox::FEATURE_NOTE.into());
     }
@@ -551,23 +533,6 @@ async fn refund(
     .await
 }
 
-async fn ln_pay(
-    State(gateway): State<Arc<Gateway>>,
-    body: Result<Json<Pay>, JsonRejection>,
-) -> Answer<Paying> {
-    let Json(body) = body?;
-    Ok(Json(gateway.pay(&body).await?))
-}
-
-async fn ln_receive(
-    State(gateway): State<Arc<Gateway>>,
-    Admission(source): Admission,
-    body: Result<Json<Receive>, JsonRejection>,
-) -> Answer<Receiving> {
-    let Json(body) = body?;
-    Ok(Json(gateway.receive(&body, source.as_ref()).await?))
-}
-
 async fn deposit(
     State(deposits): State<Arc<deposit::Gateway>>,
     Admission(source): Admission,
@@ -639,14 +604,6 @@ async fn chain_tweaks(
         false => "no-cache",
     };
     Ok(([(header::CACHE_CONTROL, cache)], Json(blocks)).into_response())
-}
-
-async fn ln_receive_state(
-    State(gateway): State<Arc<Gateway>>,
-    Path(hash): Path<String>,
-) -> Answer<ReceiveStatus> {
-    let hash = licash_api::hash_of(&hash)?;
-    Ok(Json(gateway.receive_status(&hash)?))
 }
 
 /// Run `op` on the inbox, off the async workers: it waits on its fsync.

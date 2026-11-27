@@ -19,7 +19,7 @@ use licash_hub_service::{
     announce::announce,
     dashboard, deposit,
     inbox::Inbox,
-    lightning::{lnd::Lnd, Config, Gateway},
+    lightning,
     notify::{self, Notifier},
     payouts, peer,
     tweaks::{self, Tweaks},
@@ -638,124 +638,6 @@ struct PolicyArgs {
     max_lag: u64,
 }
 
-/// The hub's Lightning gateway, over an LND node.
-#[derive(Args)]
-struct LightningArgs {
-    /// Run a Lightning gateway over the LND REST API at this URL, such as
-    /// `https://127.0.0.1:8080`.
-    #[arg(long, value_name = "URL", env = "LICASH_HUB_LND")]
-    lnd: Option<String>,
-    /// The macaroon the gateway calls LND with: it pays, and makes, settles
-    /// and cancels invoices.
-    #[arg(
-        long,
-        value_name = "FILE",
-        env = "LICASH_HUB_LND_MACAROON",
-        requires = "lnd"
-    )]
-    lnd_macaroon: Option<PathBuf>,
-    /// LND's TLS certificate, pinned. Without it, the URL's certificate
-    /// must validate against the system's roots.
-    #[arg(
-        long,
-        value_name = "FILE",
-        env = "LICASH_HUB_LND_CERT",
-        requires = "lnd"
-    )]
-    lnd_cert: Option<PathBuf>,
-    /// The fee on each invoice paid, routing fees included, in satoshis.
-    #[arg(long, env = "LICASH_HUB_LN_PAY_FEE_BASE", default_value_t = Config::default().pay.base)]
-    ln_pay_fee_base: u64,
-    /// The fee on each invoice paid, in parts per million of its amount.
-    #[arg(long, env = "LICASH_HUB_LN_PAY_FEE_PPM", default_value_t = Config::default().pay.ppm,
-          value_parser = ppm())]
-    ln_pay_fee_ppm: u64,
-    /// The fee on each payment received, in satoshis.
-    #[arg(long, env = "LICASH_HUB_LN_RECEIVE_FEE_BASE", default_value_t = FEE.base)]
-    ln_receive_fee_base: u64,
-    /// The fee on each payment received, in parts per million.
-    #[arg(long, env = "LICASH_HUB_LN_RECEIVE_FEE_PPM", default_value_t = FEE.ppm, value_parser = ppm())]
-    ln_receive_fee_ppm: u64,
-    /// The largest invoice paid, in satoshis.
-    #[arg(long, env = "LICASH_HUB_LN_MAX_PAY", default_value_t = Config::default().max_pay)]
-    ln_max_pay: u64,
-    /// The most paid over Lightning in any 24 hours, in satoshis, the
-    /// gateway's fee in it: past it invoices are refused, their locks
-    /// refunded, and the operator alerted. It bounds what a thief of the
-    /// hub's seed takes over Lightning in a day. Without it, no limit.
-    #[arg(long, env = "LICASH_HUB_LN_MAX_PAY_DAY", value_name = "SAT")]
-    ln_max_pay_day: Option<u64>,
-    /// The least received, in satoshis.
-    #[arg(long, env = "LICASH_HUB_LN_MIN_RECEIVE", default_value_t = Config::default().min_receive)]
-    ln_min_receive: u64,
-    /// The most received, in satoshis.
-    #[arg(long, env = "LICASH_HUB_LN_MAX_RECEIVE", default_value_t = Config::default().max_receive)]
-    ln_max_receive: u64,
-    /// The most Lightning receipts open or locked at once.
-    #[arg(long, env = "LICASH_HUB_LN_MAX_RECEIPTS", default_value_t = Config::default().max_receipts)]
-    ln_max_receipts: u32,
-    /// Blocks between the end of a payment's route timelock and the
-    /// expiry of the lock paying for it.
-    #[arg(long, env = "LICASH_HUB_LN_PAY_SLACK", default_value_t = Config::default().pay_slack)]
-    ln_pay_slack: u32,
-    /// LND's `holdexpirydelta`: blocks before an HTLC's expiry at which
-    /// LND cancels it while held.
-    #[arg(long, env = "LICASH_HUB_LN_HOLD_DELTA", default_value_t = Config::default().hold_delta)]
-    ln_hold_delta: u32,
-    /// Blocks the gateway may be down while a payment received is locked.
-    #[arg(long, env = "LICASH_HUB_LN_DOWNTIME", default_value_t = Config::default().downtime)]
-    ln_downtime: u32,
-    /// Blocks a payment received stays locked to its payee.
-    #[arg(long, env = "LICASH_HUB_LN_RECEIVE_BLOCKS", default_value_t = Config::default().receive_blocks)]
-    ln_receive_blocks: u32,
-    /// Seconds an invoice to receive stays payable.
-    #[arg(long, env = "LICASH_HUB_LN_INVOICE_EXPIRY", default_value_t = Config::default().invoice_expiry)]
-    ln_invoice_expiry: u64,
-    /// Seconds LND tries to route a payment.
-    #[arg(long, env = "LICASH_HUB_LN_PAY_TIMEOUT", default_value_t = Config::default().pay_timeout)]
-    ln_pay_timeout: u32,
-}
-
-impl LightningArgs {
-    /// The node and the gateway's configuration, if it runs one.
-    fn gateway(&self) -> anyhow::Result<Option<(Lnd, Config)>> {
-        let Some(url) = &self.lnd else {
-            return Ok(None);
-        };
-        let macaroon = self
-            .lnd_macaroon
-            .as_ref()
-            .context("--lnd needs --lnd-macaroon")?;
-        let macaroon =
-            std::fs::read(macaroon).with_context(|| format!("read {}", macaroon.display()))?;
-        let cert = match &self.lnd_cert {
-            Some(path) => {
-                Some(std::fs::read(path).with_context(|| format!("read {}", path.display()))?)
-            }
-            None => None,
-        };
-        let lnd = Lnd::new(url, &macaroon, cert.as_deref()).context("--lnd")?;
-        let fee = |base, ppm| Fee { base, ppm };
-        let config = Config {
-            pay: fee(self.ln_pay_fee_base, self.ln_pay_fee_ppm),
-            receive: fee(self.ln_receive_fee_base, self.ln_receive_fee_ppm),
-            max_pay: self.ln_max_pay,
-            max_pay_day: self.ln_max_pay_day,
-            min_receive: self.ln_min_receive,
-            max_receive: self.ln_max_receive,
-            max_receipts: self.ln_max_receipts,
-            pay_slack: self.ln_pay_slack,
-            hold_delta: self.ln_hold_delta,
-            downtime: self.ln_downtime,
-            receive_blocks: self.ln_receive_blocks,
-            invoice_expiry: self.ln_invoice_expiry,
-            pay_timeout: self.ln_pay_timeout,
-            ..Config::default()
-        };
-        Ok(Some((lnd, config)))
-    }
-}
-
 /// The hub's deposits on Bitcoin.
 #[derive(Args)]
 struct DepositArgs {
@@ -1119,8 +1001,6 @@ enum Command {
         #[command(flatten)]
         notify: Notify,
         #[command(flatten)]
-        lightning: Box<LightningArgs>,
-        #[command(flatten)]
         deposits: Box<DepositArgs>,
         #[command(flatten)]
         announce: Box<AnnounceArgs>,
@@ -1139,7 +1019,8 @@ enum Command {
               value_parser = clap::builder::BoolishValueParser::new())]
         onion_pow: bool,
         /// Run even though own locks of the hub, which it may yet pay, are
-        /// backed by no deposit, Lightning receipt or swap it keeps, as
+        /// backed by no deposit, swap, or Lightning receipt of an earlier
+        /// release, it keeps, as
         /// once such a file was restored older than `hub.sqlite`: alerting
         /// the operator, rather than refusing to start.
         #[arg(long, env = "LICASH_HUB_ALLOW_UNBACKED_LOCKS",
@@ -1151,7 +1032,7 @@ enum Command {
         notify_kinds: Vec<String>,
         /// Only answer the disputes of the contracts open, as a standby
         /// copy of the hub: no API but `/health`, no new contract, fold,
-        /// Lightning, deposit, swap, announcement nor onion service. As a
+        /// deposit, swap, announcement nor onion service. As a
         /// copy runs once another took its contracts over
         /// (`contracts-takeover`). Needs `--contracts` and witnesses.
         #[arg(long, env = "LICASH_HUB_RESPOND_ONLY",
@@ -1200,7 +1081,7 @@ enum Command {
         #[arg(long, env = "LICASH_HUB_NETWORK", default_value_t = ChainProfile::Core30Mainnet)]
         network: ChainProfile,
     },
-    /// Resume the Lightning payments out the hub paused on finding notes
+    /// Resume the watch over payments out, paused on finding notes
     /// retired that its ledger never issued, beside the running hub (which
     /// resumes within half a minute) or without it. What its ledger shows
     /// now is taken as known: more found later pause again. Look at the
@@ -1327,7 +1208,6 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             policy,
             chain,
             notify,
-            lightning,
             deposits,
             announce,
             swaps,
@@ -1381,14 +1261,6 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             anyhow::ensure!(
                 !contracting || chain.is_some(),
                 "opening contracts (--contracts) needs --chain"
-            );
-            let lightning = match respond_only {
-                true => None,
-                false => lightning.gateway()?,
-            };
-            anyhow::ensure!(
-                lightning.is_none() || chain.is_some(),
-                "a Lightning gateway (--lnd) needs --chain"
             );
             let depositing = match &chain {
                 Some(_) if respond_only => None,
@@ -1467,24 +1339,13 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                     }
                 }
             } else {
-                if lightning.is_none() {
-                    check_gateway_idle(&hub, &db, false)?;
-                }
+                check_gateway_idle(&hub, &db, false)?;
                 if depositing.is_none() {
                     check_gateway_idle(&hub, &db, true)?;
                 }
             }
             // Paused as it was when the hub stopped, before anything is paid.
             let guard = payouts::Guard::open(&cli.data);
-            let gateway = match lightning {
-                Some((lnd, config)) => {
-                    let gateway = Gateway::open(hub.clone(), Arc::new(lnd), config, &db)
-                        .context("open the Lightning gateway")?;
-                    gateway.guard_with(guard.clone());
-                    Some(Arc::new(gateway))
-                }
-                None => None,
-            };
             let deposits = match depositing {
                 Some((source, profile, config)) => {
                     let deposits =
@@ -1495,7 +1356,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 None => None,
             };
             let turn = Arc::new(tokio::sync::Mutex::new(()));
-            peer::coordinate(gateway.as_ref(), deposits.as_ref(), &cli.data, turn.clone());
+            peer::coordinate(deposits.as_ref(), &cli.data, turn.clone());
             let tweaks = match indexing {
                 true => {
                     let path = cli.data.join("tweaks.sqlite");
@@ -1627,16 +1488,8 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                     // As clients reach the hub, or at least as it listens.
                     let url = announcing.as_ref().and_then(|a| a.urls.first().cloned());
                     let url = url.unwrap_or_else(|| format!("http://{listen}"));
-                    let (receipts, deposits) = (gateway.clone(), deposits.clone());
-                    let issuer = issuer(
-                        &hub,
-                        url,
-                        &from,
-                        receipts,
-                        deposits,
-                        &cli.data,
-                        turn.clone(),
-                    );
+                    let issuer =
+                        issuer(&hub, url, &from, deposits.clone(), &cli.data, turn.clone());
                     let transport = match &tor {
                         Some(tor) if swaps_tor => {
                             tracing::info!("the swaps' wallet reaches hubs through Tor");
@@ -1693,7 +1546,6 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             // Sweeping idle openings and playing exits as they come.
             let responding = contracts.clone().map(|c| (c, response_poll));
             let services = Services {
-                gateway: gateway.clone(),
                 deposits: deposits.clone(),
                 tweaks: tweaks.clone(),
                 inbox,
@@ -1728,7 +1580,6 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 respond_only,
                 chain,
                 notifier,
-                gateway,
                 guard,
                 deposits,
                 announcing,
@@ -1834,7 +1685,6 @@ fn issuer(
     hub: &Arc<Hub>,
     url: String,
     from: &[Capped],
-    receipts: Option<Arc<Gateway>>,
     deposits: Option<Arc<deposit::Gateway>>,
     data: &Path,
     turn: Arc<tokio::sync::Mutex<()>>,
@@ -1846,11 +1696,7 @@ fn issuer(
         });
     let db = data.join("hub.sqlite");
     issuer.guard(turn, move |hash| {
-        if let Some(gateway) = &receipts {
-            if gateway.holds(hash)? {
-                return Ok(true);
-            }
-        } else if Gateway::holding(&db, &[*hash])
+        if lightning::holding(&db, &[*hash])
             .map_err(|e| e.to_string())?
             .contains(hash)
         {
@@ -1886,11 +1732,23 @@ fn check_idle(dir: &Path) -> anyhow::Result<()> {
 /// Read without creating or upgrading anything: a gateway that never ran in
 /// the hub's database `db` has nothing to collect. Open records alone cost no
 /// notes, except when a crash left their own lock recorded only in the hub.
+/// The Lightning gateway is never on: hubs of this release run none, and
+/// what one of an earlier release owes is followed by that release.
 fn check_gateway_idle(hub: &Hub, db: &Path, deposits: bool) -> anyhow::Result<()> {
-    let (component, table, flag) = if deposits {
-        ("deposits", "deposits", "--deposit-sweep-address")
+    let (component, table, flag, remedy) = if deposits {
+        (
+            "deposits",
+            "deposits",
+            "--deposit-sweep-address",
+            "enable --deposit-sweep-address to follow them",
+        )
     } else {
-        ("lightning", "lightning_receipts", "--lnd")
+        (
+            "lightning",
+            "lightning_receipts",
+            "the Lightning gateway (--lnd)",
+            "this release runs none: run the release before it, with --lnd, until they are done",
+        )
     };
     let check = || -> anyhow::Result<(usize, usize)> {
         // A payment out still pending keeps its lock from a refund until
@@ -1948,7 +1806,11 @@ fn check_gateway_idle(hub: &Hub, db: &Path, deposits: bool) -> anyhow::Result<()
             db.display()
         )
     })?;
-    anyhow::ensure!(required == 0, "{flag} is off but {required} obligations in {} still need its gateway; enable {flag} to follow them", db.display());
+    anyhow::ensure!(
+        required == 0,
+        "{flag} is off but {required} obligations in {} still need it; {remedy}",
+        db.display()
+    );
     if open > 0 {
         tracing::warn!(file = %db.display(), open, "{flag} is off: open payments wait for its gateway");
     }
@@ -1981,7 +1843,7 @@ fn check_backed(hub: &Hub, data: &Path, allow: bool) -> anyhow::Result<()> {
     };
     let held = deposit::Gateway::holding(&db, &hashes).map_err(|e| e.to_string());
     read(&db, held);
-    let held = Gateway::holding(&db, &hashes).map_err(|e| e.to_string());
+    let held = lightning::holding(&db, &hashes).map_err(|e| e.to_string());
     read(&db, held);
     let held = licash_swaps::backing_own(&swaps, &hashes).map_err(|e| e.to_string());
     read(&swaps, held);
@@ -2084,7 +1946,6 @@ struct Tasks {
     respond_only: bool,
     chain: Option<(Source, ChainProfile, Duration)>,
     notifier: Option<Notifier>,
-    gateway: Option<Arc<Gateway>>,
     /// The watch over the hub's payments out.
     guard: Arc<payouts::Guard>,
     deposits: Option<Arc<deposit::Gateway>>,
@@ -2117,7 +1978,6 @@ async fn serve(
         respond_only,
         chain,
         notifier,
-        gateway,
         guard,
         deposits,
         announcing,
@@ -2190,14 +2050,11 @@ async fn serve(
     }
     if guard.paused() {
         tracing::error!(
-            "Lightning payments out are paused (payouts.json): `licash-hub resume-payouts` resumes them"
+            "the watch over payments out is paused (payouts.json): notes were retired that the \
+             ledger never issued. `licash-hub resume-payouts` resumes it"
         );
     }
     critical.spawn("the watch over payments out", guard.run(hub.clone()));
-    if let Some(gateway) = gateway.clone() {
-        tracing::info!("running a Lightning gateway");
-        critical.spawn("the Lightning gateway", gateway.run());
-    }
     if let Some(deposits) = deposits {
         tracing::info!("taking deposits on Bitcoin");
         critical.spawn("the deposits", deposits.run());
@@ -2395,8 +2252,8 @@ impl Critical {
 fn resume_payouts(data: &Path) -> anyhow::Result<()> {
     let (paused, now) = payouts::resume(data)?;
     match paused {
-        Some(why) => println!("Lightning payments out resumed. They were paused: {why}."),
-        None => println!("Lightning payments out were not paused."),
+        Some(why) => println!("The watch over payments out resumed. It was paused: {why}."),
+        None => println!("The watch over payments out was not paused."),
     }
     for e in &now.baseline {
         println!(
@@ -2577,19 +2434,6 @@ mod tests {
             Command::Run { announce, .. } => announce.mailboxes(),
             _ => unreachable!(),
         }
-    }
-
-    #[test]
-    fn the_most_paid_over_lightning_in_a_day_is_unlimited_unless_given() {
-        let most = |args: &[&str]| {
-            let cli = Cli::try_parse_from([&["licash-hub", "run"], args].concat()).unwrap();
-            match cli.command {
-                Command::Run { lightning, .. } => lightning.ln_max_pay_day,
-                _ => unreachable!(),
-            }
-        };
-        assert_eq!(most(&[]), None);
-        assert_eq!(most(&["--ln-max-pay-day", "500000"]), Some(500_000));
     }
 
     #[test]

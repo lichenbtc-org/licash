@@ -4,13 +4,14 @@
 //! and spends them at the hub for what it pays out. The ledger cannot tell
 //! such a note from its own, but it counts: once it retired more notes of
 //! a denomination than it ever issued ([`licash_hub::Notes::excess`]),
-//! some were made outside it. Then the operator is alerted, and the
-//! Lightning gateway pays no more invoices, refunding their locks, until
-//! the operator resumes it ([`resume`]).
+//! some were made outside it. Then the operator is alerted, and the watch
+//! stays paused, told of nothing more, until the operator resumes it
+//! ([`resume`]). The hub pays nothing out itself: hubs of earlier releases
+//! paused their Lightning gateway with it, and what pays out now is the
+//! providers', which the operator warns.
 //!
 //! It tells late: only once such notes outnumber all the hub's outstanding
-//! notes of a denomination. And it stops only what leaves over Lightning,
-//! not swaps or contract claims.
+//! notes of a denomination.
 //!
 //! A ledger restored from an older copy shows the same: the notes it
 //! issued since that copy are retired and, to it, never issued. So does a
@@ -96,8 +97,8 @@ impl Guard {
                 let why = unreadable(&e);
                 self.pause(Some(why.clone()));
                 return self.once(format!(
-                    "Lightning payments out are paused: {why}. Look at the ledger, then run \
-                     `licash-hub resume-payouts`."
+                    "The watch over payments out is paused: {why}. Look at the ledger, then \
+                     run `licash-hub resume-payouts`."
                 ));
             }
         };
@@ -116,7 +117,7 @@ impl Guard {
             if let Err(e) = keep(&self.data, &now) {
                 tracing::error!("cannot keep {FILE}: {e:#}");
                 alerts = self.once(format!(
-                    "The watch over Lightning payments out cannot keep {FILE}: what it finds \
+                    "The watch over payments out cannot keep {FILE}: what it finds \
                      is lost when the hub restarts, and with no such file it takes what the \
                      ledger shows as known and pauses nothing."
                 ));
@@ -205,11 +206,11 @@ fn judge(before: Option<Kept>, excess: &[Excess]) -> (Kept, Option<String>) {
                 listed(&new)
             );
             let alert = format!(
-                "Lightning payments out are paused: {why}, made with the hub's seed outside \
-                 its ledger. Unless the ledger was restored from an older copy, or notes \
-                 like these were known when payments out last resumed, treat the seed as \
-                 held by someone else. Invoices are refused and their locks refunded until \
-                 `licash-hub resume-payouts`."
+                "The watch over payments out is paused: {why}, made with the hub's seed \
+                 outside its ledger. Unless the ledger was restored from an older copy, or \
+                 notes like these were known when the watch last resumed, treat the seed as \
+                 held by someone else: stop the hub, and tell the providers swapping its \
+                 notes. Nothing more is told until `licash-hub resume-payouts`."
             );
             (Some(why), Some(alert))
         }

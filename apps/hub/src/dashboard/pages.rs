@@ -866,7 +866,7 @@ fn payouts(r: &Records, data: &Path) -> Check {
         (Some(why), _) => Check::new(
             "Payouts",
             Tone::Bad,
-            format!("Lightning payments out paused: {why}"),
+            format!("Notes made outside the ledger, payouts watch paused: {why}"),
         ),
         (None, 0) => Check::new("Payouts", Tone::Good, "every note retired was issued"),
         (None, n) => Check::new(

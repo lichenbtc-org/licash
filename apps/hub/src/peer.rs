@@ -1,9 +1,9 @@
-//! The hub's Lightning receipts, deposits and swap issuer share one turn:
-//! a hash backs one own lock of the hub's
-//! notes ([`licash_hub::Hub::lock_own`]), by one payment. The wallet that
-//! asks for a receipt or a deposit picks its hash, so it may ask both
-//! under one, and pay both: each gateway refuses a hash its peer holds,
-//! and leaves a lock under it to the payment its peer recorded it for.
+//! The hub's deposits and swap issuer share one turn: a hash backs one own
+//! lock of the hub's notes ([`licash_hub::Hub::lock_own`]), by one payment.
+//! The wallet that asks for a deposit picks its hash, so it may pick one a
+//! swap, or a Lightning receipt of an earlier release's gateway, holds:
+//! the deposits refuse a hash held so, and leave a lock under it to the
+//! payment it was recorded for.
 
 use std::{
     collections::HashSet,
@@ -17,7 +17,7 @@ use licash_store::Kind;
 use rusqlite::OptionalExtension;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
-use crate::{deposit, lightning, Failure};
+use crate::{deposit, Failure};
 
 /// What a gateway recorded under a hash: a payment, if any, and the own
 /// lock it backs once locked.
@@ -138,68 +138,26 @@ pub(crate) fn recorded_in(
     Ok(found)
 }
 
-/// Make the hub's Lightning gateway and its deposits peers, once both
-/// are open.
-pub fn pair(receipts: &Arc<lightning::Gateway>, deposits: &Arc<deposit::Gateway>) {
-    link(
-        Some(receipts),
-        Some(deposits),
-        Arc::new(Mutex::new(())),
-        None,
-    );
-}
-
-/// Coordinate all enabled payment services, including a lone gateway and
-/// an issuer. Disabled services still reserve their recorded hashes.
-pub fn coordinate(
-    receipts: Option<&Arc<lightning::Gateway>>,
-    deposits: Option<&Arc<deposit::Gateway>>,
-    data: &Path,
-    turn: Arc<Mutex<()>>,
-) {
-    link(receipts, deposits, turn, Some(data));
-}
-
-fn link(
-    receipts: Option<&Arc<lightning::Gateway>>,
-    deposits: Option<&Arc<deposit::Gateway>>,
-    turn: Arc<Mutex<()>>,
-    data: Option<&Path>,
-) {
+/// Coordinate the deposits, if the hub takes them, with the swap issuer
+/// by `turn`, and with what the swaps and the receipts of an earlier
+/// gateway recorded in `data`.
+pub fn coordinate(deposits: Option<&Arc<deposit::Gateway>>, data: &Path, turn: Arc<Mutex<()>>) {
+    let Some(deposits) = deposits else { return };
     // The swap provider's tables are in its wallet's file.
-    let swaps = data.map(|d| d.join("swaps/wallet.sqlite"));
-    if let Some(receipts) = receipts {
-        let other = deposits.map(Arc::downgrade);
-        let file = data.map(licash_contracts::hub_db);
-        let recorded = move |hash: &[u8; 32]| match &other {
-            Some(other) => other
-                .upgrade()
-                .ok_or_else(|| "the deposits stopped".to_owned())?
-                .recorded(hash),
-            None => recorded_file(file.as_deref(), "deposits", "deposits", hash),
-        };
-        let paired = Paired {
-            turn: turn.clone(),
-            recorded: Box::new(recorded),
-            swaps: swaps.clone(),
-        };
-        assert!(receipts.peer.0.set(paired).is_ok(), "paired once");
-    }
-    if let Some(deposits) = deposits {
-        let other = receipts.map(Arc::downgrade);
-        let file = data.map(licash_contracts::hub_db);
-        let recorded = move |hash: &[u8; 32]| match &other {
-            Some(other) => other
-                .upgrade()
-                .ok_or_else(|| "the Lightning gateway stopped".to_owned())?
-                .recorded(hash),
-            None => recorded_file(file.as_deref(), "lightning", "lightning_receipts", hash),
-        };
-        let paired = Paired {
-            turn,
-            recorded: Box::new(recorded),
-            swaps,
-        };
-        assert!(deposits.peer.0.set(paired).is_ok(), "paired once");
-    }
+    let swaps = Some(data.join("swaps/wallet.sqlite"));
+    let file = licash_contracts::hub_db(data);
+    let recorded = move |hash: &[u8; 32]| {
+        recorded_file(
+            Some(&file),
+            crate::lightning::COMPONENT,
+            "lightning_receipts",
+            hash,
+        )
+    };
+    let paired = Paired {
+        turn,
+        recorded: Box::new(recorded),
+        swaps,
+    };
+    assert!(deposits.peer.0.set(paired).is_ok(), "paired once");
 }

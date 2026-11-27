@@ -17,7 +17,6 @@ licash-dashboard.workspace = true
 licash-contracts = { path = "../contracts" }
 licash-witness = { path = "../witness" }
 licash-hub.workspace = true
-licash-lightning.workspace = true
 licash-nostr = { workspace = true, features = ["tor"] }
 licash-notify.workspace = true
 licash-onchain.workspace = true
@@ -45,14 +44,9 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-[features]
-# An in-memory Lightning node, for tests.
-fake = ["licash-lightning/fake"]
-
 [dev-dependencies]
 bitcoincore-rpc = "0.19"
 licash-dashboard = { workspace = true, features = ["test-support"] }
-licash-hub-service = { path = ".", features = ["fake"] }
 licash-bridge = { path = "../bridge" }
 licash-contracts = { path = "../contracts", features = ["faults"] }
 licash-contract = { path = "../../crates/licash-contract" }

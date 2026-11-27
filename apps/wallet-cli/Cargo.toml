@@ -40,7 +40,8 @@ licash-contracts = { path = "../contracts", features = ["testing"] }
 bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
 licash-hub.workspace = true
 licash-onchain.workspace = true
-licash-hub-service = { path = "../hub", features = ["fake"] }
+licash-hub-service = { path = "../hub" }
+licash-lightning = { workspace = true, features = ["fake"] }
 licash-swaps.workspace = true
 licash-swaps-service = { path = "../swaps" }
 libc = "0.2"

@@ -1,6 +1,7 @@
 //! The `licash-hub` binary end to end: create, run, watch and stop a hub.
 
 mod chain;
+mod receipts;
 
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -790,27 +791,14 @@ fn a_data_directory_of_an_earlier_layout_is_refused_by_name_and_left_as_it_is() 
 }
 
 #[test]
-fn a_disabled_gateway_reads_real_receipts_in_wal_without_mutating_them() {
-    use licash_hub_service::lightning::{fake::Fake, Config, Gateway};
-
+fn an_earlier_gateways_receipts_are_read_in_wal_without_mutating_them() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("hub");
     stdout(&data, &["init", "--max-pow", "6"]);
-    let live_hub = Arc::new(
-        Hub::open(
-            &data.join("seed"),
-            &data.join("hub.sqlite"),
-            Policy::default(),
-        )
-        .unwrap(),
-    );
-    let path = data.join("hub.sqlite");
-    let _gateway =
-        Gateway::open(live_hub, Arc::new(Fake::new()), Config::default(), &path).unwrap();
-    let writer = rusqlite::Connection::open(&path).unwrap();
-    // Keep the WAL connection, not a second running hub's ledger lock.
-    drop(_gateway);
-    writer.execute("INSERT INTO lightning_receipts (hash, body, amount, msat, state, created_at) VALUES (?1, '{}', 5, 5000, 'locked', 0)", [[8u8; 32]]).unwrap();
+    // Made as an earlier release's gateway made them, its connection kept
+    // open: the receipt only in the WAL.
+    let writer = receipts::made(&data.join("hub.sqlite"));
+    receipts::record(&writer, [8; 32], "locked", None);
     let stderr = refused(
         &data,
         &["run", "--listen", &format!("127.0.0.1:{}", free_port())],
@@ -1159,14 +1147,14 @@ fn payments_out_are_watched_and_resumed_by_the_operator() {
     // Resumed beside the running hub.
     let resumed = stdout(&data, &["resume-payouts"]);
     assert!(
-        resumed.starts_with("Lightning payments out resumed. They were paused: payouts.json"),
+        resumed.starts_with("The watch over payments out resumed. It was paused: payouts.json"),
         "{resumed}"
     );
     assert_eq!(kept(), clear);
     drop(running);
     assert_eq!(
         stdout(&data, &["resume-payouts"]).lines().next(),
-        Some("Lightning payments out were not paused.")
+        Some("The watch over payments out was not paused.")
     );
     assert_eq!(alerts(), 1);
 }

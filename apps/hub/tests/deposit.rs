@@ -4,6 +4,7 @@
 
 mod chain;
 mod esplora;
+mod receipts;
 
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
@@ -28,11 +29,7 @@ use licash::spend::ChainProfile;
 use licash_api::{Code, DepositStatus, Fee, Hex, Info, Problem, ReceiveState};
 use licash_chain_client::Source;
 use licash_hub::{Hub, Policy, Timing};
-use licash_hub_service::{
-    deposit,
-    lightning::{self, fake::Fake, HeldState},
-    peer, AdmissionSource, Services, PER_SOURCE,
-};
+use licash_hub_service::{deposit, peer, AdmissionSource, Services, PER_SOURCE};
 use licash_wallet::{DepositState, Transport, Wallet};
 use serde_json::json;
 use tower::ServiceExt;
@@ -262,27 +259,6 @@ impl Transport for Local {
     }
 }
 
-fn lightning(net: &Net) -> (Arc<Fake>, Arc<lightning::Gateway>) {
-    let node = Arc::new(Fake::new());
-    let backend = net.backend.lock().unwrap();
-    node.tip(backend.chain.height(), backend.chain.tip());
-    drop(backend);
-    let config = lightning::Config {
-        hold_delta: 3,
-        downtime: 2,
-        receive_blocks: 6,
-        ..lightning::Config::default()
-    };
-    let gateway = lightning::Gateway::open(
-        net.hub.clone(),
-        node.clone(),
-        config,
-        &net.dir.path().join("hub.sqlite"),
-    )
-    .unwrap();
-    (node, Arc::new(gateway))
-}
-
 fn swap_record(net: &Net, hash: [u8; 32], state: &str, lock: Option<licash::spend::ProposalId>) {
     let dir = net.dir.path().join("swaps");
     std::fs::create_dir(&dir).unwrap();
@@ -351,9 +327,7 @@ async fn gateways_refuse_every_hash_reserved_by_a_swap_even_when_swaps_are_off()
         db.execute("DELETE FROM deposits WHERE hash = ?1", [hash])
             .unwrap();
         swap_record(&net, hash, state, None);
-        let (_, lightning) = lightning(&net);
         peer::coordinate(
-            Some(&lightning),
             Some(&net.deposits),
             net.dir.path(),
             Arc::new(tokio::sync::Mutex::new(())),
@@ -366,18 +340,11 @@ async fn gateways_refuse_every_hash_reserved_by_a_swap_even_when_swaps_are_off()
             .0
             .message
             .contains("another payment"));
-        assert!(lightning
-            .receive(&body.receive, None)
-            .await
-            .unwrap_err()
-            .0
-            .message
-            .contains("another payment"));
     }
 }
 
 #[tokio::test]
-async fn a_disabled_receipt_gateway_still_reserves_its_hashes() {
+async fn an_earlier_gateways_receipts_still_reserve_their_hashes() {
     let net = Net::new().await;
     let alice = net.wallet("alice");
     let deposit = alice.deposit(HUB, 3_000).await.unwrap();
@@ -386,11 +353,10 @@ async fn a_disabled_receipt_gateway_still_reserves_its_hashes() {
     let db = rusqlite::Connection::open(net.dir.path().join("hub.sqlite")).unwrap();
     db.execute("DELETE FROM deposits WHERE hash = ?1", [hash])
         .unwrap();
-    let (_, lightning) = lightning(&net);
-    lightning.receive(&body.receive, None).await.unwrap();
-    drop(lightning);
+    // Asked over Lightning of the gateway of an earlier release, never paid.
+    let receipts = receipts::made(&net.dir.path().join("hub.sqlite"));
+    receipts::record(&receipts, hash, "open", None);
     peer::coordinate(
-        None,
         Some(&net.deposits),
         net.dir.path(),
         Arc::new(tokio::sync::Mutex::new(())),
@@ -417,7 +383,7 @@ async fn a_gateway_waits_for_the_issuers_turn_and_then_sees_its_reservation() {
     db.execute("DELETE FROM deposits WHERE hash = ?1", [hash])
         .unwrap();
     let turn = Arc::new(tokio::sync::Mutex::new(()));
-    peer::coordinate(None, Some(&net.deposits), net.dir.path(), turn.clone());
+    peer::coordinate(Some(&net.deposits), net.dir.path(), turn.clone());
     let held = turn.lock_owned().await;
     let gateway = net.deposits.clone();
     let receiving = tokio::spawn(async move { gateway.deposit(&body, None).await });
@@ -461,7 +427,7 @@ async fn a_stalled_chain_tip_holds_up_no_other_payment() {
         &net.dir.path().join("hub.sqlite"),
     ));
     let turn = Arc::new(tokio::sync::Mutex::new(()));
-    peer::coordinate(None, Some(&gateway), net.dir.path(), turn.clone());
+    peer::coordinate(Some(&gateway), net.dir.path(), turn.clone());
     let again = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         gateway.deposit(&recorded, None),
@@ -483,11 +449,9 @@ async fn a_stalled_chain_tip_holds_up_no_other_payment() {
     asking.abort();
 }
 
-async fn adoption_with_a_swap_row(state: &str, recorded: bool) {
-    let net = Net::new().await;
-    let alice = net.wallet("alice");
-    let deposit = alice.deposit(HUB, 3_000).await.unwrap();
-    let (_, body) = net.asked("alice", &deposit.hash);
+/// An own lock of the deposit asked by `body`, as another payment under its
+/// hash made it.
+fn own_lock(net: &Net, body: &licash_api::Deposit) -> licash::spend::ProposalId {
     let ((keyset, ephemeral, hash), outputs) = (
         body.receive.terms().unwrap(),
         body.receive.outputs().unwrap(),
@@ -504,10 +468,18 @@ async fn adoption_with_a_swap_row(state: &str, recorded: bool) {
         .hub
         .lock_own(&keyset, ephemeral, outputs, terms)
         .unwrap();
-    let id = lock.proposal.id();
+    lock.proposal.id()
+}
+
+async fn adoption_with_a_swap_row(state: &str, recorded: bool) {
+    let net = Net::new().await;
+    let alice = net.wallet("alice");
+    let deposit = alice.deposit(HUB, 3_000).await.unwrap();
+    let (_, body) = net.asked("alice", &deposit.hash);
+    let hash = bytes(&deposit.hash);
+    let id = own_lock(&net, &body);
     swap_record(&net, hash, state, recorded.then_some(id));
     peer::coordinate(
-        None,
         Some(&net.deposits),
         net.dir.path(),
         Arc::new(tokio::sync::Mutex::new(())),
@@ -627,40 +599,22 @@ async fn a_hubs_paid_status_does_not_bypass_the_deposit_value_check() {
 }
 
 #[tokio::test]
-async fn deposits_and_receipts_refuse_hashes_held_by_the_other_gateway() {
-    let net = Net::new().await;
-    let alice = net.wallet("alice");
-    let deposit = alice.deposit(HUB, 3_000).await.unwrap();
-    let (_, body) = net.asked("alice", &deposit.hash);
-    let (_, lightning) = lightning(&net);
-    peer::pair(&lightning, &net.deposits);
-    let refused = lightning.receive(&body.receive, None).await.unwrap_err().0;
-    assert_eq!(refused.code, Code::Forward);
-    assert!(refused.message.contains("another payment"));
-    let mut other = body.clone();
-    other.receive.hash = licash_api::Hex(vec![42; 32]);
-    lightning.receive(&other.receive, None).await.unwrap();
-    let refused = net.deposits.deposit(&other, None).await.unwrap_err().0;
-    assert_eq!(refused.code, Code::Forward);
-    assert!(refused.message.contains("another payment"));
-}
-
-#[tokio::test]
 async fn a_duplicate_deposit_is_canceled_when_its_receipt_locked_first() {
     let net = Net::new().await;
     let alice = net.wallet("alice");
     let deposit = alice.deposit(HUB, 3_000).await.unwrap();
     let (_, body) = net.asked("alice", &deposit.hash);
     let hash = bytes(&deposit.hash);
-    let (node, lightning) = lightning(&net);
-    lightning.receive(&body.receive, None).await.unwrap();
-    peer::pair(&lightning, &net.deposits);
-    let cltv = node.held_cltv(hash).unwrap() as u32;
-    node.pay_held(hash, net.height() + cltv);
-    lightning.round().await;
-    let receipt = lightning.receive_status(&hash).unwrap();
-    assert_eq!(receipt.state, ReceiveState::Locked);
-    let lock = receipt.lock().unwrap().unwrap();
+    // Paid over Lightning of the gateway of an earlier release, which
+    // locked the notes for it.
+    let lock = own_lock(&net, &body);
+    let receipts = receipts::made(&net.dir.path().join("hub.sqlite"));
+    receipts::record(&receipts, hash, "locked", Some(lock.as_bytes()));
+    peer::coordinate(
+        Some(&net.deposits),
+        net.dir.path(),
+        Arc::new(tokio::sync::Mutex::new(())),
+    );
     net.mine(2, vec![payment(&deposit.terms.unwrap().address, 3_100, 1)]);
     net.deposits.round().await;
     let status = net.deposits.deposit_status(&hash).unwrap().status;
@@ -673,37 +627,6 @@ async fn a_duplicate_deposit_is_canceled_when_its_receipt_locked_first() {
     assert!(alerts(&net.hub)
         .iter()
         .any(|a| a.contains("locked for a Lightning receipt")));
-}
-
-#[tokio::test]
-async fn a_duplicate_receipt_is_canceled_when_its_deposit_locked_first() {
-    let net = Net::new().await;
-    let alice = net.wallet("alice");
-    let deposit = alice.deposit(HUB, 3_000).await.unwrap();
-    let (_, body) = net.asked("alice", &deposit.hash);
-    let hash = bytes(&deposit.hash);
-    let (node, lightning) = lightning(&net);
-    lightning.receive(&body.receive, None).await.unwrap();
-    peer::pair(&lightning, &net.deposits);
-    net.mine(2, vec![payment(&deposit.terms.unwrap().address, 3_100, 1)]);
-    net.deposits.round().await;
-    let status = net.deposits.deposit_status(&hash).unwrap().status;
-    assert_eq!(status.state, ReceiveState::Locked);
-    let lock = status.lock().unwrap().unwrap();
-    let cltv = node.held_cltv(hash).unwrap() as u32;
-    node.pay_held(hash, net.height() + cltv);
-    lightning.round().await;
-    let receipt = lightning.receive_status(&hash).unwrap();
-    assert_eq!(receipt.state, ReceiveState::Canceled);
-    assert_eq!(receipt.lock, None);
-    assert_eq!(node.held(hash).unwrap().0, HeldState::Canceled);
-    assert_eq!(
-        net.hub.own_lock_of(&hash).unwrap().unwrap().proposal.id(),
-        lock
-    );
-    assert!(alerts(&net.hub)
-        .iter()
-        .any(|a| a.contains("locked for a deposit")));
 }
 
 /// A deposit asked while the hub's scan is behind its node gets its whole

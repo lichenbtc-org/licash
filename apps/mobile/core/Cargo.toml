@@ -50,7 +50,7 @@ licash-bridge = { path = "../../bridge" }
 licash-contracts = { path = "../../contracts", default-features = false, features = ["testing"] }
 licash-chain-client.workspace = true
 licash-hub.workspace = true
-licash-hub-service = { path = "../../hub", features = ["fake"] }
+licash-hub-service = { path = "../../hub" }
 licash-lightning = { workspace = true, features = ["fake"] }
 licash-onchain.workspace = true
 licash-swaps.workspace = true
