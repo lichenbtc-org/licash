@@ -136,6 +136,9 @@ private fun AnimatedContentTransitionScope<Screen>.moving(): ContentTransform {
         (fadeOut(tween(70)) + slideOutHorizontally(tween(280)) { -it / 14 * way })
 }
 
+/** Whether `event` is said from the top with a check: money in, or a line under way done. */
+internal fun cheered(event: Event): Boolean = event.received != null || event.settled == true
+
 class MainActivity : ComponentActivity() {
     /** A `bitcoin:` link the app was opened with, not yet shown. */
     private var link by mutableStateOf<String?>(null)
@@ -166,19 +169,28 @@ private fun App(engine: Engine, link: String?, linkShown: () -> Unit) {
     val snackbar = remember { SnackbarHostState() }
     // Where setting the wallet up is, in Home's place while due and not left: as the wallet read at the start says.
     val nav = rememberSaveable(ui.loaded, saver = SetupNav.Saver) { SetupNav(left = ui.loaded && startsAtHome(ui)) }
-    // Money in is felt, and said from the top with a check, a few seconds: the rest in a line at the bottom.
+    // Money in, and what was under way done, is felt, and said from the top
+    // with a check, a few seconds; what failed felt too, and said in a line
+    // at the bottom with the rest.
     val feel = rememberFeel()
     var arrived by remember { mutableStateOf("") }
+    var arrivedIn by remember { mutableStateOf(false) }
     var arrivals by remember { mutableStateOf(0) }
     var arriving by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         engine.events.collect {
-            if (it.received != null) {
-                feel.confirm()
-                arrived = it.text
-                arrivals++
-            } else {
-                launch { snackbar.showSnackbar(it.text) }
+            when (cheered(it)) {
+                true -> {
+                    // Money in on Receive is felt there, as it says it.
+                    if (it.received == null || screen != Screen.Receive) feel.confirm()
+                    arrived = it.text
+                    arrivedIn = it.received != null
+                    arrivals++
+                }
+                false -> {
+                    if (it.settled == false) feel.reject()
+                    launch { snackbar.showSnackbar(it.text) }
+                }
             }
         }
     }
@@ -314,9 +326,9 @@ private fun App(engine: Engine, link: String?, linkShown: () -> Unit) {
                         }
                     }
                 }
-                // Not over Receive, which says it itself.
+                // Money in not over Receive, which says it itself.
                 ReceivedBanner(
-                    arriving && ui.wallet && screen != Screen.Receive,
+                    arriving && ui.wallet && !(arrivedIn && screen == Screen.Receive),
                     arrived,
                     Modifier.align(Alignment.TopCenter),
                 )

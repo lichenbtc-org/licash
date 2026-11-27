@@ -228,8 +228,12 @@ private fun statusOf(light: LightClient): ChainStatus = ChainStatus(
 /** Automatic backups to a folder: when last written whole, and what failed since, if anything. */
 data class AutoBackup(val at: Long?, val problem: String? = null)
 
-/** Something to tell the user once; `received` if it is money in. */
-data class Event(val text: String, val received: ULong? = null)
+/**
+ * Something to tell the user once; `received` if it is money in, and
+ * `settled` if it is a line under way that finished as she looked, done
+ * (true) or failed (false): those are felt.
+ */
+data class Event(val text: String, val received: ULong? = null, val settled: Boolean? = null)
 
 /**
  * A contract's terms its owner chose, within its hub's range: up to `cap`
@@ -1253,7 +1257,10 @@ class Engine(context: Context) {
         seen = ui.history.map { it.key }.toSet()
         val near = nearing(ui)
         var warned = prefs.warned intersect look.under
-        if (!foreground) {
+        if (foreground) {
+            // In sight, said over the screen and felt: what was handed over to finish by itself.
+            for (activity in look.finished) settled(activity)?.let { notices.tryEmit(it) }
+        } else {
             for (activity in look.finished) news(activity)?.let { notifier.payment(activity.key, it) }
             for ((key, by) in near) {
                 if (key in warned) continue

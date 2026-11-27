@@ -37,7 +37,6 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.Icon
@@ -479,7 +478,7 @@ fun Send(
                                 s.code?.let { SaveContact(engine, it) }
                             }
                             // Not to pay again: it finishes by itself.
-                            Step.Later -> Told("Under way", "It finishes by itself", back)
+                            Step.Later -> Told("Under way", FINISHES_BY_ITSELF, back)
                             is Step.Received -> Done("Received ${sat(s.amount)}", back)
                             is Step.NoNote -> Ask(
                                 "Send without the note?",
@@ -588,6 +587,9 @@ internal fun addFirst(addable: Boolean, offered: Boolean): String = when {
 }
 
 /** A coin being added to the balance, before it can be paid with. */
+/** What a payment handed over to finish by itself asks of the owner: nothing. */
+internal const val FINISHES_BY_ITSELF = "It finishes by itself, even with the app closed. You're told once it's done."
+
 internal const val ADDING = "It joins your balance once confirmed on Bitcoin, in about an hour. Pay then."
 
 /** What to do when nothing is held at all. */
@@ -951,8 +953,11 @@ private fun Sent(s: Step.Sent, back: () -> Unit) {
     }
 }
 
-/** What [Outcome] says in its glyph: done, under way, a question, or failed. */
-private enum class Tone { DONE, BUSY, ASK, FAILED }
+/**
+ * What [Outcome] says in its glyph: done, handed over to finish by itself
+ * (the app may close), waiting on something quick, a question, or failed.
+ */
+private enum class Tone { DONE, HANDED, BUSY, ASK, FAILED }
 
 /**
  * Where paying ends, or stops to ask, all alike: a glyph in a disc, a
@@ -974,11 +979,11 @@ private fun Outcome(
         Tone.ASK -> colors.onSurfaceVariant
         else -> colors.primary
     }
-    // Felt once, as it shows: done, or failed. A wait or a question is not.
+    // Felt once, as it shows: done or handed over, or failed. A wait or a question is not.
     val feel = rememberFeel()
     LaunchedEffect(tone) {
         when (tone) {
-            Tone.DONE -> feel.confirm()
+            Tone.DONE, Tone.HANDED -> feel.confirm()
             Tone.FAILED -> feel.reject()
             else -> {}
         }
@@ -991,7 +996,8 @@ private fun Outcome(
         ) {
             when (tone) {
                 Tone.BUSY -> CircularProgressIndicator(Modifier.size(40.dp), color = tint, strokeWidth = 3.dp)
-                Tone.DONE -> Icon(Icons.Filled.Check, contentDescription = null, Modifier.size(44.dp), tint = tint)
+                // Drawn once as it shows: what the owner was waiting for.
+                Tone.DONE, Tone.HANDED -> Cheer(size = 64.dp, sparks = tone == Tone.DONE, color = tint)
                 Tone.ASK -> Icon(Icons.Outlined.Info, contentDescription = null, Modifier.size(44.dp), tint = tint)
                 Tone.FAILED -> Icon(Icons.Filled.Warning, contentDescription = null, Modifier.size(40.dp), tint = tint)
             }
@@ -1031,9 +1037,13 @@ private fun Done(text: String, back: () -> Unit, sub: String? = null) = Outcome(
     BigButton("Done", Modifier.fillMaxWidth().testTag("done"), onClick = back)
 }
 
-/** It is under way: what, and what to expect of it. */
+/**
+ * It is under way, nothing more asked of the owner: what, and what to
+ * expect of it. Shown as soon as the app may close, the rest finishing by
+ * itself.
+ */
 @Composable
-private fun Told(text: String, sub: String, back: () -> Unit) = Outcome(Tone.BUSY, text, sub, titleTag = "result") {
+private fun Told(text: String, sub: String, back: () -> Unit) = Outcome(Tone.HANDED, text, sub, titleTag = "result") {
     BigButton("Done", Modifier.fillMaxWidth().testTag("done"), onClick = back)
 }
 

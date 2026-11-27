@@ -346,6 +346,9 @@ fun Receive(engine: Engine, back: () -> Unit) {
             }
         }
     }
+    // Felt as it is said, however it was found paid.
+    val feel = rememberFeel()
+    LaunchedEffect(received) { if (received != null) feel.confirm() }
     LaunchedEffect(copied) {
         if (copied) {
             delay(COPIED_MS)

@@ -189,7 +189,29 @@ internal fun look(history: List<Activity>, before: Set<String>?, seen: Set<Strin
  * only, never why one failed (it may name a hub or a transaction); a coin
  * moving in shows as its deposit.
  */
-internal fun news(activity: Activity): String? {
+internal fun news(activity: Activity): String? =
+    finishedWords(activity)?.let { if (activity.state == State.FAILED) "$it: open Licash for why" else it }
+
+/**
+ * What to tell, in sight, of a line that finished while the app was open
+ * ([look]): said over the screen and felt, done or failed. Money in is
+ * `received`, as money in from the mailbox is.
+ */
+internal fun settled(activity: Activity): Event? {
+    val words = finishedWords(activity) ?: return null
+    return when (activity.state) {
+        State.PENDING -> null
+        State.DONE -> Event(
+            words,
+            received = activity.amount.takeIf { activity.kind == Kind.INVOICE || activity.kind == Kind.MOVED },
+            settled = true,
+        )
+        State.FAILED -> Event("$words: see History for why", settled = false)
+    }
+}
+
+/** A line finished, in words, `failed` said of one that did: none for those not told of. */
+private fun finishedWords(activity: Activity): String? {
     val amount = sat(activity.amount)
     return when (activity.state) {
         State.PENDING -> null
@@ -212,7 +234,7 @@ internal fun news(activity: Activity): String? {
             Kind.INVOICE -> "Receiving $amount over Lightning"
             Kind.CONTRACT -> "Setting up protection"
             Kind.RECEIVED, Kind.FUNDED, Kind.ONCHAIN, Kind.OPTIMIZED, Kind.CLOSED -> null
-        }?.let { "$it failed: open Licash for why" }
+        }?.let { "$it failed" }
     }
 }
 

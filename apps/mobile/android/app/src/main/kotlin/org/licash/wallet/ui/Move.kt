@@ -55,6 +55,7 @@ fun MoveSheet(engine: Engine, from: Holding, hubs: List<Holding>, moved: (Activi
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    val feel = rememberFeel()
     val shown = offers
     Sheet("Move from ${name(from.hub)}", dismiss = dismiss, dismissable = !busy) {
         if (shown == null) {
@@ -121,7 +122,8 @@ fun MoveSheet(engine: Engine, from: Holding, hubs: List<Holding>, moved: (Activi
                 } else if (shown != null) {
                     // The chosen first, then the rest as preferred.
                     val order = listOf(shown[chosen]) + shown.filterIndexed { i, _ -> i != chosen }
-                    engine.moveNotes(order).onSuccess { moved(it) }.onFailure { e ->
+                    engine.moveNotes(order).onSuccess { feel.confirm(); moved(it) }.onFailure { e ->
+                        feel.reject()
                         error = explain(e)
                         // Its fee rose: offered again at the new price, to accept or not.
                         if (e is LicashException.FeeRose) {

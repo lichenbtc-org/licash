@@ -283,6 +283,29 @@ class WatchTest {
     }
 
     @Test
+    fun a_line_finished_in_sight_is_felt_done_or_failed() {
+        assertEquals(
+            Event("Paid 1,000 sat over Lightning", settled = true),
+            settled(line(Kind.LIGHTNING, State.DONE)),
+        )
+        assertEquals(
+            Event("Moving 1,000 sat between hubs failed: see History for why", settled = false),
+            settled(line(Kind.SWAP, State.FAILED)),
+        )
+        // Money in, said as money in is.
+        assertEquals(1_000uL, settled(line(Kind.INVOICE, State.DONE))?.received)
+        assertEquals(1_000uL, settled(line(Kind.MOVED, State.DONE))?.received)
+        assertNull(settled(line(Kind.SENT, State.DONE))?.received)
+        assertNull(settled(line(Kind.PAYOUT, State.PENDING)))
+        assertNull(settled(line(Kind.ONCHAIN, State.DONE)))
+        // Done, or money in, from the top with a check; failed, or anything else, in a line.
+        assertTrue(cheered(settled(line(Kind.LIGHTNING, State.DONE))!!))
+        assertTrue(cheered(Event("Received 1,000 sat", received = 1_000uL)))
+        assertFalse(cheered(settled(line(Kind.SWAP, State.FAILED))!!))
+        assertFalse(cheered(Event("Protection set up")))
+    }
+
+    @Test
     fun payout_deadlines_are_read_beyond_the_ordinary_progress_limit() {
         val ordinary = (1..25).map { line(Kind.SWAP, State.PENDING, "s$it") }
         val p = line(Kind.PAYOUT, State.PENDING, "p")
