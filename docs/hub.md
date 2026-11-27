@@ -962,13 +962,16 @@ wallets and runs its gateways. Stop it, as the restore steps say.
 #### The standby
 
 A standby is a copy of the hub on another machine that holds no `seed`:
-it answers the disputes of the contracts open if the hub is lost, and can
-do no more. Write its keys on the hub, beside the running hub or with it
-stopped, then run it on a copy of `<data>` with them:
+it runs all the time beside the hub, answers the disputes of the contracts
+open if the hub is lost, and can do no more. Write its keys on the hub,
+beside the running hub or with it stopped, then run it through its
+entrypoint, `licash-hub-standby` (the hub's image built with `--target
+standby`), on its own `<data>` with them:
 
 ```sh
 licash-hub standby-keys standby.json        # on the hub, with its seed
-licash-hub --standby-keys standby.json run --chain ... --contracts \
+LICASH_STANDBY_REPLICA=file:///replica/hub \
+licash-hub-standby --standby-keys standby.json run --chain ... --contracts \
     --contracts-wallet ... --contracts-witness-set ... --contracts-witness ...
 ```
 
@@ -1000,14 +1003,57 @@ response and challenges each assertion, and every claim it reduces costs
 it a proof and an answer to a challenge. Size its prover, or the machines
 it rents (`LICASH_R0_WORKERS`, below), for that.
 
-Its ledger is as old as its copy, and it answers as any copy does: a
-claim of notes spent after its copy is paid in full, and its answer, if
-the witnesses keep it first, is the one every copy signs. Keep its copy as
-fresh as a backup's (above), and run it while the hub is down, not beside
-it. Once it has answered, its copy of the ledger is the standby's own:
-never restore the hub from it. To serve wallets again, restore the hub
-from its newest backup with its seed and take the contracts over
-([Taking over](#taking-over)).
+A live hub takes each step of a dispute at once, so the standby leaves it
+each one until halfway through its window: halfway to the deadline of a
+response, a disclosure, an assertion or an answer to a challenge (three
+quarters of the way while a transaction spends its coin in the mempool,
+the hub's own as it raises its fee), and half a response window after a
+close, a terminal or a sweep may be posted, which have none. On mainnet
+that leaves it 72 blocks (12 hours) to respond in, or to rent a GPU and
+prove in. Before then it funds, signs, writes to its witnesses, posts and
+proves nothing, and a step whose transaction is in a block by then is not
+its to take. It plans its
+proofs from halfway through the assert window too, and so responds only
+to the claims it can prove in that half.
+
+Its ledger is as old as its copy, so it takes a step only on a ledger its
+entrypoint restored after it started past the step's midpoint, which holds
+what a live hub did by then. Started on an older one, it stops with exit
+code 75, and its entrypoint restores `hub.sqlite` from the hub's newest
+replica (`LICASH_STANDBY_REPLICA`, as `litestream restore` takes it) into
+`LICASH_HUB_DATA` (`/data`; it takes no `--data`) before starting it again;
+give its container a restart policy (`restart: unless-stopped`). It stops
+too every quarter of a response window (36 blocks on mainnet), so that a
+contract opened since its last restore is in its ledger before that
+contract's first step is due. A restore that fails, or takes over
+`LICASH_STANDBY_RESTORE_TIMEOUT` seconds (300), leaves it on the ledger
+restored before, and it alerts at that start (`standby-unrestored` says
+why): check the replica and the private network to the hub, as a contract
+opened since is not covered. A restore also drops the standby's
+notification cursors, and the image tells only of alerts and
+reorganizations (`LICASH_HUB_NOTIFY_KINDS=alert,reorg`), not of each
+start. Keep `opening-instances/`, `header-chain/` and `hp-proofs/` synced
+beside it from the hub (`rsync --ignore-existing`, never `--delete`), and
+never run Litestream on the standby itself.
+
+Run without the entrypoint (`licash-hub --standby-keys ...`, as earlier
+releases did, with no `standby-restored` in its `<data>`), nothing would
+restore a newer ledger, so it never stops for one: it alerts at start and
+takes each step at its midpoint on the ledger it has.
+
+Before its first act of its own it writes `<data>/standby-acted` and alerts:
+its ledger is then its own, and the entrypoint never restores over it
+again, nor over a `hub.sqlite` it did not restore itself (one a standby of
+an earlier release ran on: adopt it with `touch <data>/standby-restored`
+if that standby never answered on it). It then answers as any copy does:
+a claim of notes spent after its copy is paid in full, and its answer, if
+the witnesses keep it first, is the one every copy signs. Never restore
+the hub from it. To serve wallets again, stop it, restore the hub from its
+newest backup with its seed and take the contracts over ([Taking
+over](#taking-over)); remove `standby-acted` and `hub.sqlite` from the
+standby's `<data>` once the contracts it played have ended, and it is
+restored afresh at its next start. What it sweeps and collects goes to its
+own wallet.
 
 What the standby's machine exposes: `hub.sqlite` holds the secret of each
 opening, and with the witness key whoever holds them answers each
