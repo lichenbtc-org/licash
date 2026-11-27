@@ -7232,8 +7232,11 @@ async fn hub_taking_deposits(
         ppm_year_funded: 0,
     };
     let openings = Openings::with_wallet(dir, source.clone(), source.clone(), keyset, range);
+    // Taking plain deposits, as hubs of earlier releases did: those it took
+    // are followed, and owed, as ever.
     let config = deposit::Config {
         max: 2_000_000,
+        plain: true,
         ..deposit::Config::new(bitcoin::ScriptBuf::new_op_return([]))
     };
     let regtest = ChainProfile::Core30DefaultRegtest;
