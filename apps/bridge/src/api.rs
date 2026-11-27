@@ -174,6 +174,8 @@ pub fn router<T: Transport + 'static>(bridge: Arc<Bridge<T>>) -> Router {
         .route(bridge::REVOKE, post(revoke::<T>))
         .route(bridge::TOP_UP, post(top_up::<T>))
         .route(bridge::WITHDRAW, post(withdraw::<T>))
+        .route(bridge::DEPOSIT, post(deposit::<T>))
+        .route(bridge::PAYOUT, post(payout::<T>))
         .route(bridge::USERNAME, post(username::<T>))
         .route(bridge::EXPORT, post(export::<T>))
         .layer(DefaultBodyLimit::max(MAX_BODY))
@@ -267,6 +269,24 @@ async fn withdraw<T: Transport>(
     let (admitted, withdraw): (_, bridge::Withdraw) = s.open(bridge::WITHDRAW, body)?;
     let key = admitted.key;
     json(s.bridge.withdraw(&key, &withdraw).await)
+}
+
+async fn deposit<T: Transport>(
+    State(s): State<Arc<Shared<T>>>,
+    body: Result<Json<Signed>, JsonRejection>,
+) -> Answer<bridge::Deposited> {
+    let (admitted, deposit): (_, bridge::Deposit) = s.open(bridge::DEPOSIT, body)?;
+    let key = admitted.key;
+    json(s.bridge.deposit(&key, &deposit).await)
+}
+
+async fn payout<T: Transport>(
+    State(s): State<Arc<Shared<T>>>,
+    body: Result<Json<Signed>, JsonRejection>,
+) -> Answer<bridge::PaidOut> {
+    let (admitted, payout): (_, bridge::Payout) = s.open(bridge::PAYOUT, body)?;
+    let key = admitted.key;
+    json(s.bridge.payout(&key, &payout).await)
 }
 
 async fn username<T: Transport>(

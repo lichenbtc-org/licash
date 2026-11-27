@@ -38,7 +38,8 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 licash-hub.workspace = true
-licash-hub-service = { path = "../hub", features = ["fake"] }
+licash-hub-service = { path = "../hub" }
+licash-lightning = { workspace = true, features = ["fake"] }
 licash-swaps.workspace = true
 licash-swaps-service = { path = "../swaps" }
 http-body-util = "0.1"

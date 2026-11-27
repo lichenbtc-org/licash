@@ -1,9 +1,10 @@
 //! An in-memory Lightning node, for tests: it holds the invoices others
-//! pay it, and pays invoices of other nodes, ending as the test says.
+//! pay it, and pays invoices of other nodes, ending as the test says, or
+//! as the fake node holding them, if connected ([`Fake::connect`]).
 
 use std::{
     collections::HashMap,
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -51,6 +52,12 @@ struct State {
     down: bool,
     /// Ample unless set.
     liquidity: Option<Liquidity>,
+    /// The fake nodes it pays the held invoices of ([`Fake::connect`]).
+    peers: Vec<Arc<Fake>>,
+    /// The payments under way to a peer's held invoice, by hash.
+    routed: HashMap<[u8; 32], Arc<Fake>>,
+    /// The preimages its held invoices were settled with.
+    preimages: HashMap<[u8; 32], [u8; 32]>,
 }
 
 impl Default for Fake {
@@ -61,10 +68,51 @@ impl Default for Fake {
 
 impl Fake {
     pub fn new() -> Self {
+        Self::with_key(1)
+    }
+
+    /// A node of the key of bytes `n`, other than 2: another node than
+    /// [`Fake::new`]'s, whose invoices its providers pay.
+    pub fn with_key(n: u8) -> Self {
+        assert_ne!(n, 2, "the key of other nodes' invoices");
         Self {
             state: Mutex::default(),
-            key: SecretKey::from_slice(&[1; 32]).expect("a key"),
+            key: SecretKey::from_slice(&[n; 32]).expect("a key"),
             payee: SecretKey::from_slice(&[2; 32]).expect("a key"),
+        }
+    }
+
+    /// Pay the held invoices of `peer` over a channel to it: such a
+    /// payment is held there, its HTLCs lasting the invoice's final delta,
+    /// and ends as `peer` settles or cancels it.
+    pub fn connect(&self, peer: Arc<Fake>) {
+        self.state().peers.push(peer);
+    }
+
+    /// Accept the payment of its open held invoice under `hash`, its HTLCs
+    /// lasting its final delta from `height`: whether it held one.
+    fn take(&self, hash: [u8; 32], height: u32) -> bool {
+        let cltv = self.held_cltv(hash);
+        let mut state = self.state();
+        match (state.held.get_mut(&hash), cltv) {
+            (Some((held, _)), Some(cltv)) if held.state == HeldState::Open => {
+                let expiry = height.saturating_add(u32::try_from(cltv).unwrap_or(u32::MAX));
+                (held.state, held.min_expiry) = (HeldState::Accepted, Some(expiry));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// How the payment held at this node under `hash` ended, if it did.
+    fn ended(&self, hash: [u8; 32]) -> Option<Status> {
+        let state = self.state();
+        match state.held.get(&hash).map(|(held, _)| held.state) {
+            Some(HeldState::Settled) => state.preimages.get(&hash).copied().map(Status::Succeeded),
+            Some(HeldState::Canceled) => Some(Status::Failed(
+                "FAILURE_REASON_INCORRECT_PAYMENT_DETAILS".into(),
+            )),
+            _ => None,
         }
     }
 
@@ -242,10 +290,27 @@ impl Node for Fake {
             {
                 return Ok(());
             }
-            let outcome = match state.outcomes.get(&hash) {
-                _ if invoice.min_final_cltv_expiry_delta() > u64::from(cltv_limit) => {
-                    Outcome::Fail("FAILURE_REASON_NO_ROUTE".into())
+            let too_long = invoice.min_final_cltv_expiry_delta() > u64::from(cltv_limit);
+            // To a peer's held invoice, unless the test says how it ends.
+            if !too_long && !state.outcomes.contains_key(&hash) {
+                let (peers, height) = (state.peers.clone(), state.height);
+                drop(state);
+                let peer = peers.into_iter().find(|peer| peer.take(hash, height));
+                let mut state = self.up()?;
+                if let Some(peer) = peer {
+                    let created_ns = u64::try_from(since_epoch().as_nanos()).unwrap_or(u64::MAX);
+                    let status = Status::InFlight;
+                    state.attempts.insert(hash, Attempt { status, created_ns });
+                    state.routed.insert(hash, peer);
+                    return Ok(());
                 }
+                let status = Status::Failed("FAILURE_REASON_NO_ROUTE".into());
+                let created_ns = u64::try_from(since_epoch().as_nanos()).unwrap_or(u64::MAX);
+                state.attempts.insert(hash, Attempt { status, created_ns });
+                return Ok(());
+            }
+            let outcome = match state.outcomes.get(&hash) {
+                _ if too_long => Outcome::Fail("FAILURE_REASON_NO_ROUTE".into()),
                 Some(outcome) => outcome.clone(),
                 None => Outcome::Fail("FAILURE_REASON_NO_ROUTE".into()),
             };
@@ -258,6 +323,17 @@ impl Node for Fake {
     }
 
     fn payment(&self, hash: [u8; 32]) -> Call<'_, Option<Attempt>> {
+        let routed = self.up().map(|state| state.routed.get(&hash).cloned());
+        // Ended as the peer holding it ended it.
+        if let Ok(Some(peer)) = routed {
+            if let Some(status) = peer.ended(hash) {
+                if let Ok(mut state) = self.up() {
+                    if let Some(attempt) = state.attempts.get_mut(&hash) {
+                        attempt.status = status;
+                    }
+                }
+            }
+        }
         let attempt = self.up().map(|state| state.attempts.get(&hash).cloned());
         Box::pin(async move { attempt })
     }
@@ -307,6 +383,7 @@ impl Node for Fake {
             .and_then(|mut state| match state.held.get_mut(&hash) {
                 Some((held, _)) if held.state == HeldState::Accepted => {
                     held.state = HeldState::Settled;
+                    state.preimages.insert(hash, preimage);
                     Ok(())
                 }
                 _ => Err("invoice is not accepted".into()),

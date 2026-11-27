@@ -1,7 +1,8 @@
 //! A Licash bridge: a Licash wallet of its own that pays and takes
-//! Lightning payments for Nostr Wallet Connect clients, through its hub's
-//! gateway, out of accounts it keeps for their owners. Custodial: an
-//! account is the bridge's word for what its wallet holds for someone.
+//! Lightning payments for Nostr Wallet Connect clients, through a swap
+//! provider, out of accounts it keeps for their owners, who pay into and
+//! out of them in notes at its hub too ([`notes`]). Custodial: an account
+//! is the bridge's word for what its wallet holds for someone.
 //!
 //! An account is a key ([`licash_api::bridge::Signed`]); its owner makes
 //! NWC connections for it, each paying, receiving or both, within a
@@ -18,6 +19,7 @@
 
 mod api;
 pub mod lnurl;
+mod notes;
 pub mod nwc;
 mod store;
 
@@ -476,7 +478,15 @@ impl<T: Transport> Bridge<T> {
         // one whose lock stands keeps it. One whose lock is settled is
         // decided at the next round, its notes then free: a retry's may be
         // about to be made.
-        let pending = self.store.read(store::pending_payments)?;
+        let (pending, payouts) = self
+            .store
+            .read(|c| Ok((store::pending_payments(c)?, notes::pending(c)?)))?;
+        if !payouts.is_empty() {
+            return Err(Error::Unavailable(format!(
+                "frozen, but {} payouts in notes are being made: exported once they are decided",
+                payouts.len()
+            )));
+        }
         let mut unlocked = 0;
         for payment in &pending {
             let stands = (self.lock_for(payment)?)
@@ -778,6 +788,7 @@ fn activity(c: &rusqlite::Connection, id: i64, limit: u32) -> Result<Vec<Activit
         .iter()
         .map(outgoing)
         .chain(store::receipts_of(c, id, limit)?.iter().map(incoming))
+        .chain(notes::activity(c, id, limit)?)
         .collect();
     activity.sort_by_key(|a| std::cmp::Reverse(a.created_at));
     activity.truncate(limit as usize);
@@ -1268,10 +1279,18 @@ impl<T: Transport> Bridge<T> {
     /// Take every payment and invoice under way on: what was decided.
     pub async fn round(&self) -> Result<usize, Error> {
         self.ask_provider().await?;
-        let (payments, receipts) = self
-            .store
-            .read(|c| Ok((store::pending_payments(c)?, store::pending_receipts(c)?)))?;
+        let (payments, receipts, payouts) = self.store.read(|c| {
+            let payments = store::pending_payments(c)?;
+            Ok((payments, store::pending_receipts(c)?, notes::pending(c)?))
+        })?;
         let mut decided = 0;
+        for send in payouts {
+            match self.follow_payout(&send).await {
+                Ok(p) if p.state != State::Pending => decided += 1,
+                Ok(_) => {}
+                Err(e) => tracing::warn!(send = %hex::encode(send), "a payout: {e}"),
+            }
+        }
         for payment in payments {
             match self.follow_payment(&payment.hash).await {
                 Ok(p) if p.state != State::Pending => decided += 1,
@@ -1291,13 +1310,7 @@ impl<T: Transport> Bridge<T> {
             }
         }
         if received {
-            // Its notes as exported, once frozen.
-            let _notes = self.notes.lock().await;
-            if self.store.read(store::meta)?.frozen_at.is_none() {
-                if let Err(e) = self.wallet.unlink().await {
-                    tracing::warn!("unlinking the notes received: {e}");
-                }
-            }
+            self.unlink_received().await;
         }
         Ok(decided)
     }

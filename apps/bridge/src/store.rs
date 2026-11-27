@@ -114,6 +114,7 @@ impl Store {
                 return Err(Error::Invalid("this wallet is a bridge already".into()));
             }
             licash_store::component_in(tx, COMPONENT, VERSION, SCHEMA).map_err(setup)?;
+            crate::notes::tables(tx)?;
             tx.execute(
                 "INSERT INTO bridge_meta (id, nostr, pairing, created_at) VALUES (1, ?1, ?2, ?3)",
                 params![nostr, pairing, licash_store::now()],
@@ -128,11 +129,16 @@ impl Store {
     /// The bridge's records in the wallet's file at `path`: refused unless
     /// they are of this version.
     pub(crate) fn open(path: &Path) -> Result<Self, Error> {
-        let conn = licash_store::open(path, licash_store::Kind::Wallet).map_err(setup)?;
+        let mut conn = licash_store::open(path, licash_store::Kind::Wallet).map_err(setup)?;
         match licash_store::component_version(&conn, COMPONENT).map_err(setup)? {
-            Some(VERSION) => Ok(Self {
-                conn: Mutex::new(conn),
-            }),
+            Some(VERSION) => {
+                // Those of an earlier release, without payments in notes,
+                // gain their tables.
+                licash_store::write(&mut conn, crate::notes::tables)?;
+                Ok(Self {
+                    conn: Mutex::new(conn),
+                })
+            }
             Some(v) => Err(Error::Unavailable(format!(
                 "bridge records of version {v}, not {VERSION}: use the release that wrote them"
             ))),
@@ -407,7 +413,7 @@ pub(crate) fn spent(c: &Connection, key: &[u8; 32], since: i64) -> Result<u64, E
     Ok(spent as u64)
 }
 
-/// What the payments under way of account `id` hold.
+/// What the payments under way of account `id` hold, in notes too.
 pub(crate) fn reserved(c: &Connection, id: i64) -> Result<u64, Error> {
     let reserved: i64 = c.query_row(
         "SELECT COALESCE(SUM(reserved), 0) FROM bridge_payments
@@ -415,7 +421,7 @@ pub(crate) fn reserved(c: &Connection, id: i64) -> Result<u64, Error> {
         [id],
         |r| r.get(0),
     )?;
-    Ok(reserved as u64)
+    Ok((reserved as u64).saturating_add(crate::notes::reserved(c, id)?))
 }
 
 fn state_name(state: State) -> &'static str {
@@ -657,15 +663,9 @@ pub(crate) fn incoming(c: &Connection, id: i64) -> Result<u64, Error> {
 }
 
 /// What the payments of account `id` under way took from its balance, and
-/// may return to it should they fail or cost less.
+/// may return to it should they fail or cost less: in notes too.
 pub(crate) fn outgoing(c: &Connection, id: i64) -> Result<u64, Error> {
-    let outgoing: i64 = c.query_row(
-        "SELECT COALESCE(SUM(reserved), 0) FROM bridge_payments
-         WHERE account = ?1 AND state = 'pending'",
-        [id],
-        |r| r.get(0),
-    )?;
-    Ok(outgoing as u64)
+    reserved(c, id)
 }
 
 /// How many invoices of account `id`'s address, or its top-ups (of no
