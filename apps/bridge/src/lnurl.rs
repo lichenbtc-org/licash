@@ -256,7 +256,7 @@ impl<T: Transport> Bridge<T> {
         Ok((account.id, format!("{name}@{domain}")))
     }
 
-    /// What an invoice of its hub, or of its provider, may ask, in msat:
+    /// What an invoice of its provider may ask, in msat:
     /// at least and at most.
     fn sendable(&self) -> Result<(u64, u64), Error> {
         let terms = self.receiving()?;

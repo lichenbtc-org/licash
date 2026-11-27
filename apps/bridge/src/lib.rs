@@ -123,8 +123,9 @@ fn wallet_error(e: licash_wallet::Error) -> Error {
 pub struct Config {
     /// The hub its wallet pays and is paid through.
     pub hub: String,
-    /// The swap provider it pays and is paid over Lightning through, should
-    /// its hub run no Lightning gateway.
+    /// The swap provider it pays and is paid over Lightning through: hubs
+    /// run no Lightning gateway. Without, it pays and is paid in notes
+    /// alone.
     pub via: Option<String>,
     /// Whether anyone may register an account.
     pub open: bool,
@@ -219,8 +220,8 @@ struct Receiving {
     /// The least and the most it pays, in sat.
     min: u64,
     max: u64,
-    /// The provider making it, if not the hub.
-    via: Option<String>,
+    /// The provider making it.
+    via: String,
 }
 
 /// A payment being made or followed, for as long as it is held.
@@ -303,76 +304,55 @@ impl<T: Transport> Bridge<T> {
         })
     }
 
-    /// Its hub's Lightning gateway, as the hub last said: None if it runs
-    /// none.
-    fn gateway(&self) -> Result<Option<licash_api::Lightning>, Error> {
-        // The wallet keys a hub by the URL it reaches it at first.
-        let urls = self
-            .wallet
-            .hub_urls(&self.config.hub)
-            .map_err(wallet_error)?;
-        let hubs = self.wallet.hubs().map_err(wallet_error)?;
-        Ok(hubs
-            .into_iter()
-            .find(|(url, _)| urls.contains(url))
-            .and_then(|(_, info)| info.lightning))
+    /// The provider it pays and is paid over Lightning through.
+    fn via(&self) -> Result<&str, Error> {
+        (self.config.via.as_deref()).ok_or_else(|| {
+            Error::Unavailable("the bridge names no swap provider to use Lightning through".into())
+        })
     }
 
-    /// The provider it pays through: None through its hub's gateway, if it
-    /// runs one, or with no provider.
-    fn paying_via(&self) -> Result<Option<&str>, Error> {
-        match &self.config.via {
-            Some(via) if self.gateway()?.is_none() => Ok(Some(via)),
-            _ => Ok(None),
-        }
-    }
-
-    /// What it takes to be paid: through its hub's gateway, or else its
-    /// provider's terms as it last said.
+    /// What it takes to be paid: its provider's terms as it last said.
     fn receiving(&self) -> Result<Receiving, Error> {
-        if let Some(l) = self.gateway()? {
-            return Ok(Receiving {
-                fee: l.receive,
-                min: l.min_receive,
-                max: l.max_receive,
-                via: None,
-            });
-        }
+        let via = self.via()?;
         let hub = &self.config.hub;
-        let Some(via) = &self.config.via else {
-            return Err(Error::Unavailable(format!(
-                "hub {hub} takes no Lightning payments"
-            )));
-        };
         let offer = self.offer.lock().unwrap_or_else(PoisonError::into_inner);
         let offer = offer.as_ref().ok_or_else(|| {
-            Error::Unavailable(format!("provider {via} takes no payments at hub {hub} now"))
+            Error::Unavailable(format!("provider {via} takes no payments at hub {hub}"))
         })?;
         Ok(Receiving {
             fee: offer.terms.fee,
             min: offer.terms.min,
             max: offer.max,
-            via: Some(via.clone()),
+            via: via.to_owned(),
         })
     }
 
-    /// Ask its provider again what it takes to have it paid, should its hub
-    /// run no gateway: kept for [`Bridge::info`] and its Lightning
-    /// Addresses. Its last answer is kept while it cannot be reached.
+    /// Ask its provider again what it takes to have it paid: kept for
+    /// [`Bridge::info`] and its Lightning Addresses. Its last answer is
+    /// kept while it cannot be reached; holding too little at the hub now,
+    /// its terms are kept with none to be paid at once, as it may hold
+    /// more soon.
     async fn ask_provider(&self) -> Result<(), Error> {
         let Some(via) = &self.config.via else {
             return Ok(());
         };
-        if self.gateway()?.is_some() {
-            return Ok(());
-        }
         let asked = self.wallet.receive_offer(via, &self.config.hub).await;
         let offer = match asked {
             Ok(offer) => Some(offer),
             // It takes none there now.
             Err(e @ licash_wallet::Error::Invalid(_)) => {
                 tracing::warn!(%via, "the provider: {e}");
-                None
+                match self.wallet.provider_info(via).await {
+                    Ok(info) => info.receive.map(|terms| ReceiveOffer {
+                        info,
+                        terms,
+                        max: 0,
+                    }),
+                    Err(e) => {
+                        tracing::debug!(%via, "the provider: {e}");
+                        return Ok(());
+                    }
+                }
             }
             Err(e) => {
                 tracing::debug!(%via, "the provider: {e}");
@@ -925,19 +905,11 @@ impl<T: Transport> Bridge<T> {
             return Err(Error::Insufficient(format!("{amount} msat asked")));
         }
         let hub = &self.config.hub;
-        let via = self.paying_via()?;
-        // Through the provider, its fee and the hub's on the lock in all.
-        let (fee, provider_fee) = match via {
-            None => {
-                let fee = self.wallet.invoice_fee(hub, request);
-                (fee.map_err(wallet_error)?, 0)
-            }
-            Some(via) => {
-                let quote = (self.wallet.invoice_quote_via(via, hub, request, u64::MAX)).await;
-                let quote = quote.map_err(wallet_error)?;
-                (quote.costs(), quote.fee)
-            }
-        };
+        let via = self.via()?;
+        // Its fee and the hub's on the lock to it, in all.
+        let quote = (self.wallet.invoice_quote_via(via, hub, request, u64::MAX)).await;
+        let quote = quote.map_err(wallet_error)?;
+        let (fee, provider_fee) = (quote.costs(), quote.fee);
         if max_fee.is_some_and(|max| fee.saturating_mul(1000) > max) {
             return Err(Error::Quota(format!(
                 "it costs {fee} sat on top, more than allowed"
@@ -996,18 +968,9 @@ impl<T: Transport> Bridge<T> {
             Ok(payment)
         })?;
         tracing::info!(hash = %hex::encode(hash), amount, reserve, "paying");
-        let paid = match via {
-            None => {
-                self.wallet
-                    .pay_invoice_within(hub, request, Some(fee))
-                    .await
-            }
-            Some(via) => {
-                (self.wallet)
-                    .pay_invoice_via_within(via, hub, request, provider_fee, Some(fee))
-                    .await
-            }
-        };
+        let paid = (self.wallet)
+            .pay_invoice_via_within(via, hub, request, provider_fee, Some(fee))
+            .await;
         self.conclude(&payment, paid)
     }
 
@@ -1130,7 +1093,7 @@ impl<T: Transport> Bridge<T> {
 /// Getting paid into accounts.
 impl<T: Transport> Bridge<T> {
     /// An invoice of `amount` msat crediting `key`'s account once paid,
-    /// less its hub's fee on receiving.
+    /// less its provider's fee on receiving.
     pub async fn top_up(&self, key: &[u8; 32], amount: u64) -> Result<bridge::Invoice, Error> {
         let account = self.account_id(key)?;
         let receipt = self
@@ -1175,22 +1138,14 @@ impl<T: Transport> Bridge<T> {
         };
         let hub = &self.config.hub;
         self.ask_provider().await?;
-        let asked = match self.receiving()?.via {
-            None => {
-                self.wallet
-                    .invoice_exact(hub, amount, memo, committed)
-                    .await
-            }
-            Some(via) => {
-                (self.wallet)
-                    .invoice_exact_through(&via, hub, amount, memo, committed)
-                    .await
-            }
-        }
-        .map_err(wallet_error)?;
+        let via = self.receiving()?.via;
+        let asked = (self.wallet)
+            .invoice_exact_through(&via, hub, amount, memo, committed)
+            .await
+            .map_err(wallet_error)?;
         let request = asked
             .request
-            .ok_or_else(|| Error::Unavailable("its hub made no invoice yet".into()))?;
+            .ok_or_else(|| Error::Unavailable("its provider made no invoice yet".into()))?;
         let invoice = decode(&request)?;
         let created = invoice.duration_since_epoch().as_secs() as i64;
         let receipt = Receipt {

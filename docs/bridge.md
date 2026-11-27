@@ -2,8 +2,8 @@
 
 `licash-bridge` serves Nostr Wallet Connect (NIP-47) for apps out of
 accounts it keeps, over a Licash wallet of its own at one hub: it pays
-invoices through the hub's Lightning gateway, or else a swap provider's,
-and takes payments there.
+invoices and is paid over Lightning through a swap provider, as hubs run
+no Lightning gateway.
 Optionally it gives its accounts Lightning Addresses, with zaps. It is
 custodial: the bridge holds what its accounts hold. Anyone can run one,
 for themselves or as a provider for others, and a wallet can use several.
@@ -18,23 +18,23 @@ Use the image `ghcr.io/lichenbtc-org/licash-bridge`, or build it with
 licash-bridge --data ./bridge init --network signet --hub https://hub.example
 # prints the pairing code its owner registers with
 licash-bridge --data ./bridge run --listen 0.0.0.0:8090 \
+  --via https://swaps.example \
   --relay wss://relay.example --name "my bridge" --max-payment 50000
 licash-bridge --data ./bridge status
 licash-bridge --data ./bridge pairing --renew  # hand the account to a new wallet
 ```
 
-At a hub that runs no Lightning gateway, `run --via URL` (or
-`LICASH_BRIDGE_VIA`) names a swap provider ([swaps.md](swaps.md)) to pay
-and be paid through instead: it pays the bridge's invoices for a lock of
+`run --via URL` (or `LICASH_BRIDGE_VIA`, required) names the swap
+provider ([swaps.md](swaps.md)) to pay and be paid through: it pays the bridge's invoices for a lock of
 their amount and its fee, and makes its invoices, locking what they are
 paid to the bridge at the hub. The provider is trusted for its fees and
 sees each payment's amount, and links the bridge's receipts. Its terms
 are asked again each round: its fee on receiving is what the bridge's info
-names, and its limits are the Lightning Addresses'. Invoices through a
-provider ask whole satoshis: a top-up or a Lightning Address payment of a
-part of one is refused. The provider must name the feature
-`receive-exact` for the bridge to be paid through it. A hub with a gateway
-is always paid through it.
+names, and its limits are the Lightning Addresses'. While it holds too
+little at the hub to pay the bridge, its terms are still named, with
+nothing to be paid at once. Invoices ask whole satoshis: a top-up or a
+Lightning Address payment of a part of one is refused. The provider must
+name the feature `receive-exact` for the bridge to be paid through it.
 
 Back up `<data>/wallet.sqlite`: it holds the bridge's wallet and its
 accounts, connections, payments and invoices in one SQLite database.
@@ -87,7 +87,7 @@ through it, so the payer's relays learn nothing of the bridge's address,
 and the proxy resolves their names. Without it, it does not resolve
 domains, so a public name that points at a private address can still be
 reached, over TLS to that name; firewall the bridge's egress if that
-matters. The hub's fee on receiving comes out of what the account is paid.
+matters. The provider's fee on receiving comes out of what the account is paid.
 
 Anyone may ask an address for invoices, so each address has at most 64
 unpaid and unexpired at once (its top-ups included). Past that it refuses

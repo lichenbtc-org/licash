@@ -48,11 +48,11 @@ enum Command {
         /// The hub to pay through: the wallet's only one if not given.
         #[arg(long, env = "LICASH_BRIDGE_HUB")]
         hub: Option<String>,
-        /// A swap provider to pay and be paid over Lightning through,
-        /// should the hub run no Lightning gateway: trusted for its fees,
-        /// it sees each payment's amount and links the bridge's receipts.
+        /// The swap provider to pay and be paid over Lightning through, as
+        /// hubs run no Lightning gateway: trusted for its fees, it sees
+        /// each payment's amount and links the bridge's receipts.
         #[arg(long, env = "LICASH_BRIDGE_VIA")]
-        via: Option<String>,
+        via: String,
         /// A Nostr relay to serve NWC on: once each.
         #[arg(
             long = "relay",
@@ -196,7 +196,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             };
             let config = Config {
                 hub,
-                via,
+                via: Some(via),
                 open,
                 name,
                 relays,

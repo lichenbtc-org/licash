@@ -113,10 +113,10 @@ fn reaching(app: &Router, provider: &Arc<Provider<Local>>) -> Local {
 }
 
 /// A provider over `node`, its wallet of seed `seed` at the hub holding
-/// 500 sat, charging 2 sat to pay and 1 to receive.
+/// `stock` sat, charging 2 sat to pay and 1 to receive.
 async fn provider_over(
     net: (&Hub, &std::path::Path, &Router),
-    seed: u8,
+    (seed, stock): (u8, u64),
     node: &Arc<Fake>,
 ) -> Provider<Local> {
     let (hub, dir, app) = net;
@@ -124,8 +124,10 @@ async fn provider_over(
     let regtest = ChainProfile::Core30DefaultRegtest;
     let wallet = Wallet::create(&path, &[seed; 32], regtest, Local(app.clone(), None)).unwrap();
     wallet.add_hub(HUB).await.unwrap();
-    let stock = mint::pay(hub, (&dir.join("seed"), 6), HUB, &wallet.address(), 500);
-    wallet.receive(&stock).unwrap();
+    if stock > 0 {
+        let stock = mint::pay(hub, (&dir.join("seed"), 6), HUB, &wallet.address(), stock);
+        wallet.receive(&stock).unwrap();
+    }
     let swaps = licash_swaps::Config {
         margin: 6,
         confirm: 4,
@@ -165,6 +167,11 @@ impl Net {
     /// [`PROVIDER`] charging 2 sat to pay and 1 to receive, over its own
     /// node.
     async fn with(config: Config) -> Self {
+        Self::stocked(config, 500).await
+    }
+
+    /// As [`Net::with`], the provider holding `stock` sat at the hub.
+    async fn stocked(config: Config, stock: u64) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let (seed, db) = (dir.path().join("seed"), dir.path().join("hub.sqlite"));
         Hub::init(&seed, &db, 6).unwrap();
@@ -187,7 +194,7 @@ impl Net {
         let node = Arc::new(Fake::new());
         node.tip(chain.height(), chain.tip());
         let at = (hub.as_ref(), dir.path(), &app);
-        let provider = Arc::new(provider_over(at, 0x50, &node).await);
+        let provider = Arc::new(provider_over(at, (0x50, stock), &node).await);
 
         let path = dir.path().join("bridge.sqlite");
         let reaches = reaching(&app, &provider);
@@ -1403,6 +1410,34 @@ async fn a_bridge_is_topped_up_and_pays_through_its_provider() {
     assert_eq!(net.node.sent().len(), 1);
     let locks = net.bridge.wallet().locks().unwrap();
     assert!(locks[0].via.is_some(), "{locks:?}");
+}
+
+/// Its provider holding nothing at its hub yet: the bridge still says what
+/// it is, its provider's fee on receiving named, and its addresses take
+/// nothing at once.
+#[tokio::test]
+async fn a_bridge_whose_provider_holds_nothing_at_its_hub_still_answers() {
+    let net = Net::stocked(
+        Config {
+            public_url: Some("https://pay.test".into()),
+            ..Config::default()
+        },
+        0,
+    )
+    .await;
+    let owner = net.owner(0).await;
+    net.bridge.round().await.unwrap();
+    assert_eq!(
+        net.bridge.info().unwrap().receive_fee,
+        Fee { base: 1, ppm: 0 }
+    );
+    net.bridge.set_username(&owner, Some("alice")).unwrap();
+    let app = licash_bridge::router(net.bridge.clone());
+    let pay = get_json(&app, "/.well-known/lnurlp/alice").await;
+    assert_eq!(pay["tag"], "payRequest", "{pay}");
+    assert_eq!(pay["maxSendable"], pay["minSendable"], "{pay}");
+    let refused = net.bridge.top_up(&owner, 10_000).await;
+    assert!(refused.is_err(), "{refused:?}");
 }
 
 #[tokio::test]
