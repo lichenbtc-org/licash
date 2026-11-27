@@ -102,17 +102,17 @@ take, and what they cost.
 | In Licash | pays itself at a hub | 10% | 10 minutes |
 | Between hubs | swaps through a provider from one hub to another | 30% | 30 minutes |
 | Over Lightning | no longer made (see below), shown for the moves recorded before | 30% | 30 minutes |
-| On Bitcoin | pays out of a hub through a provider to a hub's deposit address, then claims the deposit | 30% | 24 hours |
+| On Bitcoin | pays out of a hub through a provider to the address of a deposit a provider takes for notes at a hub, then claims the notes | 30% | 24 hours |
 
 A move on Bitcoin is timed by its swap: from asking the provider to the
 moment its coin is on the network. The blocks waited for after that, and the
-hub's claim of the deposit, are not counted in its time, only in what it
+deposit's claim, are not counted in its time, only in what it
 costs; the page shows the swap's time and the whole apart. A move made
 before this was timed, or that failed before the provider's coin, shows no
 time.
 
 Each move moves `--amount` sat (2,000 by default), and a move on Bitcoin
-at least the smallest deposit its hub takes (often 10,000 sat). Moves on
+at least the smallest deposit its provider takes (10,000 sat by default). Moves on
 Bitcoin are made only with `--chain URL`, Bitcoin Core's JSON-RPC
 (`http://user:pass@host:8332`) or Esplora (`esplora+https://host/api`),
 which the observatory reads directly, not over Tor, to follow its payouts

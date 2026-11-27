@@ -232,6 +232,8 @@ struct Plan {
     source: String,
     target: String,
     via: Option<String>,
+    /// The provider taking the deposit of a move out on Bitcoin and back.
+    deposit_via: Option<String>,
     amount: u64,
     quoted: u64,
 }
@@ -527,6 +529,7 @@ impl<T: Transport + 'static> Mover<T> {
             source: hub.id.clone(),
             target: hub.id.clone(),
             via: None,
+            deposit_via: None,
             amount,
             quoted: *fee,
         })
@@ -610,6 +613,7 @@ impl<T: Transport + 'static> Mover<T> {
             source: from.id.clone(),
             target: to.id.clone(),
             via: Some(provider.id.clone()),
+            deposit_via: None,
             amount: quote.amount,
             quoted: quote.fee + lock_fee,
         })
@@ -726,38 +730,44 @@ impl<T: Transport + 'static> Mover<T> {
         }
     }
 
-    /// Out of a hub through a provider, onto Bitcoin, into a hub again: a
-    /// payout to a deposit's address, estimated from their terms, as the
-    /// deposit is asked for only once the move is made.
+    /// Out of a hub through a provider, onto Bitcoin, into a hub again
+    /// through a provider taking deposits there: a payout to a deposit's
+    /// address, estimated from their terms, as the deposit is asked for
+    /// only once the move is made.
     fn plan_chain(&self, network: &Network) -> Result<Plan, Skipped> {
         let available = self.available();
         let mut routes = Vec::new();
+        let added = |h: &&Live<HubTerms>| self.added.contains_key(&h.id);
+        // Each hub a provider takes deposits at, and the most it locks there.
+        let mut intakes = Vec::new();
+        for taker in &network.providers {
+            let Some(deposits) = &taker.terms.deposits else {
+                continue;
+            };
+            for to in network.hubs.iter().filter(added) {
+                let at = taker.terms.hubs.iter().find_map(|(address, max)| {
+                    (Some(address) == to.terms.address.as_ref()).then_some(*max)
+                });
+                if let Some(max) = at {
+                    intakes.push((taker, deposits, to, max.min(deposits.max)));
+                }
+            }
+        }
         for provider in &network.providers {
             let Some(chain) = &provider.terms.chain else {
                 continue;
             };
-            for to in network
-                .hubs
-                .iter()
-                .filter(|h| self.added.contains_key(&h.id))
-            {
-                let Some(deposits) = &to.terms.deposits else {
-                    continue;
-                };
+            for (taker, deposits, to, max) in &intakes {
                 let amount = self.moving.amount.max(deposits.min);
-                let pays = amount + deposits.fee.due(amount);
+                let pays = deposits.pays(amount);
                 // The wallet's claim, budgeted as the wallet does, at the
                 // provider's rate.
                 let claim = (CLAIM_VBYTES * chain.rate.max(1_000) * 3).div_ceil(1000);
                 let value = pays + claim;
-                if amount > deposits.max || value < chain.min || value > chain.max {
+                if amount > *max || value < chain.min || value > chain.max {
                     continue;
                 }
-                for from in network
-                    .hubs
-                    .iter()
-                    .filter(|h| self.added.contains_key(&h.id))
-                {
+                for from in network.hubs.iter().filter(added) {
                     let swaps_at = from
                         .terms
                         .address
@@ -774,14 +784,14 @@ impl<T: Transport + 'static> Mover<T> {
                     let costs = locked - pays + lock;
                     if swaps_at && held >= pays + costs {
                         let quoted = costs + (pays - amount);
-                        routes.push((provider, from, to, amount, quoted));
+                        routes.push((provider, taker, from, to, amount, quoted));
                     }
                 }
             }
         }
-        let (via, from, to, amount, quoted) = pick(&routes).ok_or_else(|| {
+        let (via, taker, from, to, amount, quoted) = pick(&routes).ok_or_else(|| {
             Skipped::NoRoute(
-                "no provider pays out of a hub holding enough to a hub taking deposits".into(),
+                "no provider pays out of a hub holding enough to a provider taking deposits".into(),
             )
         })?;
         Ok(Plan {
@@ -789,6 +799,7 @@ impl<T: Transport + 'static> Mover<T> {
             source: from.id.clone(),
             target: to.id.clone(),
             via: Some(via.id.clone()),
+            deposit_via: Some(taker.id.clone()),
             amount: *amount,
             quoted: *quoted,
         })
@@ -808,17 +819,14 @@ impl<T: Transport + 'static> Mover<T> {
         let wallet = &self.wallet;
         let chain = self.moving.chain.as_ref().ok_or("no chain")?;
         let provider = self.provider_url(plan)?;
-        let mut deposit = wallet.deposit(to, plan.amount).await.map_err(said)?;
-        let terms = loop {
-            match (&deposit.terms, &deposit.state) {
-                (_, DepositState::Canceled(why)) => return Err(format!("no deposit: {why}")),
-                (Some(terms), _) => break terms.clone(),
-                _ => {}
-            }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            if let Ok(followed) = wallet.follow_deposit(&deposit.hash).await {
-                deposit = followed;
-            }
+        let taker = self.url_of(plan.deposit_via.as_deref())?;
+        let mut deposit = (wallet.deposit_through(&taker, to, plan.amount))
+            .await
+            .map_err(said)?;
+        let terms = match (&deposit.terms, &deposit.state) {
+            (_, DepositState::Canceled(why)) => return Err(format!("no deposit: {why}")),
+            (Some(terms), _) => terms.clone(),
+            _ => return Err("the deposit has no terms".into()),
         };
         let rate = match chain.fee_rate(6).await {
             Ok(Some(rate)) => rate.max(FeeRate::BROADCAST_MIN),
@@ -864,6 +872,10 @@ impl<T: Transport + 'static> Mover<T> {
                     }
                 }
             }
+            // Its payment found once deep enough, told to the provider.
+            if let Err(e) = wallet.find_deposit_payments(&Blocks(chain)).await {
+                tracing::debug!("looking for a deposit's payment: {e}");
+            }
             if let Ok(followed) = wallet.follow_deposit(&deposit.hash).await {
                 deposit = followed;
             }
@@ -871,7 +883,12 @@ impl<T: Transport + 'static> Mover<T> {
     }
 
     fn provider_url(&self, plan: &Plan) -> Result<String, String> {
-        let id = plan.via.as_deref().ok_or("no provider")?;
+        self.url_of(plan.via.as_deref())
+    }
+
+    /// The URL of the provider of `id`, as it answered last.
+    fn url_of(&self, id: Option<&str>) -> Result<String, String> {
+        let id = id.ok_or("no provider")?;
         let services = self.moving.store.services().map_err(|e| e.to_string())?;
         let service = services.into_iter().find(|s| s.id == id);
         // The URL it answered at last: the one it was planned with.

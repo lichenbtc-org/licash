@@ -50,6 +50,8 @@ pub struct ProviderTerms {
     pub hubs: Vec<(Value, u64)>,
     pub chain: Option<swaps::Chain>,
     pub lightning: Option<swaps::Lightning>,
+    /// Its deposits on Bitcoin for notes at its hubs, if it takes them.
+    pub deposits: Option<swaps::Deposits>,
 }
 
 fn part<T: DeserializeOwned>(info: &Value, key: &str) -> Option<T> {
@@ -114,6 +116,7 @@ pub fn provider(json: &str) -> Option<ProviderTerms> {
         hubs,
         chain: part(&info, "chain"),
         lightning: part(&info, "lightning"),
+        deposits: part(&info, "deposits"),
     })
 }
 
@@ -152,6 +155,19 @@ mod tests {
         assert_eq!(terms.fees.unwrap().spend, Fee { base: 0, ppm: 10 });
         assert_eq!(terms.height, Some(331_826));
         assert!(terms.lightning.is_none(), "a part not read is unknown");
+    }
+
+    #[test]
+    fn a_providers_deposits_are_read_if_it_takes_them() {
+        let deposits = r#""deposits":{"fee":{"base":0,"ppm":5000},"miner":500,
+            "min":10000,"max":1000000,"depth":3,"window":12,"timeout":1008}"#;
+        let json = format!(r#"{{"hubs":[{{"address":"ab","max":5000}}],{deposits}}}"#);
+        let terms = provider(&json).unwrap();
+        let taken = terms.deposits.unwrap();
+        assert_eq!((taken.min, taken.miner, taken.depth), (10_000, 500, 3));
+        assert_eq!(taken.pays(10_000), 10_550);
+        assert_eq!(terms.hubs, [(Value::from("ab"), 5_000)]);
+        assert!(provider(r#"{"hubs":[]}"#).unwrap().deposits.is_none());
     }
 
     #[test]
