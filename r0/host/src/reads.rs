@@ -36,6 +36,9 @@ pub fn input_of(base: Base) -> HubInput {
         tip: Vec::new(),
         openings: Vec::new(),
     });
+    // A leaf carrier's slot spend carries a reserved hash, which the input
+    // writes and reads only then (`SlotSpend::write`, `SlotSpend::read`).
+    let leaf = licash_hp::carrier(&base) == licash_statement::Carrier::Leaf;
     HubInput {
         base,
         exit: Exit {
@@ -57,7 +60,7 @@ pub fn input_of(base: Base) -> HubInput {
                 path: Vec::new(),
                 coinbase: Vec::new(),
                 coinbase_path: Vec::new(),
-                reserved: None,
+                reserved: leaf.then_some([0; 32]),
             },
             respond: Respond {
                 tx: Vec::new(),
@@ -331,9 +334,20 @@ mod tests {
         let base = bench_base();
         let mut parts = base.parts().clone();
         assert!(!chained(parts.graph.id));
-        parts.graph.id = licash::recovery::SIGNED_FROM;
-        let signed = Base::new(parts).unwrap();
-        for base in [base, signed] {
+        // The graphs a hub opens contracts on: chained ones (14), and of a
+        // leaf carrier (15), whose slot spends carry a reserved hash the
+        // input of a graph before has no place for, and of two claims
+        // owed nothing (16).
+        let mut bases = vec![base];
+        for id in [
+            licash::recovery::SIGNED_FROM,
+            licash::recovery::LEAF_FROM,
+            licash::recovery::PI1_ALONE_FROM,
+        ] {
+            parts.graph.id = id;
+            bases.push(Base::new(parts.clone()).unwrap());
+        }
+        for base in bases {
             let bytes = input_of(base).to_bytes();
             let read = HubInput::from_bytes(&bytes).unwrap();
             assert!(licash_hp::check(&read).is_err());
