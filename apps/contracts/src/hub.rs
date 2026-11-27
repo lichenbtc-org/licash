@@ -16,11 +16,13 @@ mod node;
 mod prover;
 mod responses;
 mod run;
+mod standby;
 mod store;
 pub mod terms;
 mod vigil;
 mod witness;
 
+pub use standby::{ACTED as STANDBY_ACTED, RESTORED as STANDBY_RESTORED};
 pub use witness::{superseded, Leadership, Witnesses, INSTANCE_FILE, SUPERSEDED_FILE};
 
 use std::collections::{HashMap, HashSet};
@@ -214,6 +216,8 @@ pub struct Openings {
     /// Whom the hub writes each one-time answer to before it signs it
     /// ([`Openings::witnessed_by`]): until told, it signs no contract.
     witnesses: std::sync::OnceLock<Witnesses>,
+    /// A standby's, its steps deferred ([`Openings::defer_as_standby`]).
+    deferral: standby::Deferral,
 }
 
 /// How full the hub's contracts are ([`Openings::load`]).
@@ -460,6 +464,7 @@ impl Openings {
             vigil: Mutex::new(vigil::Vigil::new(profile)),
             funds: Mutex::new(None),
             witnesses: std::sync::OnceLock::new(),
+            deferral: Default::default(),
         });
         if let Err(e) = openings.learn_funds().await {
             tracing::warn!("contracts need the node's wallet, to fund F: {e:#}");
@@ -1001,6 +1006,9 @@ impl Openings {
     /// (`dispute`). Each opening's error is reported independently.
     pub async fn answer_requests(&self) -> Result<ResponseRound> {
         self.follow_chain().await;
+        if let Ok(tip) = self.source.tip().await {
+            self.round_at(tip.height);
+        }
         let ids = self.store().signed_ids()?;
         self.keep_loaded(&ids);
         let round_open = ids.len();
@@ -1109,7 +1117,8 @@ impl Openings {
         Ok(round)
     }
 
-    /// Play the exits every `every` while the hub runs: never returns. The
+    /// Play the exits every `every` while the hub runs: never returns but
+    /// for a standby stopping, to be restored newer ([`Self::stale`]). The
     /// operator is told if the node's chain stalls, or rounds fail, for long
     /// (`vigil::Vigil`).
     pub async fn respond_every(self: Arc<Self>, every: Duration) {
@@ -1130,6 +1139,10 @@ impl Openings {
             );
             for message in told {
                 self.alert(&message);
+            }
+            // A standby stopping, to be restored newer and started again.
+            if self.stale() {
+                return;
             }
             tokio::time::sleep(every).await;
         }
@@ -1629,6 +1642,7 @@ mod tests {
             vigil: Mutex::new(vigil::Vigil::new(profile)),
             funds: Mutex::new(None),
             witnesses: std::sync::OnceLock::from(Witnesses::none()),
+            deferral: Default::default(),
         }
     }
 
@@ -2153,5 +2167,82 @@ mod tests {
         assert_eq!(abandoned.phase, Some(HubPhase::Termed));
         assert!(abandoned.abandoned && !abandoned.signed);
         assert_eq!(abandoned.terms, None);
+    }
+
+    /// A standby takes no step of its own before it is ripe, nor on a
+    /// ledger older than it; its first marks it acted, durably, and every
+    /// way it pays, signs or posts fails it before then.
+    #[test]
+    fn a_standby_acts_late_on_a_fresh_ledger_and_marks_it_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = test_openings(dir.path());
+        // A hub: at once, and never marked.
+        assert!(hub.ready(&[1; 32], 500, true, 0).unwrap());
+        assert!(hub.unacted("posted").is_ok());
+        assert_eq!(hub.proves_from(110, 100, 300), 110);
+        std::fs::write(dir.path().join(standby::RESTORED), "").unwrap();
+        let standby = test_openings(dir.path());
+        standby.defer_as_standby();
+        assert!(standby.unacted("posted").is_err());
+        // Its proof started halfway to the assertion's deadline.
+        assert_eq!(standby.proves_from(110, 100, 300), 200);
+        // Opened at 100: due at 120 and not fresh, a step with no deadline
+        // waits; one with a deadline stops it.
+        standby.round_at(100);
+        assert!(!standby.ready(&[1; 32], 99 + 21, false, 119).unwrap());
+        assert!(!standby.ready(&[1; 32], 120, false, 120).unwrap());
+        assert!(!standby.stale());
+        assert!(!standby.ready(&[1; 32], 120, true, 120).unwrap());
+        assert!(standby.stale());
+        assert!(!dir.path().join(standby::ACTED).exists());
+        // Opened again later: it acts, marked first.
+        let standby = test_openings(dir.path());
+        standby.defer_as_standby();
+        standby.round_at(120);
+        assert!(standby.fresh(120, true, 120));
+        assert!(!dir.path().join(standby::ACTED).exists());
+        assert!(standby.ready(&[1; 32], 120, true, 125).unwrap());
+        assert!(dir.path().join(standby::ACTED).exists());
+        assert!(standby.unacted("posted").is_ok());
+        // Opened again: still acted, whatever the age of its ledger, and
+        // never stopped to be restored.
+        let standby = test_openings(dir.path());
+        standby.defer_as_standby();
+        standby.round_at(10);
+        assert!(standby.unacted("posted").is_ok());
+        assert!(standby.ready(&[2; 32], 120, true, 125).unwrap());
+        standby.round_at(10_000);
+        assert!(!standby.stale());
+    }
+
+    /// A standby not acted stops for a newer ledger once it played on its
+    /// own for a quarter of the response window: a contract opened since
+    /// is not in it.
+    #[test]
+    fn a_standby_not_acted_is_restored_every_quarter_window() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(standby::RESTORED), "").unwrap();
+        let standby = test_openings(dir.path());
+        standby.defer_as_standby();
+        let every = standby.refresh();
+        assert!(every >= 1);
+        standby.round_at(100);
+        standby.round_at(100 + every - 1);
+        assert!(!standby.stale());
+        standby.round_at(100 + every);
+        assert!(standby.stale());
+        // A hub, never.
+        let hub = test_openings(dir.path());
+        hub.round_at(100);
+        hub.round_at(100_000);
+        assert!(!hub.stale());
+        // Nor a standby nothing restores: it plays on what it has.
+        std::fs::remove_file(dir.path().join(standby::RESTORED)).unwrap();
+        let manual = test_openings(dir.path());
+        manual.defer_as_standby();
+        manual.round_at(100);
+        manual.round_at(100_000);
+        assert!(!manual.stale());
+        assert!(manual.fresh(150, true, 150_000));
     }
 }

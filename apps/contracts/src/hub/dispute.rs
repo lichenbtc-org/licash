@@ -48,6 +48,7 @@ use lichen_contract::Role;
 use sha2::{Digest, Sha256};
 
 use super::prover::{self, Admission};
+use super::standby::mid;
 use super::witness::Decision;
 use super::{responses::Responses, Openings, Refused};
 use crate::holder::node::Node;
@@ -338,6 +339,10 @@ impl Openings {
                     .saturating_add(u32::from(g.answer_window))
                     .saturating_sub(1)
                     .saturating_sub(g.deadline_margin);
+                let ripe = self.ripe(o, main(&z), z_at, z_at, Some(deadline)).await?;
+                if !self.ready(id, ripe, true, tip)? {
+                    return Ok(Played::Idle);
+                }
                 self.answer(id, hub, o, &y, &z, (deadline, stake), tip)
                     .await
             }
@@ -706,7 +711,16 @@ impl Openings {
     /// Her contract stands: past its close, the default, with a fee coin,
     /// pays each party its share (the hub `V_max` and its reserve).
     async fn close(&self, id: &[u8; 32], hub: &Hub, o: &HubOpening, tip: u32) -> Result<Played> {
-        if tip < o.base.parts().graph.close_height {
+        let close_height = o.base.parts().graph.close_height;
+        if tip < close_height {
+            return Ok(Played::Idle);
+        }
+        let contract = OutPoint {
+            txid: o.funding.compute_txid(),
+            vout: 0,
+        };
+        let ripe = self.ripe(o, contract, close_height, 0, None).await?;
+        if !self.ready(id, ripe, false, tip)? {
             return Ok(Played::Idle);
         }
         let prevout = presign(&o.set, "default")?.prevout.clone();
@@ -835,6 +849,17 @@ impl Openings {
         if tip.saturating_add(1) < p_at.saturating_add(depth) {
             return Ok(Played::Idle);
         }
+        // A standby's halfway through the blocks to respond in, by when a
+        // live hub has responded.
+        let spent = OutPoint {
+            txid: r.compute_txid(),
+            vout: 0,
+        };
+        let (deep, by) = (p_at.saturating_add(depth), respond_deadline(o, r_at));
+        let ripe = self.ripe(o, spent, r_at, deep, Some(by)).await?;
+        if !self.due(ripe, tip) {
+            return Ok(Played::Idle);
+        }
         // Her publication past the headers a proof can carry: nothing to
         // judge it on, and a response on the short chain would commit the
         // hub to a proof it can never make. Unanswered, her timeout pays
@@ -907,6 +932,7 @@ impl Openings {
                     ));
                 }
                 let b_prime = graph::responded(&o.base, &response)?;
+                self.acting(id, tip)?;
                 let window = (r_at, respond_deadline(o, r_at));
                 let unit = Amount::from_sat(o.base.parts().graph.unit_sats);
                 let stake = unit * u64::from(b.saturating_sub(b_prime));
@@ -945,7 +971,7 @@ impl Openings {
         let pinned = pins.evidence(id)?.is_some();
         if !pinned
             && self
-                .unpinned(id, slot::RESPOND, id, r, spends, lone)
+                .unpinned(id, slot::RESPOND, id, r, spends, lone, (ripe, tip))
                 .await?
         {
             return Ok(Played::Idle);
@@ -1006,12 +1032,10 @@ impl Openings {
         // At the earliest, its response confirms in the next block.
         let job = |evidence: &[Evidence]| {
             let x_at = tip.saturating_add(1);
+            let deadline = assert_deadline(o, x_at);
             let release = x_at.saturating_add(o.base.parts().chain.work_depth);
-            (
-                assert_deadline(o, x_at),
-                release,
-                estimated_cycles(o, evidence, release),
-            )
+            let release = self.proves_from(release, x_at, deadline);
+            (deadline, release, estimated_cycles(o, evidence, release))
         };
         if let Some(prover) = prover.filter(|_| !responded) {
             let (deadline, release, cycles) = job(&evidence);
@@ -1049,6 +1073,7 @@ impl Openings {
         }
         // What is pinned first is what the hub answers on, unless its
         // witnesses agreed on another before.
+        self.acting(id, tip)?;
         let mut pinned = pins.pin(id, r, &recovery::evidence_to_bytes(&evidence))?;
         let mut evidence = pinned_evidence(o, &pinned)?;
         decided = owed(&evidence)?;
@@ -1325,7 +1350,16 @@ impl Openings {
         };
         let evidence = pinned_evidence(o, &pinned)?;
         let disclosures = recovery::disclosures(&evidence).map_err(|e| anyhow!("{e}"))?;
-        let by = (x_at, disclose_deadline(o, x_at)?, assert_stake(o, r, x)?);
+        // Nothing to disclose: no act, and no standby marked as acting.
+        if disclosures == Disclosures::empty() {
+            return Ok(());
+        }
+        let deadline = disclose_deadline(o, x_at)?;
+        let ripe = self.ripe(o, slot, x_at, x_at, Some(deadline)).await?;
+        if !self.ready(id, ripe, true, tip)? {
+            return Ok(());
+        }
+        let by = (x_at, deadline, assert_stake(o, r, x)?);
         self.disclose(id, hub, o, &disclosures, by, tip).await?;
         Ok(())
     }
@@ -1347,11 +1381,25 @@ impl Openings {
         (c, c_at): (&Transaction, u32),
         tip: u32,
     ) -> Result<Played> {
+        // A standby's halfway through the blocks to assert in, its proof
+        // released: by then a live hub is proving.
+        let deadline = assert_deadline(o, c_at);
+        let release = x_at.saturating_add(o.base.parts().chain.work_depth);
+        let contested = OutPoint {
+            txid: c.compute_txid(),
+            vout: 0,
+        };
+        let ripe = self
+            .ripe(o, contested, c_at, release, Some(deadline))
+            .await?;
+        if !self.ready(id, ripe, true, tip)? {
+            return Ok(Played::Idle);
+        }
         let tag = tagged(id, b"assert");
         let pins = Responses::open(&self.data)?;
         // Missing its deadline pays her claim and the hub's reserve.
         let stake = assert_stake(o, r, x)?;
-        let window = (c_at, assert_deadline(o, c_at));
+        let window = (c_at, deadline);
         let post = |tx: Transaction| async move {
             self.post_link(id, hub, "assert", &tx, &c.output[0], window, stake, tip)
                 .await
@@ -1371,7 +1419,7 @@ impl Openings {
         let pinned = pins.evidence(&tag)?.is_some();
         if !pinned
             && self
-                .unpinned(id, slot::ASSERT, &tag, r, spends, lone)
+                .unpinned(id, slot::ASSERT, &tag, r, spends, lone, (ripe, tip))
                 .await?
         {
             return Ok(Played::Idle);
@@ -1448,6 +1496,7 @@ impl Openings {
         slot: &'static str,
         ours: &Decision,
     ) -> Result<Option<Decision>> {
+        self.unacted("asked its witnesses to sign")?;
         let agreed = async {
             self.witnesses()?
                 .authorize(&self.data, id, slot, ours)
@@ -1511,6 +1560,7 @@ impl Openings {
         request: &Transaction,
         coin: OutPoint,
         lone: bool,
+        (ripe, tip): (u32, u32),
     ) -> Result<bool> {
         let witnesses = self.witnesses()?;
         let kept = match witnesses.recover(&self.data, id, name).await {
@@ -1537,10 +1587,16 @@ impl Openings {
             Some(_) => bail!("the witnesses keep another kind of decision for its {name}"),
             None => {}
         }
+        // Decided anew: by a standby only on a ledger as new as the step,
+        // which holds what a live hub did by then.
+        if !self.fresh(ripe, true, tip) {
+            return Ok(true);
+        }
         if !self.pin_lost(id, name, coin, lone).await? {
             return Ok(false);
         }
         if witnesses.count() > 0 {
+            self.acting(id, tip)?;
             if let Err(e) = witnesses
                 .authorize(&self.data, id, name, &Decision::Burnt)
                 .await
@@ -1549,6 +1605,29 @@ impl Openings {
             }
         }
         Ok(true)
+    }
+
+    /// The tip a standby takes a step of `o` spending `coin` at: possible
+    /// from `from`, and not before `floor`, due by `by` (or, with no
+    /// deadline, [`grace`] blocks after `from` as if due twice that).
+    /// Halfway, by when a live hub has taken it; three quarters of the way
+    /// while a transaction spends `coin` in the mempool, a live hub's own
+    /// as it raises its fee. Any hub's at once.
+    async fn ripe(
+        &self,
+        o: &HubOpening,
+        coin: OutPoint,
+        from: u32,
+        floor: u32,
+        by: Option<u32>,
+    ) -> Result<u32> {
+        if !self.deferring() {
+            return Ok(from.max(floor));
+        }
+        let by = by.unwrap_or(from.saturating_add(2 * grace(o)));
+        let half = mid(from, by).max(floor);
+        let pending = !self.unspent(coin, true).await? && self.unspent(coin, false).await?;
+        Ok(if pending { mid(half, by) } else { half })
     }
 
     /// Whether the hub signed answer `name` of opening `id`, or was about
@@ -1663,7 +1742,7 @@ impl Openings {
                     ));
                 }
                 let pinned = pinned.context("responded on no pinned evidence")?;
-                let release = x_at.saturating_add(depth);
+                let release = self.proves_from(x_at.saturating_add(depth), c_at, deadline);
                 // Unread, all its bytes as others': it is not proven anyway.
                 let cycles = match pinned_evidence(o, &pinned) {
                     Ok(evidence) => estimated_cycles(o, &evidence, release),
@@ -1758,6 +1837,18 @@ impl Openings {
     ) -> Result<Played> {
         let k = u32::from(o.babe.spec.windows.k);
         if tip.saturating_add(1) < r_at.saturating_add(k) {
+            return Ok(Played::Idle);
+        }
+        let slot = OutPoint {
+            txid: r.compute_txid(),
+            vout: SLOT,
+        };
+        let (may, by) = (
+            r_at.saturating_add(k).saturating_sub(1),
+            respond_deadline(o, r_at),
+        );
+        let ripe = self.ripe(o, slot, r_at, may, Some(by)).await?;
+        if !self.ready(id, ripe, true, tip)? {
             return Ok(Played::Idle);
         }
         // Its slot's value alone pays no fee: a fee coin with it.
@@ -2069,7 +2160,12 @@ impl Openings {
     ) -> Result<Played> {
         let terminal = presign(&o.set, name)?;
         let wait = waits(o, name)?;
-        if tip.saturating_add(1) < parent_at.saturating_add(wait) {
+        let may = parent_at.saturating_add(wait).saturating_sub(1);
+        if tip < may {
+            return Ok(Played::Idle);
+        }
+        let parent = terminal.tx.input[0].previous_output;
+        if !self.ready(id, self.ripe(o, parent, may, 0, None).await?, false, tip)? {
             return Ok(Played::Idle);
         }
         let prevout = terminal.prevout.clone();
@@ -2366,6 +2462,7 @@ impl Openings {
         script: &ScriptBuf,
         value: Amount,
     ) -> Result<(OutPoint, TxOut)> {
+        self.unacted("funded a fee coin")?;
         let tag = format!(
             "licash fee coin {} {name} {}",
             crate::hex_id(id),
@@ -2684,6 +2781,7 @@ impl Openings {
                 None => return Ok(self.post(link).await),
             },
         };
+        self.unacted("posted a package")?;
         match self.source.broadcast_package(&[link.clone(), child]).await {
             Ok(_) => Ok(true),
             Err(e) => {
@@ -2764,6 +2862,10 @@ impl Openings {
         }
         if swept {
             self.end_if_deep(id, hub, o, paid_at, tip).await?;
+            return Ok(Played::Idle);
+        }
+        let ripe = self.ripe(o, owned[0].op, paid_at, 0, None).await?;
+        if !self.ready(id, ripe, false, tip)? {
             return Ok(Played::Idle);
         }
         let to = self.payout_script().await?;
@@ -2900,6 +3002,12 @@ impl Openings {
             self.end_if_deep(id, hub, o, paid_at, tip).await?;
             return Ok(Played::Idle);
         }
+        // Due before her outputs' wait (delta) ends, not a grace later.
+        let by = paid_at.saturating_add(u32::from(o.base.parts().graph.delta));
+        let ripe = self.ripe(o, left[0].op, paid_at, 0, Some(by)).await?;
+        if !self.ready(id, ripe, true, tip)? {
+            return Ok(Played::Idle);
+        }
         let to = self.payout_script().await?;
         let rate = self.fee_rate().await;
         let sweep = dispute::sweep_equivocated(&left, &hub.keys().party.payment, wires, to, rate)?;
@@ -2928,6 +3036,11 @@ impl Openings {
         contract: OutPoint,
         tip: u32,
     ) -> Result<Played> {
+        // A standby's wallet holds none of the hub's coins F spends, nor
+        // its ledger whether the hub gave F up: the hub's to settle.
+        if self.deferring() {
+            return Ok(Played::Idle);
+        }
         // Unspent in the blocks, spent in the mempool: F is in a block,
         // her request not yet. Played once it is.
         if self.unspent(contract, false).await? {
@@ -3073,6 +3186,7 @@ impl Openings {
     /// and its openings unless they pay another wallet
     /// ([`Openings::opening_payout_script`]).
     pub(super) async fn payout_script(&self) -> Result<ScriptBuf> {
+        self.unacted("paid itself")?;
         new_script(&self.wallet)
             .await
             .context("a new address of the hub's wallet")
@@ -3318,7 +3432,11 @@ impl Openings {
         at: u32,
         tip: u32,
     ) -> Result<()> {
-        if tip.saturating_sub(at) + 1 >= ENDED_DEPTH && self.swept_fee_coins(id, hub, o).await? {
+        // A standby's copy of the hub's ledger is the hub's to end.
+        if tip.saturating_sub(at) + 1 >= ENDED_DEPTH
+            && self.own_ledger()
+            && self.swept_fee_coins(id, hub, o).await?
+        {
             self.store().end(id, at)?;
             tracing::info!(id = %crate::hex_id(id), at, "contract ended");
         }
@@ -3493,6 +3611,10 @@ impl Openings {
 
     /// Broadcast `tx`: whether the node took it.
     async fn post(&self, tx: &Transaction) -> bool {
+        if let Err(e) = self.unacted("posted") {
+            tracing::error!(txid = %tx.compute_txid(), "not broadcast: {e:#}");
+            return false;
+        }
         match self.source.broadcast(tx).await {
             Ok(txid) => {
                 tracing::info!(%txid, "contract transaction broadcast");
@@ -3807,6 +3929,12 @@ fn respond_deadline(o: &HubOpening, r_at: u32) -> u32 {
     r_at.saturating_add(u32::from(g.response_window))
         .saturating_sub(1)
         .saturating_sub(g.deadline_margin)
+}
+
+/// The blocks a standby leaves a live hub to take a step with no deadline
+/// in, once it may: half its response window.
+fn grace(o: &HubOpening) -> u32 {
+    (u32::from(o.base.parts().graph.response_window) / 2).max(1)
 }
 
 /// The blocks terminal `name` of `o` waits after its parent (its CSV).

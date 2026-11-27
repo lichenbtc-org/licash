@@ -524,6 +524,11 @@ impl Timing {
         self.range().price(cap, blocks, funded)
     }
 
+    /// The least blocks the hub has to respond to a request in.
+    pub fn response_window(&self) -> u32 {
+        u32::from(self.on.response_window)
+    }
+
     /// How far beyond `quote` a holder may ask: the close its headers
     /// reach at most, and the hub's least response window.
     pub fn bounds(&self, quote: &Quote) -> Bounds {
