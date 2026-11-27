@@ -243,6 +243,20 @@ impl<T: Transport> Wallet<T> {
         amount: u64,
         key: [u8; 32],
     ) -> Result<Paid, Error> {
+        self.pay_code_keyed_within(url, code, amount, key, None)
+            .await
+    }
+
+    /// [`Wallet::pay_code_keyed`], refused as [`Error::FeeRose`], nothing
+    /// paid, if its hub's fee would pass `max_fee`.
+    pub async fn pay_code_keyed_within(
+        &self,
+        url: &str,
+        code: &LicashCode,
+        amount: u64,
+        key: [u8; 32],
+        max_fee: Option<u64>,
+    ) -> Result<Paid, Error> {
         let url = crate::hub_url(url)?;
         if amount == 0 {
             return Err(Error::Invalid("nothing to pay".into()));
@@ -254,7 +268,16 @@ impl<T: Transport> Wallet<T> {
             )));
         }
         let mailbox = Some(code.mailbox);
-        (self.send_once(&url, &code.address, amount, mailbox, Some(key), None, None)).await
+        (self.send_once(
+            &url,
+            &code.address,
+            amount,
+            mailbox,
+            Some(key),
+            None,
+            max_fee,
+        ))
+        .await
     }
 
     /// The payments to mail to their payees' mailboxes now: those whose

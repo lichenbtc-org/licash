@@ -1,6 +1,6 @@
 //! Licash bridges ([`licash_api::bridge`]): Nostr Wallet Connect services
-//! keeping an account for this wallet, which it tops up in Lightning
-//! payments through its hubs, by hand or by rules, and connects apps to.
+//! keeping an account for this wallet, which it tops up in notes at the
+//! bridge's hub, by hand or by rules, and connects apps to.
 //!
 //! The wallet's key at a bridge derives from its seed and the bridge's
 //! Nostr key, so the same seed finds the same account again: added anew
@@ -9,13 +9,15 @@
 
 use licash::crypto::tagged_hash;
 use licash_api::bridge::{
-    self, Account, Connect, Connected, Connection, Empty, Exported, Info, Invoice, Payment,
-    Register, Revoke, Signed, State, TopUp, Username, Withdraw,
+    self, Account, Connect, Connected, Connection, Deposit, Deposited, Empty, Exported, Info,
+    PaidOut, Payout, Register, Revoke, Signed, State, Username,
 };
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde::{de::DeserializeOwned, Serialize};
 
-use crate::{Code, Error, Lock, LockState, Problem, Response, Transport, Wallet};
+use crate::{
+    Code, Error, LicashCode, LockState, PaymentNote, Problem, Response, Transport, Wallet,
+};
 
 const COMPONENT: &str = "bridges";
 const VERSION: i64 = 1;
@@ -36,6 +38,9 @@ CREATE TABLE bridges (
     created_at INTEGER NOT NULL
 ) STRICT;
 -- The top-ups paid, recorded before paying: what the daily limit counts.
+-- Each is the payment of notes under the key `hash`, `lock` naming it once
+-- the bridge credited it; or, of an earlier release, the lock `lock`
+-- paying the bridge's invoice of payment hash `hash`.
 CREATE TABLE bridge_top_ups (
     hash BLOB PRIMARY KEY,
     url TEXT NOT NULL,
@@ -50,7 +55,7 @@ const DAY: i64 = 86_400;
 
 /// When to top up a bridge account, by [`Wallet::top_up_bridges`]: once it
 /// holds less than `below` sat, up to `up_to`, at most `daily` sat in any
-/// day, each payment's Lightning fee at most `max_fee` sat if given.
+/// day, each payment's fee at most `max_fee` sat if given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BridgeRules {
     pub below: u64,
@@ -85,13 +90,17 @@ pub struct AddedBridge {
     pub created_at: i64,
 }
 
-/// A top-up paid ([`Wallet::top_up_bridge`]): the bridge's invoice and
-/// the wallet's lock paying it, which `resume` finishes if under way.
-#[derive(Clone, Debug)]
+/// A top-up paid ([`Wallet::top_up_bridge`]): the payment of its notes,
+/// by its id in hex, and what the bridge credited, in msat, once it said:
+/// told again before the next top-up of it if not.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BridgeTopUp {
     pub url: String,
-    pub invoice: Invoice,
-    pub lock: Lock,
+    pub id: String,
+    pub amount: u64,
+    /// The hub's fee on the payment, on top.
+    pub fee: u64,
+    pub credited: Option<u64>,
 }
 
 /// A bridge's URL as the wallet keys it: http or https, no trailing slash.
@@ -422,16 +431,18 @@ impl<T: Transport> Wallet<T> {
     }
 
     /// Pay the bridge at `url` `amount` sat into the wallet's account
-    /// there, through the hub at `hub`, its Lightning fee at most `max_fee`
-    /// sat if given. The bridge's hub keeps its fee on receiving out of it.
+    /// there, in notes at its hub, the hub's fee at most `max_fee` sat on
+    /// top if given. Top-ups paid but not credited yet are told the bridge
+    /// first.
     pub async fn top_up_bridge(
         &self,
         url: &str,
-        hub: &str,
         amount: u64,
         max_fee: Option<u64>,
     ) -> Result<BridgeTopUp, Error> {
-        self.top_up(url, hub, amount, max_fee, None).await
+        let added = self.bridge(url)?;
+        self.tell_deposits(&added).await?;
+        self.top_up(&added, amount, max_fee, None).await
     }
 
     /// [`Wallet::top_up_bridge`]; if `recent`, the number of top-ups of
@@ -439,186 +450,246 @@ impl<T: Transport> Wallet<T> {
     /// recorded meanwhile.
     async fn top_up(
         &self,
-        url: &str,
-        hub: &str,
+        added: &AddedBridge,
         amount: u64,
         max_fee: Option<u64>,
         recent: Option<usize>,
     ) -> Result<BridgeTopUp, Error> {
-        let added = self.bridge(url)?;
-        let msat = amount
-            .checked_mul(1000)
-            .filter(|msat| *msat > 0)
-            .ok_or_else(|| Error::Invalid("a top-up of more than 0 sat".into()))?;
-        let invoice: Invoice = self
-            .bridge_call(
-                &added.url,
-                &added.info,
-                bridge::TOP_UP,
-                &TopUp { amount: msat },
-            )
-            .await?;
-        let decoded: lightning_invoice::Bolt11Invoice = invoice
-            .invoice
-            .parse()
-            .map_err(|_| Error::Invalid(format!("bridge {} answered no invoice", added.url)))?;
-        let hash: [u8; 32] = *decoded.payment_hash().as_ref();
-        if decoded.amount_milli_satoshis() != Some(msat) || hex::encode(hash) != invoice.hash {
+        if amount == 0 {
+            return Err(Error::Invalid("a top-up of more than 0 sat".into()));
+        }
+        let url = &added.url;
+        let ask = Deposit {
+            amount,
+            payment: None,
+        };
+        let to: Deposited = (self.bridge_call(url, &added.info, bridge::DEPOSIT, &ask)).await?;
+        let code: LicashCode = to.code.parse()?;
+        if code.network != self.network() {
             return Err(Error::Invalid(format!(
-                "bridge {} answered an invoice of another amount",
-                added.url
+                "bridge {url} answered a code of another network"
             )));
         }
-        // The bridge picks the invoice: one paid before, or that cannot be
-        // paid, is refused before anything is recorded of it.
-        if decoded.is_expired() {
-            return Err(Error::Invalid(format!(
-                "bridge {} answered an expired invoice",
-                added.url
-            )));
+        // Its hub as the wallet knows it, by the code's: the bridge may
+        // reach it at another URL.
+        let hub = (self.hub_to_pay(&code, amount)?).ok_or_else(|| {
+            Error::Invalid(format!(
+                "a top-up of {amount} sat in notes at the bridge's hub, {}: the wallet uses it \
+                 and holds that much there, its fee on top",
+                to.hub
+            ))
+        })?;
+        let key = self.bridge_key(&added.info)?;
+        let note = PaymentNote {
+            text: Some(crate::note_text(&bridge::deposit_note(&key))?),
+            from: None,
+        };
+        if !self.notes_on()? {
+            return Err(Error::Invalid(
+                "a top-up, the wallet's file keeping notes as a later version does".into(),
+            ));
         }
+        let mut send = [0; 32];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut send);
         // Recorded first: a top-up the wallet stopped paying still counts.
         self.store.write(|tx| {
-            let known: bool = tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM bridge_top_ups WHERE hash = ?1)",
-                [hash.to_vec()],
-                |r| r.get(0),
-            )?;
-            if known {
-                return Err(Error::Invalid(format!(
-                    "bridge {} answered the invoice of an earlier top-up",
-                    added.url
-                )));
-            }
             if let Some(recent) = recent {
                 let now: i64 = tx.query_row(
                     "SELECT COUNT(*) FROM bridge_top_ups WHERE url = ?1 AND created_at > ?2",
-                    params![added.url, licash_store::now() - DAY],
+                    params![url, licash_store::now() - DAY],
                     |r| r.get(0),
                 )?;
                 if now as usize != recent {
                     return Err(Error::Invalid(format!(
-                        "another top-up of bridge {} meanwhile",
-                        added.url
+                        "another top-up of bridge {url} meanwhile"
                     )));
                 }
             }
             tx.execute(
                 "INSERT INTO bridge_top_ups (hash, url, amount, created_at)
                  VALUES (?1, ?2, ?3, ?4)",
-                params![hash.to_vec(), added.url, sql(amount)?, licash_store::now()],
+                params![send.to_vec(), url, sql(amount)?, licash_store::now()],
             )?;
             Ok(())
         })?;
+        let mailbox = Some(code.mailbox);
         let paid = self
-            .pay_invoice_within(hub, &invoice.invoice, max_fee)
+            .send_once(
+                &hub,
+                &code.address,
+                amount,
+                mailbox,
+                Some(send),
+                Some(&note),
+                max_fee,
+            )
             .await;
-        let lock = match paid {
-            Ok(lock) => lock,
+        let paid = match paid {
+            Ok(paid) => paid,
             Err(e) => {
-                // A lock is recorded before its hub hears of it: none, and
+                // A send is recorded before its hub hears of it: none, and
                 // nothing was sent, so the top-up never counts.
-                let lock = self.locks()?.into_iter().find(|l| l.hash == hash);
-                self.store.write(|tx| {
-                    match &lock {
-                        None => tx.execute(
+                if self.sent_by_key(&send)?.is_none() {
+                    self.store.write(|tx| {
+                        tx.execute(
                             "DELETE FROM bridge_top_ups WHERE hash = ?1",
-                            [hash.to_vec()],
-                        )?,
-                        Some(lock) => tx.execute(
-                            "UPDATE bridge_top_ups SET lock = ?2 WHERE hash = ?1",
-                            params![hash.to_vec(), lock.id],
-                        )?,
-                    };
-                    Ok(())
-                })?;
+                            [send.to_vec()],
+                        )?;
+                        Ok(())
+                    })?;
+                }
                 return Err(e);
+            }
+        };
+        let fee = self.sent_by_key(&send)?.map_or(0, |sent| sent.fee);
+        let credited = self.tell_deposit(added, &send, amount).await?;
+        Ok(BridgeTopUp {
+            url: url.clone(),
+            id: paid.id,
+            amount,
+            fee,
+            credited,
+        })
+    }
+
+    /// Tell the bridge `added` of the top-up paid under `send`, of
+    /// `amount` sat: what it credited, recorded, or none if it did not
+    /// answer, to tell again.
+    async fn tell_deposit(
+        &self,
+        added: &AddedBridge,
+        send: &[u8; 32],
+        amount: u64,
+    ) -> Result<Option<u64>, Error> {
+        let sent = self.sent_by_key(send)?;
+        let Some(sent) = sent.filter(|sent| sent.state == crate::State::Done) else {
+            return Ok(None);
+        };
+        let payment = self.payment(&sent.id)?;
+        let deposit = Deposit {
+            amount,
+            payment: Some(payment),
+        };
+        let told: Result<Deposited, Error> = self
+            .bridge_call(&added.url, &added.info, bridge::DEPOSIT, &deposit)
+            .await;
+        let credited = match told {
+            Ok(Deposited {
+                credited: Some(credited),
+                ..
+            }) => credited,
+            Ok(_) => return Ok(None),
+            Err(e) => {
+                tracing::warn!(url = %added.url, id = %sent.id, "a top-up not credited yet: {e}");
+                return Ok(None);
             }
         };
         self.store.write(|tx| {
             tx.execute(
                 "UPDATE bridge_top_ups SET lock = ?2 WHERE hash = ?1",
-                params![hash.to_vec(), lock.id],
+                params![send.to_vec(), credited.id],
             )?;
             Ok(())
         })?;
-        Ok(BridgeTopUp {
-            url: added.url,
-            invoice,
-            lock,
-        })
+        Ok(Some(credited.amount))
+    }
+
+    /// Tell the bridge `added` of the top-ups of it paid in notes, not
+    /// credited yet: those of the last day.
+    async fn tell_deposits(&self, added: &AddedBridge) -> Result<(), Error> {
+        let since = licash_store::now() - DAY;
+        let untold: Vec<(Vec<u8>, i64)> = self.store.read(|c| {
+            if component_version(c)? != Some(VERSION) {
+                return Ok(Vec::new());
+            }
+            let mut stmt = c.prepare(
+                "SELECT hash, amount FROM bridge_top_ups
+                 WHERE url = ?1 AND lock IS NULL AND created_at > ?2",
+            )?;
+            let rows = stmt.query_map(params![added.url, since], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<Result<_, _>>()?)
+        })?;
+        for (send, amount) in untold {
+            let send: [u8; 32] = send.as_slice().try_into().map_err(crate::invalid)?;
+            let done = self
+                .sent_by_key(&send)?
+                .is_some_and(|sent| sent.state == crate::State::Done);
+            if done {
+                self.tell_deposit(added, &send, amount as u64).await?;
+            }
+        }
+        Ok(())
     }
 
     /// Have the bridge at `url` pay `amount` sat out of the wallet's
-    /// account there back to the wallet, at the hub at `hub`, whose fee on
-    /// receiving the bridge pays on top. Where the bridge's payment stands;
-    /// `resume` takes it at the hub once made.
-    pub async fn withdraw_bridge(
-        &self,
-        url: &str,
-        hub: &str,
-        amount: u64,
-    ) -> Result<(crate::Invoice, Payment), Error> {
+    /// account there, in notes at its hub, its hub's fee on top out of the
+    /// account too: what the wallet took of it, once paid.
+    pub async fn withdraw_bridge(&self, url: &str, amount: u64) -> Result<PaidOut, Error> {
         let added = self.bridge(url)?;
-        let invoice = self.invoice(hub, amount).await?;
-        let request = invoice
-            .request
-            .clone()
-            .ok_or_else(|| Error::Invalid(format!("hub {hub} made no invoice yet")))?;
-        let withdraw = Withdraw {
-            invoice: request,
-            max_fee: None,
+        // At the hubs the wallet uses, the bridge's first should the wallet
+        // reach it at the URL the bridge does: the bridge pays at its own.
+        let mut hubs: Vec<String> = (self.hubs()?.into_iter()).map(|(url, _)| url).collect();
+        let first = self.hub_urls(&added.info.hub)?;
+        hubs.sort_by_key(|url| !first.contains(url));
+        let code = (self.payment_code(&hubs)?.licash)
+            .ok_or_else(|| Error::Invalid("no Licash code: the wallet uses no hub".into()))?;
+        let mut id = [0; 32];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut id);
+        let payout = Payout {
+            id: hex::encode(id),
+            amount,
+            code: code.to_string(),
         };
-        let call = self.bridge_call(&added.url, &added.info, bridge::WITHDRAW, &withdraw);
-        // The bridge answers once paid, which takes the wallet claiming
-        // the payment meanwhile.
-        let hash = invoice.hash.clone();
-        let follow = async {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                match self.follow_invoice(&hash).await {
-                    Ok(i) if i.state != crate::InvoiceState::Open => break,
-                    _ => {}
-                }
+        let paid: PaidOut = self
+            .bridge_call(&added.url, &added.info, bridge::PAYOUT, &payout)
+            .await?;
+        // Kept by its hub too, for `collect_inbox`, should this fail.
+        if let Some(payment) = &paid.payment {
+            match self.receive(payment) {
+                Ok(_) | Err(Error::AlreadyReceived) => {}
+                Err(e) => tracing::warn!(url = %added.url, "a payout not taken yet: {e}"),
             }
-        };
-        let (mut call, mut follow) = (std::pin::pin!(call), std::pin::pin!(follow));
-        let mut followed = false;
-        let payment = std::future::poll_fn(|cx| {
-            if let std::task::Poll::Ready(paid) = std::future::Future::poll(call.as_mut(), cx) {
-                return std::task::Poll::Ready(paid);
-            }
-            if !followed && std::future::Future::poll(follow.as_mut(), cx).is_ready() {
-                followed = true;
-            }
-            std::task::Poll::Pending
-        })
-        .await;
-        Ok((invoice, payment?))
+        }
+        Ok(paid)
     }
 
     /// What the rules of the bridge `added` top it up by now, in sat, and
     /// how many top-ups of the last day they counted: none if no rules, or
     /// above them, or a top-up of the last day is under way or not
-    /// credited yet. Each counts unless the wallet's lock paying it was
-    /// given back, followed first if under way.
+    /// credited yet. Each counts unless it was given up before it was
+    /// paid: its send, or the wallet's lock paying it in an earlier
+    /// release, followed first if under way.
     async fn bridge_due(&self, added: &AddedBridge) -> Result<Option<(u64, usize)>, Error> {
         let Some(rules) = added.rules else {
             return Ok(None);
         };
+        self.tell_deposits(added).await?;
         let since = licash_store::now() - DAY;
-        let recent: Vec<(Vec<u8>, i64)> = self.store.read(|c| {
+        type Recent = (Vec<u8>, i64, Option<String>);
+        let recent: Vec<Recent> = self.store.read(|c| {
             let mut stmt = c.prepare(
-                "SELECT hash, amount FROM bridge_top_ups WHERE url = ?1 AND created_at > ?2",
+                "SELECT hash, amount, lock FROM bridge_top_ups WHERE url = ?1 AND created_at > ?2",
             )?;
-            let rows = stmt.query_map(params![added.url, since], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let rows = stmt.query_map(params![added.url, since], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?;
             Ok(rows.collect::<Result<_, _>>()?)
         })?;
         let account = self.bridge_account(&added.url).await?;
         let locks = self.locks()?;
         let mut spent = 0u64;
-        for (hash, amount) in &recent {
+        for (hash, amount, told) in &recent {
             let hash: [u8; 32] = hash.as_slice().try_into().map_err(crate::invalid)?;
+            if let Some(sent) = self.sent_by_key(&hash)? {
+                match sent.state {
+                    crate::State::Abandoned(_) => continue,
+                    // Paid, not credited yet: told again next time.
+                    _ if told.is_none() => return Ok(None),
+                    _ => {}
+                }
+                spent = spent.saturating_add(*amount as u64);
+                continue;
+            }
             let lock = locks.iter().find(|l| l.hash == hash).cloned();
             let lock = match lock {
                 Some(l) if matches!(l.state, LockState::Requested | LockState::Locked) => {
@@ -639,8 +710,8 @@ impl<T: Transport> Wallet<T> {
                         return Ok(None);
                     }
                 }
-                // Being paid by another process, or stopped before its
-                // lock was made: counted.
+                // Being paid by another process, or stopped before it was
+                // sent: counted.
                 None => {}
             }
             spent = spent.saturating_add(*amount as u64);
@@ -658,20 +729,16 @@ impl<T: Transport> Wallet<T> {
         Ok((amount > 0).then_some((amount, recent.len())))
     }
 
-    /// Top up each bridge whose rules say so ([`BridgeRules`]), through
-    /// the hub at `hub`: what each top-up came to, by bridge.
-    pub async fn top_up_bridges(
-        &self,
-        hub: &str,
-    ) -> Result<Vec<(String, Result<BridgeTopUp, Error>)>, Error> {
+    /// Top up each bridge whose rules say so ([`BridgeRules`]), as
+    /// [`Wallet::top_up_bridge`]: what each top-up came to, by bridge.
+    pub async fn top_up_bridges(&self) -> Result<Vec<(String, Result<BridgeTopUp, Error>)>, Error> {
         let bridges = self.bridges()?;
         let mut done = Vec::new();
         for added in bridges.iter().filter(|b| b.rules.is_some()) {
             let topped = match self.bridge_due(added).await {
                 Ok(Some((amount, recent))) => {
                     let max_fee = added.rules.and_then(|r| r.max_fee);
-                    self.top_up(&added.url, hub, amount, max_fee, Some(recent))
-                        .await
+                    self.top_up(added, amount, max_fee, Some(recent)).await
                 }
                 Ok(None) => continue,
                 Err(e) => Err(e),

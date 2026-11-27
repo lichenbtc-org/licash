@@ -2007,6 +2007,12 @@ impl<T: Transport> Wallet<T> {
         Ok(resumed)
     }
 
+    /// Finish the payment `id` under way, as [`Wallet::resume`] does each:
+    /// given up if its hub refuses it.
+    pub async fn finish_send(&self, id: &str) -> Result<Paid, Error> {
+        self.advance(&payment_id(id)?).await
+    }
+
     /// Give up the payment `id`, not signed yet, and free its notes: for a
     /// hub gone for good. A signed payment its hub may have released. The
     /// notes of a renewal given up are not renewed again.
@@ -2142,6 +2148,33 @@ impl<T: Transport> Wallet<T> {
             &opened.ours,
             payment.note.as_ref(),
         )
+    }
+
+    /// [`Wallet::receive`], or what it took of `payment` if it did already:
+    /// the same receipt however often it is given, its note kept if it
+    /// came with one now.
+    pub fn receive_once(&self, payment: &Payment) -> Result<Received, Error> {
+        match self.receive(payment) {
+            Err(Error::AlreadyReceived) => {}
+            received => return received,
+        }
+        let opened = self.open_payment(payment)?;
+        let pid = opened.signed.proposal().id();
+        let kept: Option<(i64, i64)> = self.store.read(|c| {
+            Ok(c.query_row(
+                "SELECT amount, received_at FROM receipts WHERE id = ?1",
+                [pid.as_bytes()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+        })?;
+        let (amount, received_at) = kept.ok_or(Error::AlreadyReceived)?;
+        Ok(Received {
+            id: hex::encode(pid.as_bytes()),
+            hub: opened.url,
+            amount: amount as u64,
+            received_at,
+        })
     }
 
     /// The notes `payment` pays this wallet, opened, under a keyset of a

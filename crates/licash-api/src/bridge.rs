@@ -26,6 +26,11 @@ pub const REVOKE: &str = "/v1/bridge/revoke";
 pub const TOP_UP: &str = "/v1/bridge/top-up";
 /// [`Withdraw`]: an invoice paid out of the account, [`Payment`].
 pub const WITHDRAW: &str = "/v1/bridge/withdraw";
+/// [`Deposit`]: notes paid into the account, [`Deposited`].
+pub const DEPOSIT: &str = "/v1/bridge/deposit";
+/// [`Payout`]: notes paid out of the account to a Licash code,
+/// [`PaidOut`].
+pub const PAYOUT: &str = "/v1/bridge/payout";
 /// [`Username`]: the account named, [`Account`].
 pub const USERNAME: &str = "/v1/bridge/username";
 /// [`Empty`]: the bridge frozen for good, paying nothing out, and its
@@ -282,6 +287,69 @@ pub struct Activity {
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<i64>,
+}
+
+/// Notes paid into the signing key's account at the bridge's hub, of
+/// `amount` sat: without `payment`, where to pay them, the deposit
+/// admitted within the bridge's limits; with it, the payment of them, to
+/// the code answered, its note saying [`deposit_note`] of the signing key.
+/// Credited once, what it pays the bridge, whoever sends it: the same
+/// payment again answers the same deposit.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Deposit {
+    pub amount: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment: Option<crate::Payment>,
+}
+
+/// Where a [`Deposit`] is paid, and once it is, what it credited.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Deposited {
+    /// The hub the bridge is paid at.
+    pub hub: String,
+    /// The bridge's Licash code there.
+    pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credited: Option<Credited>,
+}
+
+/// A deposit credited: its payment's id, in hex, and what it credited.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Credited {
+    pub id: String,
+    pub amount: u64,
+}
+
+/// What the note of a [`Deposit`]'s payment says, for the account of
+/// `key`, in hex: only its payer and the bridge can seal it, so no one
+/// else, its hub included, has it credit another account.
+pub fn deposit_note(key: &str) -> String {
+    format!("licash bridge deposit {key}")
+}
+
+/// Pay `amount` sat of notes out of the signing key's account to `code`,
+/// a Licash code at the bridge's hub, once: under `id`, 32 bytes in hex
+/// that the payer picks, the same again answering the same payout.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Payout {
+    pub id: String,
+    pub amount: u64,
+    pub code: String,
+}
+
+/// Where a [`Payout`] stands: once made, its payment, for its payee to
+/// take, which the hub keeps for it too.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PaidOut {
+    pub id: String,
+    pub state: State,
+    pub amount: u64,
+    /// What the bridge's hub took on top, once made.
+    pub fee: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment: Option<crate::Payment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
 }
 
 /// An invoice paying `amount` into the signing key's account, less its
