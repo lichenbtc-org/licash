@@ -82,10 +82,12 @@ public address or public domain. It drops loopback, private, link-local,
 unique-local and unspecified addresses, `localhost`, single-label names,
 `.local`, `.internal` and `.onion`, so a payer cannot point it at a
 service on its own network. If no requested relay is left, it uses its
-own `--relay`s. It does not resolve domains, so a public name that points
-at a private address can still be reached; firewall the bridge's egress
-if that matters. The hub's fee on receiving comes out of what
-the account is paid.
+own `--relay`s. With `--proxy` (such as Tor's), it publishes zap receipts
+through it, so the payer's relays learn nothing of the bridge's address,
+and the proxy resolves their names. Without it, it does not resolve
+domains, so a public name that points at a private address can still be
+reached, over TLS to that name; firewall the bridge's egress if that
+matters. The hub's fee on receiving comes out of what the account is paid.
 
 Anyone may ask an address for invoices, so each address has at most 64
 unpaid and unexpired at once (its top-ups included). Past that it refuses

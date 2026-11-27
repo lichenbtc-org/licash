@@ -21,7 +21,8 @@ struct Cli {
     /// Log as JSON lines.
     #[arg(long, env = "LICASH_BRIDGE_LOG_JSON")]
     log_json: bool,
-    /// Reach hubs through this SOCKS5 proxy, such as Tor's.
+    /// Reach hubs, and the relays zap receipts are published to, through
+    /// this SOCKS5 proxy, such as Tor's.
     #[arg(long, env = "LICASH_BRIDGE_PROXY")]
     proxy: Option<String>,
     #[command(subcommand)]
@@ -210,9 +211,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 Some(proxy) => licash_nostr::Route::socks(proxy)?,
                 None => licash_nostr::Route::Direct,
             };
-            let announce = announce.then_some(route);
+            let announce = announce.then_some(route.clone());
             let every = Duration::from_secs(interval.max(1));
-            runtime.block_on(serve(bridge, listen, every, announce))
+            runtime.block_on(serve(bridge, listen, every, announce, route))
         }
         Command::Status => {
             let wallet = Wallet::open(&path, transport(cli.proxy.as_deref())?)?;
@@ -323,6 +324,7 @@ async fn serve(
     listen: SocketAddr,
     every: Duration,
     announcing: Option<licash_nostr::Route>,
+    zaps: licash_nostr::Route,
 ) -> anyhow::Result<()> {
     let hub = bridge.config().hub.clone();
     bridge
@@ -341,7 +343,7 @@ async fn serve(
     // Relays come and go: served again a while after they fail.
     let nwc = tokio::spawn(async move {
         loop {
-            if let Err(e) = licash_bridge::nwc::run(bridge.clone()).await {
+            if let Err(e) = licash_bridge::nwc::run(bridge.clone(), zaps.clone()).await {
                 tracing::warn!("NWC stopped, starting again in 10 s: {e:#}");
             }
             tokio::time::sleep(Duration::from_secs(10)).await;

@@ -412,8 +412,14 @@ impl Answered {
 }
 
 /// Serve NWC requests on the bridge's relays, for good: its info event
-/// published, each request answered as it comes, alongside.
-pub async fn run<T: Transport + 'static>(bridge: Arc<Bridge<T>>) -> anyhow::Result<()> {
+/// published, each request answered as it comes, alongside. Zap receipts
+/// are published to the relays their payers name through `zaps`, such as
+/// the operator's proxy, so that those relays learn nothing of the
+/// bridge's own address.
+pub async fn run<T: Transport + 'static>(
+    bridge: Arc<Bridge<T>>,
+    zaps: licash_nostr::Route,
+) -> anyhow::Result<()> {
     let relays = &bridge.config().relays;
     anyhow::ensure!(!relays.is_empty(), "no Nostr relay to serve NWC on");
     let client = Client::builder().build();
@@ -445,7 +451,7 @@ pub async fn run<T: Transport + 'static>(bridge: Arc<Bridge<T>>) -> anyhow::Resu
                 None => break,
             },
             _ = tick.tick() => {
-                publish_zaps(&bridge, &publishing);
+                publish_zaps(&bridge, &publishing, &zaps);
                 // Some relays drop replaceable events in time: published
                 // again.
                 if published.elapsed() > Duration::from_secs(3600) {
@@ -494,6 +500,7 @@ pub async fn run<T: Transport + 'static>(bridge: Arc<Bridge<T>>) -> anyhow::Resu
 fn publish_zaps<T: Transport + 'static>(
     bridge: &Arc<Bridge<T>>,
     publishing: &Arc<Mutex<HashSet<[u8; 32]>>>,
+    route: &licash_nostr::Route,
 ) {
     let receipts = match bridge.zap_receipts() {
         Ok(receipts) => receipts,
@@ -510,9 +517,9 @@ fn publish_zaps<T: Transport + 'static>(
         if !first {
             continue;
         }
-        let (bridge, publishing) = (bridge.clone(), publishing.clone());
+        let (bridge, publishing, route) = (bridge.clone(), publishing.clone(), route.clone());
         tokio::spawn(async move {
-            let sent = publish(&zap).await;
+            let sent = publish(&zap, &route).await;
             let stale = licash_store::now() - zap.settled_at > 86_400;
             if sent || stale {
                 if !sent {
@@ -530,9 +537,9 @@ fn publish_zaps<T: Transport + 'static>(
     }
 }
 
-/// Whether a relay of those `zap` names took it.
-async fn publish(zap: &crate::lnurl::ZapReceipt) -> bool {
-    let client = Client::builder().build();
+/// Whether a relay of those `zap` names took it, reached through `route`.
+async fn publish(zap: &crate::lnurl::ZapReceipt, route: &licash_nostr::Route) -> bool {
+    let client = route.builder().build();
     for relay in &zap.relays {
         if let Err(e) = client.add_relay(relay.as_str()).await {
             tracing::debug!(%relay, "a zap receipt's relay: {e}");
@@ -606,6 +613,30 @@ mod tests {
             answering.admit(id(3), since, since, false),
             Admission::First
         );
+    }
+
+    /// A zap receipt reaches the relays its payer names through the route
+    /// it is given, a proxy if any: one that does not answer, none.
+    #[tokio::test]
+    async fn a_zap_receipt_is_published_through_its_route() {
+        use nostr::prelude::Keys;
+        use nostr_sdk::prelude::MockRelay;
+        let relay = MockRelay::run().await.unwrap();
+        let keys = Keys::generate();
+        let zap = crate::lnurl::ZapReceipt {
+            event: EventBuilder::new(Kind::ZapReceipt, "")
+                .finalize(&keys)
+                .unwrap(),
+            relays: vec![relay.url().await],
+            hash: [1; 32],
+            settled_at: 0,
+        };
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = closed.local_addr().unwrap();
+        drop(closed);
+        let proxied = licash_nostr::Route::Socks(proxy);
+        assert!(!publish(&zap, &proxied).await);
+        assert!(publish(&zap, &licash_nostr::Route::Direct).await);
     }
 
     #[test]

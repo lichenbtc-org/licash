@@ -30,8 +30,8 @@ use std::{collections::HashMap, future::Future, net::SocketAddr, time::Duration}
 
 use anyhow::{ensure, Context};
 use nostr_sdk::prelude::{
-    Client, Event, EventBuilder, Filter, FinalizeEvent, Keys, Kind, Proxy, PublicKey, Relay,
-    RelayUrl, SecretKey, SignerAuthenticator, Tag, Timestamp,
+    Client, ClientBuilder, Event, EventBuilder, Filter, FinalizeEvent, Keys, Kind, Proxy,
+    PublicKey, Relay, RelayUrl, SecretKey, SignerAuthenticator, Tag, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 
@@ -210,6 +210,16 @@ pub enum Route {
 }
 
 impl Route {
+    /// A client to build reaching relays this way.
+    pub fn builder(&self) -> ClientBuilder {
+        match self {
+            Self::Direct => Client::builder(),
+            Self::Socks(proxy) => Client::builder().proxy(Proxy::all(*proxy)),
+            #[cfg(feature = "tor")]
+            Self::Tor(tor) => Client::builder().websocket_transport(tor::OverTor(tor.clone())),
+        }
+    }
+
     /// Through the `socks5[h]://host:port` proxy `url`.
     pub fn socks(url: &str) -> anyhow::Result<Self> {
         let at = url
@@ -236,12 +246,7 @@ impl Route {
 /// relays that ask (NIP-42), not connected yet.
 async fn client(relays: &[String], route: &Route, auth: Option<Keys>) -> anyhow::Result<Client> {
     ensure!(!relays.is_empty(), "no Nostr relay");
-    let mut builder = match route {
-        Route::Direct => Client::builder(),
-        Route::Socks(proxy) => Client::builder().proxy(Proxy::all(*proxy)),
-        #[cfg(feature = "tor")]
-        Route::Tor(tor) => Client::builder().websocket_transport(tor::OverTor(tor.clone())),
-    };
+    let mut builder = route.builder();
     if let Some(keys) = auth {
         builder = builder.authenticator(SignerAuthenticator::new(keys));
     }
