@@ -297,7 +297,11 @@ notes at the code's hub, less its fee. Once shown, its provider and code
 are kept and shown again, even unreachable, as an address handed out stays:
 the code while all its hubs are trusted, hubs added since or not; another
 takes its place only once it takes no more donations, or has failed to for a
-week while another can. A way not open says why under More, grayed
+week while another can. Where the provider serves Lightning Addresses, the
+address is also shown and copied as one, `NAME@HOST`: registered at the
+provider once shown, and the first time resolved as payers resolve it, it
+is kept and shown from then on with that provider (the QR code keeps the
+LNURL, which payers reach without the name). A way not open says why under More, grayed
 out (no hub or provider taking Lightning, no hub indexing silent payments,
 no provider taking donations, or still looking for one). Tapping a hub in Settings lists its fees. Silent payments
 before the first block the hub indexed are not found; payments to the

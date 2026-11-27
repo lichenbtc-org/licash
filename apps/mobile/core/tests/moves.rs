@@ -224,7 +224,19 @@ impl Swaps {
         terms: Config,
         donating: (Arc<Fake>, licash_swaps::DonationTerms),
     ) -> Self {
-        Self::start_with(hubs, seed, terms, None, Some(donating), None)
+        Self::start_with(hubs, seed, terms, None, Some((donating, false)), None)
+    }
+
+    /// [`Swaps::start_donating`], payers reaching it at its own address,
+    /// over plain HTTP as on regtest: where its Lightning Addresses are
+    /// served and resolved.
+    fn start_naming(
+        hubs: &Hubs,
+        seed: u8,
+        terms: Config,
+        donating: (Arc<Fake>, licash_swaps::DonationTerms),
+    ) -> Self {
+        Self::start_with(hubs, seed, terms, None, Some((donating, true)), None)
     }
 
     /// [`Swaps::start`], paying Lightning invoices from `node` too, on
@@ -255,7 +267,7 @@ impl Swaps {
         seed: u8,
         terms: Config,
         lightning: Option<(Arc<Fake>, swaps::Lightning)>,
-        donating: Option<(Arc<Fake>, licash_swaps::DonationTerms)>,
+        donating: Option<((Arc<Fake>, licash_swaps::DonationTerms), bool)>,
         receiving: Option<(Arc<Fake>, licash_swaps::ReceiveTerms)>,
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -286,6 +298,8 @@ impl Swaps {
                     wallet.add_hub(url).await.unwrap();
                 }
                 wallet.receive(&stocked).unwrap();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
                 let provider = Provider::create(wallet, terms).unwrap();
                 let paying = lightning.is_some();
                 let provider = match lightning {
@@ -293,7 +307,13 @@ impl Swaps {
                     None => provider,
                 };
                 let provider = match donating {
-                    Some((node, terms)) => provider.take_donations(node, terms, DONATIONS).unwrap(),
+                    Some(((node, terms), own)) => {
+                        let url = match own {
+                            true => format!("http://{addr}"),
+                            false => DONATIONS.to_owned(),
+                        };
+                        provider.take_donations(node, terms, &url).unwrap()
+                    }
                     None => provider,
                 };
                 let receives = receiving.is_some();
@@ -303,8 +323,6 @@ impl Swaps {
                 };
                 let provider = Arc::new(provider);
                 let nostr = licash_nostr::public_key(&provider.nostr_secret().unwrap()).unwrap();
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let addr = listener.local_addr().unwrap();
                 ready.send((addr, provider.clone())).unwrap();
                 let every = Duration::from_millis(100);
                 let stepping = tokio::spawn(licash_swaps_service::step(provider.clone(), every));
@@ -711,6 +729,85 @@ fn a_phone_finds_its_static_donation_address_at_a_provider_taking_them() {
     );
     assert!(!shown.reachable && !shown.stocked, "{shown:?}");
     drop((swapping, cheaper));
+}
+
+#[test]
+fn a_phone_shows_its_lightning_address_once_registered_and_resolved() {
+    let hubs = Hubs::start();
+    let phone = hubs.phone(1_000);
+    let terms = licash_swaps::DonationTerms::default();
+    let donating = Swaps::start_naming(&hubs, 0x53, TERMS, (Arc::new(Fake::new()), terms));
+    let mut found = None;
+    for _ in 0..50 {
+        found = phone.donation_address().unwrap();
+        if found.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // Offered: an LNURL alone until shown, registered and resolved.
+    let offered = found.expect("a donation address");
+    assert_eq!(offered.address, None);
+    let address = phone.keep_donation_address(offered.lnurl.clone()).unwrap();
+    let address = address.expect("a Lightning Address");
+    let code: PaymentCode = phone.payment_code(None).unwrap().qr.parse().unwrap();
+    let name = licash_wallet::donation_name(&code.licash.unwrap());
+    let domain = donating.url().trim_start_matches("http://").to_owned();
+    assert_eq!(address, format!("{name}@{domain}"));
+    // Paid as any Lightning Address: an invoice committing to what it says.
+    let pay = phone.lnurl_pay(address.clone()).unwrap();
+    assert!(pay.metadata.contains(&address), "{}", pay.metadata);
+    let invoice = phone.lnurl_invoice(pay.clone(), pay.min).unwrap();
+    assert!(invoice.starts_with("lnbcrt"), "{invoice}");
+    // Shown from then on, the QR code's LNURL as before; again once opened.
+    let shown = phone.donation_address().unwrap().unwrap();
+    assert_eq!(
+        (&shown.lnurl, shown.address.as_ref()),
+        (&offered.lnurl, Some(&address))
+    );
+    assert_eq!(
+        phone.keep_donation_address(offered.lnurl.clone()).unwrap(),
+        Some(address.clone())
+    );
+    drop(phone);
+    let dir = hubs.dir.path().join("phone").display().to_string();
+    let phone = Wallet::open(dir, None).unwrap();
+    assert_eq!(
+        phone.donation_address().unwrap().unwrap().address,
+        Some(address.clone())
+    );
+    // Its provider unreachable: the address kept, registering again or not.
+    donating.down.store(true, Ordering::SeqCst);
+    let shown = phone.donation_address().unwrap().unwrap();
+    assert!(!shown.reachable, "{shown:?}");
+    assert_eq!(shown.address, Some(address.clone()));
+    assert_eq!(
+        phone.keep_donation_address(shown.lnurl).unwrap(),
+        Some(address)
+    );
+}
+
+#[test]
+fn a_lightning_address_payers_cannot_reach_is_never_shown() {
+    let hubs = Hubs::start();
+    let phone = hubs.phone(1_000);
+    let terms = licash_swaps::DonationTerms::default();
+    // Served at `donate.test`, which payers do not reach.
+    let _donating = Swaps::start_donating(&hubs, 0x53, TERMS, (Arc::new(Fake::new()), terms));
+    let mut found = None;
+    for _ in 0..50 {
+        found = phone.donation_address().unwrap();
+        if found.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let offered = found.expect("a donation address");
+    assert_eq!(
+        phone.keep_donation_address(offered.lnurl.clone()).unwrap(),
+        None
+    );
+    assert_eq!(phone.donation_address().unwrap().unwrap().address, None);
 }
 
 #[test]

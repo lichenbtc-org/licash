@@ -12,6 +12,13 @@
 //! takes no more ([`Asked::Refused`]), or once it failed to take any for
 //! [`PATIENCE`] while another can now. Unheard, it is shown all the same,
 //! as kept: the phone may be offline.
+//!
+//! Where the provider serves them, the address is a Lightning Address
+//! too, `name@domain` ([`licash_wallet::donation_name`]): registered once
+//! shown and resolved where payers ask, it is kept as such
+//! ([`Pinned::address`]) and shown from then on with its provider. Only
+//! that marker shows it: a provider able to serve it proves nothing of a
+//! name registered.
 
 use std::{
     sync::PoisonError,
@@ -48,6 +55,10 @@ pub(crate) struct Pinned {
     /// The code in the address, as text: none, the one the wallet shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    /// Its Lightning Address, once registered and resolved: shown only
+    /// while it is still the one of this code at this domain ([`Pinned::marked`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
 }
 
 impl Pinned {
@@ -59,7 +70,24 @@ impl Pinned {
             donations: found.address.donations.clone(),
             failing_since: None,
             code: Some(code.to_string()),
+            address: None,
         }
+    }
+
+    /// Its Lightning Address, as made of its code at the domain it last
+    /// said it serves them under: none if it serves none.
+    fn expected(&self) -> Option<String> {
+        let domain = self.donations.names.as_deref()?;
+        let code: LicashCode = self.code.as_deref()?.parse().ok()?;
+        let name = licash_wallet::donation_name(&code);
+        Some(format!("{name}@{}", domain.to_ascii_lowercase()))
+    }
+
+    /// Its Lightning Address registered, while still the one expected.
+    pub(crate) fn marked(&self) -> Option<String> {
+        self.address
+            .clone()
+            .filter(|a| Some(a) == self.expected().as_ref())
     }
 
     fn tired(&self, now: u64) -> bool {
@@ -91,7 +119,7 @@ pub(crate) enum Shown {
     /// An address a provider gave now.
     Live(Box<DonationProvider>),
     /// The kept provider's, as kept: it was not heard.
-    Kept(Pinned),
+    Kept(Box<Pinned>),
 }
 
 /// What to show, and the provider to keep from now on.
@@ -171,7 +199,7 @@ pub(crate) fn choose(
                 }
             }
             Choice {
-                shown: Some(Shown::Kept(pin.clone())),
+                shown: Some(Shown::Kept(Box::new(pin.clone()))),
                 pin: Some(pin),
             }
         }
@@ -218,10 +246,22 @@ impl Wallet {
             let pin = choice.pin.clone();
             self.update_kept(|kept| kept.donations = pin)?;
         }
+        // The Lightning Address registered with the provider kept.
+        let marker = choice
+            .pin
+            .as_ref()
+            .map(|p| (p.key.clone(), p.address.clone()));
         let shown = choice.shown.map(|shown| match shown {
             Shown::Live(p) => {
+                let mut pin = Pinned::of(&p, &code);
+                if let Some((key, address)) = &marker {
+                    if *key == pin.key {
+                        pin.address = address.clone();
+                    }
+                }
                 let address = DonationAddress {
                     lnurl: p.address.lnurl.clone(),
+                    address: pin.marked(),
                     provider: p.url.clone(),
                     name: p.name.clone(),
                     fee_base: p.address.donations.fee.base,
@@ -231,11 +271,12 @@ impl Wallet {
                     stocked: p.address.stocked,
                     reachable: true,
                 };
-                (address, Pinned::of(&p, &code))
+                (address, pin)
             }
             Shown::Kept(pin) => {
                 let address = DonationAddress {
                     lnurl: code.lnurl(&pin.donations.url),
+                    address: pin.marked(),
                     provider: pin.url.clone(),
                     name: pin.name.clone(),
                     fee_base: pin.donations.fee.base,
@@ -245,7 +286,7 @@ impl Wallet {
                     stocked: false,
                     reachable: false,
                 };
-                (address, pin)
+                (address, *pin)
             }
         });
         let mut offered = self.offered.lock().unwrap_or_else(PoisonError::into_inner);
@@ -257,8 +298,12 @@ impl Wallet {
 
     /// Keep the provider of the donation address `lnurl`, last offered
     /// ([`Wallet::donation_address`]), once the app shows it: it is shown
-    /// again from then on, while it takes donations.
-    pub fn keep_donation_address(&self, lnurl: String) -> Result<(), LicashError> {
+    /// again from then on, while it takes donations. And its Lightning
+    /// Address, if the provider serves them: registered there, once since
+    /// opened, resolved where payers ask it the first time, then kept. The
+    /// address to show, if any: the one kept, should registering fail.
+    pub fn keep_donation_address(&self, lnurl: String) -> Result<Option<String>, LicashError> {
+        let _timed = crate::log::timed("keep_donation_address");
         let offered = self
             .offered
             .lock()
@@ -267,11 +312,46 @@ impl Wallet {
         let Some((_, pin)) = offered.filter(|(offered, _)| *offered == lnurl) else {
             return Err(LicashError::invalid("not the donation address offered"));
         };
+        let mut kept_pin = None;
         self.update_kept(|kept| {
             if kept.donations.as_ref().map(|k| &k.key) != Some(&pin.key) {
-                kept.donations = Some(pin);
+                kept.donations = Some(pin.clone());
             }
-        })
+            kept_pin = kept.donations.clone();
+        })?;
+        let Some(expected) = pin.expected() else {
+            return Ok(None);
+        };
+        // Its marker, if kept with this provider, as the code and domain
+        // offered now make it.
+        let marked = kept_pin.and_then(|k| k.address).filter(|a| *a == expected);
+        if self
+            .named
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&expected)
+        {
+            return Ok(Some(expected));
+        }
+        match self.register(&pin, &expected, marked.is_some()) {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::info!(provider = %pin.url, "the Lightning Address is not registered: {e}");
+                return Ok(marked);
+            }
+        }
+        self.named
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(expected.clone());
+        if marked.is_none() {
+            self.update_kept(|kept| {
+                if let Some(kept) = kept.donations.as_mut().filter(|k| k.key == pin.key) {
+                    kept.address = Some(expected.clone());
+                }
+            })?;
+        }
+        Ok(Some(expected))
     }
 }
 
@@ -307,6 +387,28 @@ fn asked_of(
 }
 
 impl Wallet {
+    /// Register `expected`, the Lightning Address of `pin`, at its
+    /// provider; unless `known` to resolve, resolved where payers ask, so
+    /// that none is shown that payers cannot reach.
+    fn register(&self, pin: &Pinned, expected: &str, known: bool) -> Result<(), LicashError> {
+        let code: LicashCode = (pin.code.as_deref())
+            .and_then(|c| c.parse().ok())
+            .ok_or_else(|| LicashError::invalid("no code kept"))?;
+        let domain = pin.donations.names.as_deref().unwrap_or_default();
+        let named = self.wallet.register_donation_name(&pin.url, &code, domain);
+        let address = self.operation(named)?;
+        if address != expected {
+            return Err(LicashError::invalid(format!(
+                "registered {address}, not {expected}"
+            )));
+        }
+        if !known {
+            let resolved = self.operation(self.wallet.lnurl_pay_request(expected))?;
+            tracing::debug!(min = resolved.min_msat, "the Lightning Address resolves");
+        }
+        Ok(())
+    }
+
     /// What to show of donations to `code`, given the provider `pinned`,
     /// asked first at its URL.
     fn offer(&self, pinned: Option<Pinned>, code: &LicashCode) -> Choice {
@@ -355,6 +457,7 @@ mod tests {
             },
             min: 100,
             max: 1_000_000,
+            names: None,
         }
     }
 
@@ -522,6 +625,39 @@ mod tests {
         assert_eq!(
             (pinned.url.as_str(), pinned.failing_since),
             ("https://new.a.test", None)
+        );
+    }
+
+    #[test]
+    fn a_lightning_address_shows_only_registered_for_this_code_and_domain() {
+        let mut pinned = pin("a", None);
+        // Served, never registered: none, whatever the provider can do.
+        pinned.donations.names = Some("A.test".into());
+        let expected = pinned.expected().unwrap();
+        assert!(expected.ends_with("@a.test"), "{expected}");
+        assert_eq!(pinned.marked(), None);
+        pinned.address = Some(expected.clone());
+        assert_eq!(pinned.marked(), Some(expected.clone()));
+        // Another domain now, or none served: not this one.
+        let mut moved = pinned.clone();
+        moved.donations.names = Some("b.test".into());
+        assert_eq!(moved.marked(), None);
+        moved.donations.names = None;
+        assert_eq!(moved.marked(), None);
+        // Another code: another name.
+        let mut other = pinned.clone();
+        let mut code: LicashCode = other.code.as_deref().unwrap().parse().unwrap();
+        code.hubs = vec![licash_wallet::HubId([2; 16])];
+        other.code = Some(code.to_string());
+        assert_eq!(other.marked(), None);
+        // Kept as written, read back; an older pin, without, reads as none.
+        let text = serde_json::to_string(&pinned).unwrap();
+        assert_eq!(serde_json::from_str::<Pinned>(&text).unwrap(), pinned);
+        let older = serde_json::to_string(&pin("a", None)).unwrap();
+        assert!(!older.contains("address\""), "{older}");
+        assert_eq!(
+            serde_json::from_str::<Pinned>(&older).unwrap().address,
+            None
         );
     }
 

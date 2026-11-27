@@ -171,6 +171,14 @@ internal fun donationWords(address: DonationAddress): String {
     }
 }
 
+/**
+ * The Lightning Address of the donation address `address` to show and copy: as registered when
+ * shown (`registered`, by the LNURL it was registered for), else as kept. The QR code keeps the
+ * LNURL, which payers reach without the name.
+ */
+internal fun donationName(address: DonationAddress, registered: Pair<String, String?>?): String? =
+    registered?.takeIf { it.first == address.lnurl }?.let { it.second } ?: address.address
+
 /** The most characters of an invoice's memo, as the hub takes it. */
 internal const val MAX_MEMO = 100
 
@@ -206,6 +214,8 @@ fun Receive(engine: Engine, back: () -> Unit) {
     // Looked for once, out of sight: a way to be paid only if found.
     var donations by remember { mutableStateOf<DonationAddress?>(null) }
     var lookingForDonations by remember { mutableStateOf(true) }
+    // Its Lightning Address, as registered once shown: by the LNURL shown.
+    var registered by remember { mutableStateOf<Pair<String, String?>?>(null) }
     // The Lightning Address of a bridge account, if one is named.
     var address by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -277,7 +287,7 @@ fun Receive(engine: Engine, back: () -> Unit) {
     val shown = when (way) {
         Way.LIGHTNING -> request?.let { way.label to it }
         Way.SILENT -> silent?.let { way.label to it }
-        Way.DONATIONS -> donations?.let { way.label to it.lnurl }
+        Way.DONATIONS -> donations?.let { way.label to (donationName(it, registered) ?: it.lnurl) }
         Way.ADDRESS -> address?.let { way.label to it }
         Way.CODE -> code?.let { way.label to it.text }
         Way.BITCOIN -> bitcoin?.address?.let { way.label to it }
@@ -311,7 +321,7 @@ fun Receive(engine: Engine, back: () -> Unit) {
     // Shown, its provider is kept: the same address shows from then on.
     val shownDonations = donations?.lnurl?.takeIf { way == Way.DONATIONS }
     LaunchedEffect(shownDonations) {
-        shownDonations?.let { engine.keepDonationAddress(it) }
+        shownDonations?.let { lnurl -> engine.keepDonationAddress(lnurl).onSuccess { registered = lnurl to it } }
     }
     // An invoice is what an amount asks for, unless another way was.
     val invoicing = (chosen?.takeIf { it in ways } ?: picked(1, takesLightning)) == Way.LIGHTNING
@@ -520,7 +530,13 @@ fun Receive(engine: Engine, back: () -> Unit) {
                 }
                 lightning && request != null -> QrCode(request.uppercase())
                 lightning -> if (amount != null && error == null) Waiting()
-                way == Way.DONATIONS -> donations?.let { QrCode(it.lnurl) }
+                way == Way.DONATIONS -> donations?.let { shownAddress ->
+                    QrCode(shownAddress.lnurl)
+                    donationName(shownAddress, registered)?.let {
+                        Spacer(Modifier.height(8.dp))
+                        Text(it, modifier = Modifier.testTag("donation-address"), style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
+                    }
+                }
                 way == Way.ADDRESS -> address?.let {
                     QrCode("lightning:$it")
                     Spacer(Modifier.height(8.dp))

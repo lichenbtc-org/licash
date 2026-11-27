@@ -760,6 +760,11 @@ pub struct InvoiceQuote {
 pub struct DonationAddress {
     /// The LNURL, upper case, as a QR code holds it best.
     pub lnurl: String,
+    /// The same address as a Lightning Address, `name@domain`, to write
+    /// or copy: once registered at the provider and resolved there
+    /// ([`crate::Wallet::keep_donation_address`]), else none.
+    #[uniffi(default = None)]
+    pub address: Option<String>,
     /// The provider's URL, and the name it announced, if any.
     pub provider: String,
     pub name: Option<String>,

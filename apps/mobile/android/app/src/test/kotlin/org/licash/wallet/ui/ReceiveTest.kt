@@ -132,6 +132,29 @@ class ReceiveTest {
     }
 
     @Test
+    fun a_donation_address_shows_its_lightning_address_only_registered_for_it() {
+        val address = DonationAddress(
+            lnurl = "LNURL1DP68GURN8GHJ7",
+            provider = "https://swaps.example/",
+            name = null,
+            feeBase = 2u,
+            feePpm = 5_000u,
+            min = 100u,
+            max = 1_000_000u,
+            stocked = true,
+            reachable = true,
+        )
+        // Never registered: none, the LNURL alone.
+        assertEquals(null, donationName(address, null))
+        // Kept from before, shown at once.
+        val kept = address.copy(address = "0123456789abcdef@swaps.example")
+        assertEquals("0123456789abcdef@swaps.example", donationName(kept, null))
+        // Registered when shown: that one, for this LNURL only.
+        assertEquals("0123456789abcdef@swaps.example", donationName(address, address.lnurl to "0123456789abcdef@swaps.example"))
+        assertEquals(null, donationName(address, "LNURL1OTHER" to "fedcba9876543210@swaps.example"))
+    }
+
+    @Test
     fun receive_has_a_tab_for_licash_lightning_and_bitcoin_and_the_rest_under_more() {
         assertEquals(listOf("Licash", "Lightning", "Bitcoin"), TABS.map { it.second })
         assertEquals(listOf(Way.CODE, Way.LIGHTNING, Way.BITCOIN), TABS.map { it.first })

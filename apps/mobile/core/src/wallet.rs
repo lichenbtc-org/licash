@@ -110,6 +110,9 @@ pub struct Wallet {
     /// The donation address last offered, for the app to keep once shown
     /// ([`Wallet::keep_donation_address`]): by its LNURL.
     offered: Mutex<Option<(String, donations::Pinned)>>,
+    /// The Lightning Addresses of donations registered since opened
+    /// ([`Wallet::keep_donation_address`]): each once.
+    named: Mutex<std::collections::HashSet<String>>,
 }
 
 /// How long the hubs asked what URLs they name may take, all at once
@@ -299,6 +302,7 @@ impl Wallet {
             mailbox: Mutex::new(None),
             keeping: Mutex::new(()),
             offered: Mutex::new(None),
+            named: Mutex::default(),
         };
         wallet.onions();
         wallet.agree_fees();
