@@ -263,23 +263,26 @@ and the daily budget but never the contract ceilings.
 
 ## Hubs and payments
 
-The app needs a hub taking deposits on the same network: `licash-hub run
---network signet --chain URL --deposit-sweep-address ADDRESS`, with
-`--nostr-relay` (or `--mailbox-relay`) for payments between wallets through
-their mailboxes, `--tweaks` for silent payments: the app's code holds a
-silent payment address only if a hub it uses serves tweaks, and `--lnd URL
---lnd-macaroon FILE` for Lightning: the app pays invoices through the hub,
-and Receive, given an amount, shows an invoice the hub makes, whose
-notes the app takes once paid. With the amount, a memo may be typed for the
-payer, at a hub that puts one in its invoices (it and its Lightning node
-read it too); the history shows it, as it shows the description of an
-invoice the app paid. Where no hub it trusts takes Lightning, a swap
-provider announced on the hubs' relays that takes payments for wallets
-(`licash-swaps run` with `--lnd` and `--receive`) makes the invoice
-instead, its node holding the payment until the provider locks its notes
-to the app at a hub it trusts, which the app claims as it claims a hub's:
-nothing is trusted to the provider, but it sees the amount, the memo and
-which payments go to one wallet. Receive says the provider's fee taken.
+The app needs a hub on the same network: `licash-hub run --network signet
+--chain URL --deposit-sweep-address ADDRESS`, with `--nostr-relay` (or
+`--mailbox-relay`) for payments between wallets through their mailboxes,
+and `--tweaks` for silent payments: the app's code holds a silent payment
+address only if a hub it uses serves tweaks. Hubs make no Lightning
+invoices and take no deposits of their own: swap providers announced on
+the hubs' relays do. One taking payments for wallets (`licash-swaps run`
+with `--lnd` and `--receive`) makes the invoice Receive shows, given an
+amount, its node holding the payment until the provider locks its notes to
+the app at a hub it trusts, which the app claims. With the amount, a memo
+may be typed for the payer, at a provider that puts one in its invoices;
+the history shows it, as it shows the description of an invoice the app
+paid. One taking deposits on Bitcoin (`licash-swaps run` with `--deposits`)
+moves a coin of the app's into notes: "Move to Licash" pays the coin whole
+to the cheapest such provider, tells it of the payment once confirmed, and
+claims the notes it locks; the move's details name the provider and its
+fee. Should none be announced, the app asks a hub trusted, as hubs of
+earlier releases took them (later ones refuse). Nothing is trusted to a
+provider, but it sees the amount, the memo and which payments go to one
+wallet. Receive says the provider's fee taken.
 Receive has a tab each for the Licash address (the wallet's payment code,
 as the app calls it everywhere: its hubs, and its silent
 payment address), Lightning (asking an amount first) and Bitcoin (the bare

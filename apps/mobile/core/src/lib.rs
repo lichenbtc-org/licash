@@ -1099,17 +1099,21 @@ pub enum State {
 pub enum Details {
     /// A payment in notes, at `hub`.
     Notes { hub: String },
-    /// Bitcoin moved to notes: a deposit at `hub`, by its `hash`.
+    /// Bitcoin moved to notes: a deposit for notes at `hub`, by its
+    /// `hash`, taken by the swap `provider`, at its URL, or by the hub
+    /// itself (as before hubs left that to providers).
     Moved {
         hub: String,
         hash: String,
-        /// What to pay on Bitcoin, the hub's fee in it, and where, once
-        /// the hub answered.
+        provider: Option<String>,
+        /// What to pay on Bitcoin, the fee of whoever took it in it, and
+        /// where, once answered.
         pays: Option<u64>,
         address: Option<String>,
         /// The payment, once made or seen.
         payment: Option<Onchain>,
-        /// The confirmations the hub waits for, as it says now.
+        /// The confirmations the hub waits for, as it says now: unknown of
+        /// a provider's.
         depth: Option<u32>,
         /// The block its payment must confirm by, and the one after which
         /// a payment whose notes were never claimed is the wallet's again.

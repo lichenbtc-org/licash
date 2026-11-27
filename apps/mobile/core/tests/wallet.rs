@@ -2020,6 +2020,7 @@ fn a_phone_shows_what_a_move_cost_and_how_deep_its_payment_is() {
         Details::Moved {
             hub,
             hash,
+            provider: None,
             pays,
             address,
             payment: shown,
@@ -2820,6 +2821,29 @@ impl Drop for Depositing {
 }
 
 #[test]
+fn a_phone_says_why_its_provider_would_not_move_a_coin_rather_than_ask_its_hub() {
+    let net = Net::new(true);
+    let light = Light::new(&net);
+    let provider = Depositing::start(&net);
+    provider.announce(&net);
+    let alice = net.wallet("alice", net.height());
+    let code = alice.bitcoin_code(None).unwrap();
+    let payment = net.pay_silent(&code.qr, 4_000, 1);
+    net.mine(1, vec![payment]);
+    assert_eq!(scan(&alice, &light), (1, 4_000));
+    // More than the provider holds at the hub: refused, and the hub, which
+    // would take it, not asked instead.
+    let refused = invalid(alice.move_to_licash(light.clone()));
+    assert!(refused.contains("takes at once (2999 sat"), "{refused}");
+    assert!(net.sent().is_empty(), "{:?}", net.sent());
+    assert!(alice
+        .history()
+        .unwrap()
+        .iter()
+        .all(|a| a.kind != Kind::Moved));
+}
+
+#[test]
 fn a_phone_moves_a_coin_to_notes_through_a_provider_announced_before_its_hub() {
     let net = Net::new(true);
     let light = Light::new(&net);
@@ -2862,6 +2886,15 @@ fn a_phone_moves_a_coin_to_notes_through_a_provider_announced_before_its_hub() {
     let history = alice.history().unwrap();
     let moved = history.iter().find(|a| a.id == moving.id).unwrap();
     assert_eq!(moved.state, State::Done, "{history:#?}");
+    // Its details name the provider, and no depth of the hub's.
+    match alice.details(Kind::Moved, moving.id.clone()).unwrap() {
+        Details::Moved {
+            provider: shown,
+            depth,
+            ..
+        } => assert_eq!((shown, depth), (Some(provider.url.clone()), None)),
+        other => panic!("{other:?}"),
+    }
     // The provider sweeps the coin with the preimage the claim showed.
     let mut swept = false;
     for _ in 0..50 {

@@ -1839,7 +1839,8 @@ impl Wallet {
     ) -> Result<Activity, LicashError> {
         let rate = FeeRate::from_sat_per_vb(DEPOSIT_RATE).expect("a rate");
         // Through the providers announced, the cheapest for the coin first;
-        // else, while hubs still take them, at a hub trusted.
+        // else, none announced, at a hub trusted, as hubs of earlier
+        // releases still take them (later ones refuse, naming providers).
         let mut providers = self.deposit_offers()?;
         let hubs = self.wallet.hubs()?.into_iter();
         let hub = hubs.filter_map(|(u, i)| Some((u, i.deposits?))).next();
@@ -1879,10 +1880,11 @@ impl Wallet {
         }
         let (deposit, tx) = match (moved, hub) {
             (Some(Ok(paying)), _) => paying,
-            (_, Some((hub, _))) => {
+            // Why the last provider would not, not why a hub would not.
+            (Some(Err(e)), _) => return Err(e.into()),
+            (None, Some((hub, _))) => {
                 self.operation(self.wallet.deposit_silent(&hub, coin.outpoint, rate))?
             }
-            (Some(Err(e)), None) => return Err(e.into()),
             (None, None) => unreachable!("a provider or a hub, else returned above"),
         };
         if let Err(e) = chain.broadcast(bitcoin::consensus::serialize(&tx)) {
@@ -1926,7 +1928,10 @@ impl Wallet {
         let next = self.wallet.silent_next()?;
         let hubs = self.wallet.hubs()?.into_iter();
         let mut hubs = hubs.filter(|(url, _)| *url == deposit.hub);
-        let depth = hubs.next().and_then(|(_, i)| i.deposits.map(|d| d.depth));
+        let depth = match deposit.provider {
+            Some(_) => None,
+            None => hubs.next().and_then(|(_, i)| i.deposits.map(|d| d.depth)),
+        };
         let terms = deposit.terms.as_ref();
         // Checked against the network when the hub answered.
         let script = terms
@@ -1971,6 +1976,7 @@ impl Wallet {
             timeout: terms.map(|t| t.timeout),
             hub: deposit.hub,
             hash: deposit.hash,
+            provider: deposit.provider,
             payment,
             depth,
             refund,

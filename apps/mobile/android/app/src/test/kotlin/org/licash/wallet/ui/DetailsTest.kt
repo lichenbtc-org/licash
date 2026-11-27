@@ -34,7 +34,7 @@ class DetailsTest {
     )
 
     private fun deposit(confirmations: UInt?, depth: UInt? = 2u) = Details.Moved(
-        hub = "https://hub.example", hash = "h", pays = null, address = "bc1q",
+        hub = "https://hub.example", hash = "h", provider = null, pays = null, address = "bc1q",
         payment = confirmations?.let { Onchain(txid = "t", fee = null, height = null, confirmations = it) },
         depth = depth, fundBy = null, timeout = null, refund = null,
     )

@@ -37,7 +37,7 @@ class WatchTest {
     )
 
     private fun deposit(paid: Boolean) = Details.Moved(
-        hub = "https://hub.example", hash = "h", pays = null, address = "bc1q",
+        hub = "https://hub.example", hash = "h", provider = null, pays = null, address = "bc1q",
         payment = if (paid) Onchain(txid = "t", fee = null, height = null, confirmations = 0u) else null,
         depth = null, fundBy = null, timeout = null, refund = null,
     )

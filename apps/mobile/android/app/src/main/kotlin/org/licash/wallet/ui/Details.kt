@@ -413,11 +413,14 @@ private fun Summary(
             Line("To", "Your Bitcoin", tag = "closed-to")
         } else when (details) {
             is Details.Moved -> {
-                FeeLine("Hub fee", activity.fee, activity.amount, tag = "fee-hub", value = sat(activity.fee), breakdown = recordedFee(activity.amount, activity.fee, listOf("Hub" to activity.fee)))
+                // Taken by a swap provider, or by the hub itself before hubs left that to providers.
+                val (who, tag) = if (details.provider != null) "Provider" to "fee-provider" else "Hub" to "fee-hub"
+                FeeLine("$who fee", activity.fee, activity.amount, tag = tag, value = sat(activity.fee), breakdown = recordedFee(activity.amount, activity.fee, listOf(who to activity.fee)))
                 details.payment?.fee?.let {
                     FeeLine("Network fee", it, activity.amount, tag = "fee-network", value = sat(it), breakdown = FeeBreakdown(activity.amount, it, listOf("Bitcoin network" to it), explanation = "Fee of the full funding transaction. It is not a per-deposit allocation or a hub fee."))
                 }
                 Line("At", name(details.hub))
+                details.provider?.let { Line("Through", host(it), tag = "through") }
             }
             is Details.Coin -> Line("From", if (details.change) "Your own change" else "Bitcoin")
             is Details.Lightning -> {
