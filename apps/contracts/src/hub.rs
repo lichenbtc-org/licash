@@ -561,8 +561,7 @@ impl Openings {
         Ok(())
     }
 
-    /// Scale the prover's estimate of each proof by `by`
-    /// ([`prover::Prover::scale`]), as openings are admitted
+    /// Scale the prover's estimate of each proof by `by`, as openings are admitted
     /// ([`Openings::open`]) and as claims are responded to: above 1 for a
     /// prover slower than its benchmark says, below 1 for one that proves
     /// with machines its operator rents when it needs them, or to admit

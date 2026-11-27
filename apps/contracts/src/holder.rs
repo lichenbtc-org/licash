@@ -882,7 +882,7 @@ pub fn smallest_fit(
 /// notes make exactly in `notes` notes at most (`denominations`,
 /// [`fundable`]), leaving less than `dust`; its cap the smallest the hub
 /// takes of her part and `inbound` sat more, `least` at least, of which
-/// the hub lends the rest ([`Pricing::lends`]). So with no inbound, the hub
+/// the hub lends the rest, as much as it lends ([`Pricing`]). So with no inbound, the hub
 /// funds nothing of it but what makes a cap. No change comes back from her
 /// coin, so what is left of it is below what an output is worth. None if
 /// no contract does.

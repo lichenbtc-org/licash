@@ -302,8 +302,8 @@ pub const MAX_EXTRA_WORK: u32 = 144;
 
 impl Timing {
     /// The hub's timing on `profile`: regtest's, signet's, Bitcoin's
-    /// network's ([`MAINNET`]) or Mutinynet's, which are that network's
-    /// ([`Network::mutinynet`]). Terms alone open no contract: none opens
+    /// network's or Mutinynet's, which are that network's but for the time
+    /// to prove, its depth and its year. Terms alone open no contract: none opens
     /// on a network without a program trusted there ([`crate::trust`]), as
     /// Bitcoin's has none yet. Holders choose their terms within `range`.
     pub fn of(profile: ChainProfile, range: Range) -> Result<Self> {
