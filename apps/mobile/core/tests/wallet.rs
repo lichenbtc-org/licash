@@ -7,6 +7,7 @@
 mod chain;
 #[path = "../../../hub/tests/esplora/mod.rs"]
 mod esplora;
+mod mint;
 
 use std::sync::{
     atomic::{AtomicBool, AtomicI64, Ordering},
@@ -2689,4 +2690,187 @@ fn a_phone_counts_what_it_did_and_what_it_cost_and_replays_its_balance() {
         panic!("one point");
     };
     assert_eq!((before.licash, before.bitcoin), (0, 0));
+}
+
+/// A swap provider on a local port taking deposits on Bitcoin for notes at
+/// the hub of `net`, holding 3000 there, following its chain, in the
+/// runtime of its own thread: its URL and its key on Nostr, and what stops
+/// it.
+struct Depositing {
+    url: String,
+    nostr: [u8; 32],
+    stop: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        std::thread::JoinHandle<()>,
+    )>,
+    _dir: tempfile::TempDir,
+}
+
+impl Depositing {
+    fn start(net: &Net) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = licash_wallet::Wallet::create(
+            &dir.path().join("wallet.sqlite"),
+            &[0x50; 32],
+            licash::spend::ChainProfile::Core30DefaultRegtest,
+            licash_transport::Http::new(None).unwrap(),
+        )
+        .unwrap();
+        let seed = net.dir.path().join("seed");
+        let stocked = mint::paid(
+            (&net.hub, &seed, &net.url),
+            MAX_POW,
+            &wallet.address(),
+            3_000,
+        );
+        let (hub, chain) = (net.url.clone(), net.source.clone());
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let (ready, started) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                wallet.add_hub(&hub).await.unwrap();
+                wallet.receive(&stocked).unwrap();
+                let config = licash_swaps::Config {
+                    fee: Fee { base: 1, ppm: 0 },
+                    min: 5,
+                    max: 5_000,
+                    margin: 6,
+                    confirm: 4,
+                };
+                let terms = licash_swaps::DepositTerms {
+                    fee: Fee { base: 1, ppm: 0 },
+                    miner: 200,
+                    min: 100,
+                    max: 5_000,
+                    depth: 2,
+                    window: 10,
+                    timeout: 1_008,
+                    sweep: 6,
+                    max_open: 10,
+                };
+                let provider = licash_swaps::Provider::create(wallet, config).unwrap();
+                let provider = Arc::new(provider.take_deposits(terms).unwrap());
+                let nostr = provider.nostr_secret().unwrap();
+                let chain = Arc::new(licash_swaps_service::ChainView(chain));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                ready.send((addr, nostr)).unwrap();
+                let every = std::time::Duration::from_millis(100);
+                let stepping = tokio::spawn(licash_swaps_service::step(provider.clone(), every));
+                let following =
+                    licash_swaps_service::take_deposits(provider.clone(), chain.clone(), every);
+                let following = tokio::spawn(following);
+                let serving = licash_swaps_service::Serving {
+                    nostr: Some(licash_nostr::public_key(&nostr).unwrap()),
+                    chain: Some(chain),
+                    ..Default::default()
+                };
+                let router = licash_swaps_service::router(provider, serving);
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(async {
+                        stopped.await.ok();
+                    })
+                    .await
+                    .unwrap();
+                stepping.abort();
+                following.abort();
+            });
+        });
+        let (addr, nostr) = started.recv().unwrap();
+        Self {
+            url: format!("http://{addr}"),
+            nostr,
+            stop: Some((stop, thread)),
+            _dir: dir,
+        }
+    }
+
+    /// Announced on the relay of `net`'s hub, as its service announces it.
+    fn announce(&self, net: &Net) {
+        let relays = vec![net
+            .runtime
+            .block_on(net.relay.as_ref().unwrap().url())
+            .to_string()];
+        let announcement = Announcement {
+            urls: vec![self.url.clone()],
+            network: "regtest".into(),
+            name: Some("depositing".into()),
+        };
+        net.runtime.block_on(async {
+            let announcer = Announcer::new(&self.nostr, Role::Swaps, &relays, &Route::Direct);
+            let sent = announcer.await.unwrap().announce(&announcement).await;
+            assert_eq!(sent.unwrap(), 1);
+        });
+    }
+}
+
+impl Drop for Depositing {
+    fn drop(&mut self) {
+        if let Some((stop, thread)) = self.stop.take() {
+            stop.send(()).ok();
+            thread.join().ok();
+        }
+    }
+}
+
+#[test]
+fn a_phone_moves_a_coin_to_notes_through_a_provider_announced_before_its_hub() {
+    let net = Net::new(true);
+    let light = Light::new(&net);
+    let provider = Depositing::start(&net);
+    provider.announce(&net);
+    let alice = net.wallet("alice", net.height());
+    let code = alice.bitcoin_code(None).unwrap();
+    let payment = net.pay_silent(&code.qr, 3_000, 1);
+    net.mine(1, vec![payment]);
+    assert_eq!(scan(&alice, &light), (1, 3_000));
+
+    // Through the provider, though the hub takes deposits too: its fee of 1
+    // and 200 for its claim's miners, not the hub's 100.
+    let moving = alice.move_to_licash(light.clone()).unwrap();
+    assert_eq!((moving.kind, moving.state), (Kind::Moved, State::Pending));
+    assert_eq!(moving.fee, 201);
+    let sent = net.sent();
+    assert_eq!((sent.len(), sent[0].output.len()), (1, 1));
+    let paid = OutPoint::new(sent[0].compute_txid(), 0);
+    assert_eq!(sent[0].output[0].value.to_sat(), moving.amount + 201);
+    assert_eq!(
+        3_000 - moving.amount - 201,
+        2 * sent[0].vsize() as u64,
+        "the coin, whole"
+    );
+
+    // Confirmed at the provider's depth: found on scanning, told to the
+    // provider on resuming, which locks its notes, claimed.
+    net.confirm_sent();
+    net.mine(1, Vec::new());
+    assert_eq!(scan(&alice, &light), (0, 0));
+    for _ in 0..50 {
+        alice.resume().unwrap();
+        if notes(&alice) > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert_eq!(notes(&alice), moving.amount);
+    let history = alice.history().unwrap();
+    let moved = history.iter().find(|a| a.id == moving.id).unwrap();
+    assert_eq!(moved.state, State::Done, "{history:#?}");
+    // The provider sweeps the coin with the preimage the claim showed.
+    let mut swept = false;
+    for _ in 0..50 {
+        let sent = net.sent();
+        swept = sent
+            .iter()
+            .any(|tx| tx.input.iter().any(|i| i.previous_output == paid));
+        if swept {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert!(swept, "{:?}", net.sent());
 }

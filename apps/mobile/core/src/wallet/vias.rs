@@ -10,7 +10,8 @@
 //! locks its notes to the wallet.
 
 use licash_nostr::wallet::{
-    hub_relays, invoice_providers_with, receive_providers_with, ReceiveProvider,
+    deposit_providers_with, hub_relays, invoice_providers_with, receive_providers_with,
+    DepositProvider, ReceiveProvider,
 };
 use licash_wallet::{Payable, SwapLimits};
 
@@ -135,6 +136,28 @@ impl Wallet {
                 Ok(found) => offers.extend(found.into_iter().map(|p| (hub.clone(), p))),
                 Err(e) => {
                     tracing::info!(%hub, "no provider takes payments over Lightning: {e:#}");
+                }
+            }
+        }
+        Ok(offers)
+    }
+
+    /// The swap providers announced on the relays the hubs name that take
+    /// deposits on Bitcoin for notes at each hub trusted, with the hub: none
+    /// if the hubs name no relays.
+    pub(super) fn deposit_offers(&self) -> Result<Vec<(String, DepositProvider)>, LicashError> {
+        let relays = hub_relays(&self.wallet)?;
+        let mut offers = Vec::new();
+        if relays.is_empty() {
+            return Ok(offers);
+        }
+        for (hub, _) in self.wallet.hubs()? {
+            let found =
+                deposit_providers_with(&self.wallet, &self.announced, (&relays, &self.route), &hub);
+            match self.operation(found) {
+                Ok(found) => offers.extend(found.into_iter().map(|p| (hub.clone(), p))),
+                Err(e) => {
+                    tracing::info!(%hub, "no provider takes deposits on Bitcoin: {e:#}");
                 }
             }
         }

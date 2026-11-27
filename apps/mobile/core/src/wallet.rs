@@ -1611,6 +1611,17 @@ impl Wallet {
         self.saw(scanned.height);
         self.learn_times(chain.as_ref())?;
         if scanned.next > scanned.height {
+            // The payments of moves through providers, for resuming to
+            // tell them of.
+            let found = self.wallet.find_deposit_payments(&source);
+            match self.runtime.block_on(found) {
+                Ok(pending) => {
+                    for (hash, why) in pending {
+                        tracing::info!(%hash, "a move's payment not looked for: {why}");
+                    }
+                }
+                Err(e) => tracing::info!("the payments of moves: {e}"),
+            }
             self.broadcast_again(chain.as_ref());
             self.refund_deposits(chain.as_ref(), scanned.height);
             // A wallet made before its birthday was kept, caught up: its
@@ -1826,24 +1837,54 @@ impl Wallet {
         chain: Arc<dyn ChainSource>,
         keep: &[OutPoint],
     ) -> Result<Activity, LicashError> {
-        let hubs = self.wallet.hubs()?.into_iter();
-        let mut taking = hubs.filter_map(|(u, i)| Some((u, i.deposits?)));
-        let Some((hub, offer)) = taking.next() else {
-            return Err(LicashError::invalid(
-                "no hub trusted takes coins on Bitcoin",
-            ));
-        };
         let rate = FeeRate::from_sat_per_vb(DEPOSIT_RATE).expect("a rate");
+        // Through the providers announced, the cheapest for the coin first;
+        // else, while hubs still take them, at a hub trusted.
+        let mut providers = self.deposit_offers()?;
+        let hubs = self.wallet.hubs()?.into_iter();
+        let hub = hubs.filter_map(|(u, i)| Some((u, i.deposits?))).next();
+        let least = match (providers.first(), &hub) {
+            (Some((_, p)), _) => licash_wallet::least_deposited_through(&p.offer.terms, rate),
+            (None, Some((_, offer))) => licash_wallet::least_deposited(offer, rate),
+            (None, None) => {
+                return Err(LicashError::invalid(
+                    "no hub trusted takes coins on Bitcoin, nor a swap provider at one",
+                ))
+            }
+        };
         // One coin, whole: coins are never joined, nor change left.
         let coin = (self.wallet.silent_coins()?.into_iter())
             .filter(|c| c.spending.is_none() && !keep.contains(&c.outpoint))
             .max_by_key(|c| c.value)
-            .ok_or_else(|| LicashError::Insufficient {
-                needed: licash_wallet::least_deposited(&offer, rate),
+            .ok_or(LicashError::Insufficient {
+                needed: least,
                 available: 0,
             })?;
-        let (deposit, tx) =
-            self.operation(self.wallet.deposit_silent(&hub, coin.outpoint, rate))?;
+        providers.sort_by_key(|(_, p)| p.offer.terms.pays(coin.value).saturating_sub(coin.value));
+        let mut moved = None;
+        for (at, provider) in &providers {
+            let asked = self
+                .wallet
+                .deposit_silent_through(&provider.url, at, coin.outpoint, rate);
+            match self.operation(asked) {
+                Ok(paying) => {
+                    moved = Some(Ok(paying));
+                    break;
+                }
+                Err(e) => {
+                    tracing::info!(provider = %provider.url, %at, "not moving through it: {e:?}");
+                    moved = Some(Err(e));
+                }
+            }
+        }
+        let (deposit, tx) = match (moved, hub) {
+            (Some(Ok(paying)), _) => paying,
+            (_, Some((hub, _))) => {
+                self.operation(self.wallet.deposit_silent(&hub, coin.outpoint, rate))?
+            }
+            (Some(Err(e)), None) => return Err(e.into()),
+            (None, None) => unreachable!("a provider or a hub, else returned above"),
+        };
         if let Err(e) = chain.broadcast(bitcoin::consensus::serialize(&tx)) {
             // Relay may have succeeded before the response failed. Keep
             // the signed transaction and inputs; scanning retries it.

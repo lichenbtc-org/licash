@@ -6,6 +6,7 @@
 
 #[path = "../../../hub/tests/chain/mod.rs"]
 mod chain;
+mod mint;
 
 use std::{
     net::SocketAddr,
@@ -25,12 +26,8 @@ use axum::{
     Json,
 };
 use licash::{
-    address::{Address, Ephemeral, OwnerKeys},
-    authorization::{Authorization, SignedProposal},
-    claim::Branch,
-    note::{Derivation, Evidence, IssuerKeys, Keyset, Note},
-    spend::{lock_hash, ChainProfile, Output as SpendOutput, Proposal},
-    unlink::Nonce,
+    address::Address,
+    spend::{lock_hash, ChainProfile},
 };
 use licash_api::{swaps, Code, Fee, Payment, Problem};
 use licash_hub::{Hub, Policy, Timing};
@@ -190,79 +187,13 @@ impl Hubs {
     /// Notes of `amount` paid to `to` at hub `i`, minted as its issuer.
     fn pay(&self, i: usize, to: &Address, amount: u64) -> Payment {
         let served = &self.hubs[i];
-        let text = std::fs::read_to_string(&served.seed).unwrap();
-        let mut seed = [0; 32];
-        hex::decode_to_slice(text.trim(), &mut seed).unwrap();
-        let keys = IssuerKeys::from_seed(&seed, 0, MAX_POW).unwrap();
-        let keyset = keys.keyset().unwrap();
-        let info = served.hub.info();
-        let mut total = amount;
-        while amount + info.policy.spend.due(total) != total {
-            total = amount + info.policy.spend.due(total);
-        }
-        let payer = OwnerKeys::from_seed(&[0xfa; 32]).unwrap();
-        let inputs: Vec<(Note, Derivation)> = split(total)
-            .into_iter()
-            .map(|denom| mint(&keys, &keyset, &payer.address(), denom))
-            .collect();
-        let notes: Vec<Note> = inputs.iter().map(|(note, _)| note.clone()).collect();
-        let ephemeral = Ephemeral::random();
-        let to_hub = split(total - amount)
-            .into_iter()
-            .map(|d| (d, &info.address));
-        let outputs = split(amount)
-            .into_iter()
-            .map(|d| (d, to))
-            .chain(to_hub)
-            .enumerate()
-            .map(|(i, (d, to))| {
-                let derivation = ephemeral.derive(to, d, Branch::Pay, i).unwrap();
-                SpendOutput::from_derivation(&derivation).unwrap()
-            })
-            .collect();
-        let proposal = Proposal::new(&keyset, &notes, ephemeral.public(), outputs, None).unwrap();
-        let grant = served.hub.offer(&proposal, &notes).unwrap();
-        let owners: Vec<_> = inputs
-            .iter()
-            .map(|(_, d)| d.ownership().owner_secret(payer.spend_secret()).unwrap())
-            .collect();
-        let grant = Authorization::Granted(Box::new(grant));
-        let signed = SignedProposal::sign(&keyset, proposal, &notes, grant, &owners).unwrap();
-        let unlock = served.hub.release(&signed, &notes).unwrap();
-        Payment::new(&served.url, &signed, &notes, &unlock)
+        mint::paid(
+            (&served.hub, &served.seed, &served.url),
+            MAX_POW,
+            to,
+            amount,
+        )
     }
-}
-
-fn split(mut amount: u64) -> Vec<u64> {
-    let mut denoms = Vec::new();
-    for pow in (0..=MAX_POW).rev() {
-        while amount >= 1 << pow {
-            denoms.push(1 << pow);
-            amount -= 1 << pow;
-        }
-    }
-    denoms
-}
-
-fn mint(keys: &IssuerKeys, keyset: &Keyset, to: &Address, denom: u64) -> (Note, Derivation) {
-    let d = Ephemeral::random()
-        .derive(to, denom, Branch::Pay, 0)
-        .unwrap();
-    let output = SpendOutput::from_derivation(&d).unwrap();
-    let proof = keys.prove_blinded(denom, output.blinded()).unwrap();
-    let note = Note::from_parts(
-        keyset,
-        *keyset.id(),
-        d.message().clone(),
-        proof.open_point(keyset, &d).unwrap(),
-        Evidence::Linked {
-            dleq: proof.dleq(),
-            blinding: *d.blinding(),
-            commit: Nonce::new(keyset, &output).unwrap().commit().unwrap(),
-        },
-    )
-    .unwrap();
-    (note, d)
 }
 
 /// A swap provider on a local port between both hubs, holding stock at
