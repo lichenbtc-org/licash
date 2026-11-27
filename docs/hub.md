@@ -975,6 +975,10 @@ licash-hub-standby --standby-keys standby.json run --chain ... --contracts \
     --contracts-wallet ... --contracts-witness-set ... --contracts-witness ...
 ```
 
+Its image is `ghcr.io/lichenbtc-org/licash-hub-standby`, and
+[deploy.md](deploy.md) lays out a hub with one, hidden behind WireGuard
+and fed by the hub.
+
 It runs as `--respond-only` does, asked or not: no API but `/health`, its
 responder, fee bumping and alerts on. With no seed it issues no note,
 releases and locks no spend, claims no deposit and announces nothing, and
@@ -1032,9 +1036,10 @@ why): check the replica and the private network to the hub, as a contract
 opened since is not covered. A restore also drops the standby's
 notification cursors, and the image tells only of alerts and
 reorganizations (`LICASH_HUB_NOTIFY_KINDS=alert,reorg`), not of each
-start. Keep `opening-instances/`, `header-chain/` and `hp-proofs/` synced
-beside it from the hub (`rsync --ignore-existing`, never `--delete`), and
-never run Litestream on the standby itself.
+start. Keep the finished files of `opening-instances/`, `header-chain/`
+and `hp-proofs/` synced beside it from the hub, before its replica and
+never deleting there, and stop once it acted; `deploy/hub/sync` does so
+([deploy.md](deploy.md)). Never run Litestream on the standby itself.
 
 Run without the entrypoint (`licash-hub --standby-keys ...`, as earlier
 releases did, with no `standby-restored` in its `<data>`), nothing would

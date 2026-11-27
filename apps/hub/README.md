@@ -27,4 +27,7 @@ payments but refuses locks. Keep a copy of `<data>/seed` offline and back up
 
 `licash-hub --help` lists every command, flag and environment variable.
 Fees, contracts, Lightning, Tor, Nostr announcements, notifications and
-operations are covered in [docs/hub.md](../../docs/hub.md).
+operations are covered in [docs/hub.md](../../docs/hub.md). To deploy a hub
+with a hidden standby over WireGuard, and rented GPUs to prove on, follow
+[docs/deploy.md](../../docs/deploy.md) with the files in
+[deploy/](../../deploy).
