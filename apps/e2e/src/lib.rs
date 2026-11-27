@@ -45,9 +45,17 @@ pub const NODES: [&str; 2] = [OUTSIDE, SWAPS_LN];
 /// provider's to the outside node.
 const CHANNELS: [(usize, usize); 1] = [(1, 0)];
 
-/// The least the provider's wallet deposits at a hub at once when it
-/// holds too little there ([`Eco::stock_at`]): few deposits, few blocks.
+/// The least the provider's wallet funds of a contract at a hub at once
+/// when it holds too little there ([`Eco::stock_at`]): few contracts, few
+/// blocks.
 const RESTOCK: u64 = 150_000;
+
+/// The most the provider pays to open a contract it stocks with, on top
+/// of its part: the reserve, the hub's fee and its interest.
+const CONTRACT_PRICE: u64 = 50_000;
+
+/// Bitcoin Core's RPC as the stack's services reach it.
+const INSIDE_CHAIN: &str = "http://licash:licash@bitcoind:18443";
 
 /// A wallet of the tests, over HTTP.
 pub type Wallet = licash_wallet::Wallet<Http>;
@@ -317,6 +325,24 @@ impl Eco {
         Ok(txid.as_str().context("a txid")?.to_owned())
     }
 
+    /// The output of transaction `txid` paying `address`, and its value.
+    pub async fn paying(
+        &self,
+        txid: &str,
+        address: &str,
+    ) -> anyhow::Result<(bitcoin::OutPoint, bitcoin::Amount)> {
+        let tx = self.rpc("", "getrawtransaction", json!([txid, 1])).await?;
+        let outputs = tx["vout"].as_array().context("outputs")?;
+        let output = outputs
+            .iter()
+            .find(|o| o["scriptPubKey"]["address"] == address)
+            .with_context(|| format!("an output paying {address}"))?;
+        let vout = output["n"].as_u64().context("its index")? as u32;
+        let value = output["value"].as_f64().context("its value")?;
+        let value = bitcoin::Amount::from_btc(value)?;
+        Ok((bitcoin::OutPoint::new(txid.parse()?, vout), value))
+    }
+
     /// Pay `sat` to the silent payment address `to`, from a key of its own
     /// the miner's wallet funds, unconfirmed: the transaction's id.
     pub async fn pay_silent(&self, to: &str, sat: u64) -> anyhow::Result<String> {
@@ -580,8 +606,9 @@ impl Eco {
         self.stock_at(self.hub(2), amount).await
     }
 
-    /// The provider able to lock `amount` at `hub`, its wallet paid there
-    /// in a deposit on Bitcoin if it is not yet.
+    /// The provider able to lock `amount` at `hub`, its wallet stocked
+    /// there if it is not yet as a provider stocks: a contract it funds
+    /// with a coin of its own, its part issued back to it as notes.
     pub async fn stock_at(&self, hub: &str, amount: u64) -> anyhow::Result<()> {
         if self.stocked_at(hub).await? >= amount {
             return Ok(());
@@ -590,24 +617,61 @@ impl Eco {
         // At the URL the provider reaches it at, its fee on the locks to
         // come generously.
         let inside = format!("http://hub{n}:8338");
-        let asked = (amount + amount / 100 + 100).max(RESTOCK).to_string();
-        let args = [
-            "licash-wallet",
-            "--json",
-            "deposit",
-            &asked,
-            "--hub",
-            &inside,
-        ];
-        let deposit: Value = serde_json::from_slice(&self.exec("swaps", &args).await?)?;
-        let terms = &deposit["terms"];
-        let address = terms["address"].as_str().context("a deposit address")?;
-        let pays = terms["pays"].as_u64().context("a deposit amount")?;
-        self.send_to(address, pays).await?;
-        // At the hubs' deposit depth of 1, the provider takes the
-        // deposit's notes, as it takes its wallet's payments on.
+        let part = (amount + amount / 100 + 100).max(RESTOCK);
+        let address = self.exec("swaps", &["licash-swaps", "address"]).await?;
+        let address = String::from_utf8(address)?.trim().to_owned();
+        let from = (self.height().await? + 1).to_string();
+        let txid = self.send_to(&address, part + CONTRACT_PRICE).await?;
+        let (coin, _) = self.paying(&txid, &address).await?;
+        let coin = coin.to_string();
         self.mine(1).await?;
-        until("the provider stocked", 180, || async {
+        let wallet = |args: &[&str]| {
+            let mut all = vec!["licash-wallet".to_owned(), "--json".to_owned()];
+            all.extend(args.iter().map(|a| a.to_string()));
+            async move {
+                let all: Vec<&str> = all.iter().map(String::as_str).collect();
+                self.exec("swaps", &all).await
+            }
+        };
+        // The service finds the coin itself, as it watches its wallet's
+        // coins on the chain; the scan only hastens it, and may find the
+        // wallet busy.
+        let scan = ["onchain", "--chain", INSIDE_CHAIN, "scan", "--from", &from];
+        // Opened once the coin is the wallet's and the hub's wallet,
+        // funding its reserve, is learned.
+        let price = CONTRACT_PRICE.to_string();
+        let open = [
+            "open-contract",
+            &inside,
+            "--chain",
+            INSIDE_CHAIN,
+            "--blocks",
+            "1000",
+            "--coin",
+            &coin,
+            "--max-price",
+            &price,
+        ];
+        until("the provider's contract opened", 180, || async {
+            if let Err(e) = wallet(&scan).await {
+                eprintln!("the provider's scan: {e:#}");
+            }
+            match wallet(&open).await {
+                Ok(opened) => Ok(Some(opened)),
+                Err(e) => {
+                    eprintln!("the provider's contract not opened yet: {e:#}");
+                    Ok(None)
+                }
+            }
+        })
+        .await?;
+        // Its funding buried, the hub issues its part, which the wallet
+        // takes on carrying the contract.
+        until("the provider stocked", 300, || async {
+            self.mine(1).await?;
+            if let Err(e) = wallet(&["contracts", "--chain", INSIDE_CHAIN]).await {
+                eprintln!("the provider's contracts not carried on: {e:#}");
+            }
             Ok((self.stocked_at(hub).await? >= amount).then_some(()))
         })
         .await
@@ -728,13 +792,25 @@ impl Eco {
     /// Coins for the miner and the [`CHANNELS`], half their funds on each
     /// side: whatever is missing.
     async fn fund(&self) -> anyhow::Result<()> {
-        if let Err(e) = self.rpc("", "createwallet", json!(["miner"])).await {
-            ensure!(format!("{e}").contains("already exists"), e);
-            let _ = self.rpc("", "loadwallet", json!(["miner"])).await;
+        for wallet in ["miner", "hub2"] {
+            if let Err(e) = self.rpc("", "createwallet", json!([wallet])).await {
+                ensure!(format!("{e}").contains("already exists"), e);
+                let _ = self.rpc("", "loadwallet", json!([wallet])).await;
+            }
         }
         let height = self.height().await?;
         if height < 101 {
             self.mine(101 - height).await?;
+        }
+        // Hub2's wallet, funding the reserves of its contracts.
+        let hub2 = self.rpc("/wallet/hub2", "getbalances", json!([])).await?;
+        let held = hub2["mine"]["trusted"].as_f64().unwrap_or(0.0)
+            + hub2["mine"]["untrusted_pending"].as_f64().unwrap_or(0.0);
+        if held < 1.0 {
+            let address = self.rpc("/wallet/hub2", "getnewaddress", json!([])).await?;
+            let address = address.as_str().context("an address")?;
+            self.miner("sendtoaddress", json!([address, 5.0])).await?;
+            self.mine(1).await?;
         }
         let mut keys = Vec::new();
         for node in NODES {

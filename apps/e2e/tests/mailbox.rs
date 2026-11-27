@@ -6,7 +6,7 @@
 use anyhow::{ensure, Context};
 use licash_e2e::{until, Eco};
 use licash_nostr::{mailbox, Route};
-use licash_wallet::{DepositState, PaymentCode};
+use licash_wallet::PaymentCode;
 
 #[tokio::test]
 #[ignore = "needs the stack of apps/e2e/run.sh"]
@@ -14,16 +14,8 @@ async fn a_payment_code_is_paid_through_the_payees_mailbox() -> anyhow::Result<(
     let eco = Eco::up().await?;
     let hub = eco.hub(1);
     let (alice, bob) = (eco.wallet("alice")?, eco.wallet("bob")?);
-    // Alice holds 10000 at the hub, deposited on Bitcoin.
-    let deposit = alice.deposit(hub, 10_000).await?;
-    let terms = deposit.terms.clone().context("its terms")?;
-    eco.send_to(&terms.address, terms.pays).await?;
-    eco.mine(1).await?;
-    until("the deposit received", 60, || async {
-        let deposit = alice.follow_deposit(&deposit.hash).await?;
-        Ok((deposit.state == DepositState::Received).then_some(()))
-    })
-    .await?;
+    // Alice holds 10000 at the hub, paid in over Lightning.
+    eco.pay_in(&alice, hub, 10_000).await?;
 
     // Bob's code names the hub, which names the relay, and his mailbox.
     let info = bob.add_hub(hub).await?;

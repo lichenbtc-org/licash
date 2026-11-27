@@ -498,6 +498,9 @@ async fn collected(bob: &licash_e2e::Wallet, secs: u64) -> anyhow::Result<u64> {
 
 async fn used(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     let hub = eco.hub(1);
+    // The provider able to take every move from Bitcoin below at hub1,
+    // which takes none itself.
+    eco.stock_at(hub, 200_000).await?;
     let first = phone.launch().await?;
     eprintln!("first start in {first:?}");
     phone.onboard().await?;
@@ -547,17 +550,24 @@ async fn used(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     move_in(eco, phone).await?;
     settle(eco, phone, 1).await?;
     let moved = phone.balance().await?;
-    // Less the hub's 1000 and the fees of the move on Bitcoin.
+    // Less the provider's fee and the fees of the move on Bitcoin.
     ensure!(
         (25_000..29_000).contains(&moved),
         "{moved} of 30000 moved in"
     );
-    // Opened, the move shows what it cost: the hub's 1000 and the miners'.
+    // Opened, the move shows what it cost and through whom: the
+    // provider's 5000 ppm and 500 for its claim's miners, and the miners'.
     opened(phone, "From Bitcoin").await?;
     phone.tagged("state", "In your balance", 10).await?;
-    let hubs = phone.by_id("fee-hub", 10).await?;
-    ensure!(hubs.text == "1,000 sat", "a hub fee of {:?}", hubs.text);
+    let fee = phone.by_id("fee-provider", 10).await?;
+    let sat: u64 = fee.text.trim_end_matches(" sat").replace(',', "").parse()?;
+    ensure!(
+        (600..=650).contains(&sat),
+        "a provider fee of {:?}",
+        fee.text
+    );
     phone.by_id("fee-network", 10).await?;
+    phone.by_id("through", 10).await?;
     phone.back().await?;
     phone.back_to("receive").await?;
     let next: PaymentCode = phone.bitcoin_code().await?.parse()?;

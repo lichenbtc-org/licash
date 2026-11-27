@@ -1,7 +1,7 @@
 # A regtest ecosystem for the end-to-end tests: Bitcoin Core, two hubs
-# taking deposits on Bitcoin (claimed to a fixed address), an outside LND
-# node that pays and is paid, a swap provider between the hubs paying and
-# paid over Lightning through an LND node of its own (hubs run none), a
+# opening contracts, an outside LND node that pays and is paid, a swap
+# provider between the hubs paying and paid over Lightning through an LND
+# node of its own and taking deposits on Bitcoin (hubs do neither), a
 # Nostr relay the hubs and the provider announce themselves on, and a
 # Gotify server their operators are notified on. `run.sh` brings it up, runs the tests and
 # removes it.
@@ -126,12 +126,18 @@ services:
       relay:
         condition: service_started
 
-  # It takes deposits as hub1 does, which stock the swap provider here.
+  # It opens contracts as hub1 does, its reserve in F funded by a Core
+  # wallet of its own, which the harness makes, lending none of a cap: the
+  # swap provider stocks here with a contract it funds. It takes deposits
+  # only to return contracts' reserves, as hubs do.
   hub2:
     <<: *hub
     command:
       - >-
         [ -f /data/seed ] || licash-hub init; exec licash-hub run
+        --chain http://licash:licash@bitcoind:18443/wallet/hub2 --contracts
+        --contracts-witnesses none --contracts-max-cap 2097151 --contracts-max-blocks 1000
+        --contracts-lend 0
         --announce-url http://127.0.0.1:${LICASH_E2E_HUB2:-38339} --announce-name hub2
         --name hub2 --notify gotify://gotify/$$(cat /notify/token)
         --deposit-sweep-address bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080
@@ -153,8 +159,10 @@ services:
   # ppm, from hub1 to hub2 alone (from hub2, hub1's window is too long to
   # outlast), payouts on Bitcoin Core's chain, and Lightning invoices paid
   # from its node for 2 + 5000 ppm, its routes ending 80 blocks before the
-  # client's lock expires; the tests fund it. No contract protects its
-  # notes (the tests open none): unprotected, as only tests run.
+  # client's lock expires; the tests fund it. It takes deposits on Bitcoin
+  # for notes at either hub, at regtest's few blocks. The harness stocks it
+  # with contracts it funds, which it does not keep as `run` would:
+  # unprotected, as only tests run.
   # Use a fixed payout minimum for the wallet scenarios.
   swaps:
     image: licash-swaps:e2e
@@ -175,6 +183,7 @@ services:
         --nostr-relay ws://relay:8080 --announce-url http://127.0.0.1:${LICASH_E2E_SWAPS:-38340}
         --announce-name swaps --name swaps --notify gotify://gotify/$$(cat /notify/token)
         --no-contracts --lnd https://swaps-ln:8080
+        --deposits --deposit-depth 1 --deposit-window 6 --deposit-sweep 6
         --lnurl-url http://127.0.0.1:${LICASH_E2E_SWAPS:-38340} --receive
     environment:
       LICASH_SWAPS_LND_MACAROON: /lnd/data/chain/bitcoin/regtest/admin.macaroon
