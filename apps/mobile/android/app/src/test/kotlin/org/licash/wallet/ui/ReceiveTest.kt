@@ -33,15 +33,13 @@ class ReceiveTest {
     fun an_invoice_asks_the_amount_entered_and_says_what_the_wallet_gets() {
         // No fee: nothing to say.
         assertNull(invoiceWords(4_000u, 4_000u, 4_000u))
-        // The hub's fee in it.
-        assertEquals("You get 3,997 sat, the hub's fee taken", invoiceWords(4_000u, 4_000u, 3_997u))
+        // The provider's fee in it.
+        assertEquals("You get 3,997 sat, the provider's fee taken", invoiceWords(4_000u, 4_000u, 3_997u))
         // A sat short, where no amount and its fee come to it exactly.
         assertEquals(
-            "The payer pays 100,001 sat\nYou get 100,000 sat, the hub's fee taken",
+            "The payer pays 100,001 sat\nYou get 100,000 sat, the provider's fee taken",
             invoiceWords(100_002u, 100_001u, 100_000u),
         )
-        // Made by a provider where no hub takes Lightning.
-        assertEquals("You get 495 sat, the provider's fee taken", invoiceWords(500u, 500u, 495u, "the provider"))
     }
 
     @Test
