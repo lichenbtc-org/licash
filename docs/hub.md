@@ -457,55 +457,65 @@ waits for a block, since a disclosure or fee child spending it is refused
 where its funding never arrived; the operator is told if the chain does not
 take one. A wallet of its own,
 funded with what the hub may lock, bounds the collateral at stake.
-`/v1/info` names its fixed terms: the cap (131,071 sat), the price a wallet
-pays to open one (the holder's 25,000 sat reserve and the hub's opening fee,
-`--contracts-fee`, 10,000 sat by default, half a year's interest at 20% on
-a 100,000 sat reserve: the hub locks one in every contract, of 100,000 sat on
-regtest and signet and 60,000 on Mutinynet) and the blocks to its
-close (1,000, or Mutinynet's 4,752); the openings take `/v1/contracts`. By default wallets may also
-choose a contract's cap up to `--contracts-max-cap` (33,554,431 sat by
-default) and how long it lasts up to `--contracts-max-blocks` (a year of
-Bitcoin's blocks, 52,560, by default) (`/v1/contracts/quote?cap=SAT&blocks=N`);
-`--contracts-fixed-only` offers the fixed terms alone, at their price with no
-interest, as hubs did by default before. Its cap is any number of sat from
-131,071 to 2,147,483,647 (the operator's largest within them) whose payout
-pays it exactly, whatever the coin the wallet deposits (any coin paying the
-price, the hub funding the rest of the cap), at the reserve
-and opening fee plus
-`--contracts-rate` millionths of the part of the cap the hub funds a year
-(of its network's blocks, 52,560 or Mutinynet's 1,051,200; 200,000, 20% a
-year, by default: the hub's own bitcoin locked is what it charges for, not
-its reserve or fee). A hub with a range prices its fixed terms by that rate
-too. The app and `licash-wallet` open by default a contract of the deposit
-alone, less its price, the hub funding only what makes it a cap (the least
-cap, or under 512 sat); a wallet asks for more room to receive, the hub
-lending it at its interest; a wallet opens unasked no contract
-whose fee and interest are more than half the coin paying it. A wallet funds part of the cap itself
-(`&funded=SAT`, every contract): its coin is spent whole in F, paying the
-price and, as that part, all the rest of it but less than dust (no change
-comes back), `--contracts-rate-funded` millionths of it a year (none by
-default), and once F is 3 blocks deep (and as deep as the hub's funding
-depth) the hub issues it notes of that value at
+`/v1/info` names, under `contracts`, the range of terms wallets choose
+among (`range`), and the openings take `/v1/contracts`. A wallet asks a
+quote of the terms it chose, a cap and blocks
+(`/v1/contracts/quote?cap=SAT&blocks=N`, both required: the hub quotes no
+terms of its own). Its cap is any number of sat from `--contracts-min-cap`
+(131,071 by default and at least) to `--contracts-max-cap` (33,554,431 by
+default; 2,147,483,647 at most, the operator's largest within them) whose
+payout pays it exactly, and it lasts from its network's fewest blocks to
+`--contracts-max-blocks` (a year of Bitcoin's blocks, 52,560, by default).
+Its price is the holder's reserve (25,000 sat, returned as it closes), the
+hub's opening fee (`--contracts-fee`, 10,000 sat by default, half a year's
+interest at 20% on a 100,000 sat reserve: the hub locks one in every
+contract, of 100,000 sat on regtest and signet and 60,000 on Bitcoin's
+network and Mutinynet), and `--contracts-rate` millionths a year (of its
+network's blocks, 52,560 or Mutinynet's 1,051,200; 200,000, 20% a year, by
+default) of the part of the cap the hub lends: its own bitcoin locked is
+what it charges for, not its reserve or fee.
+
+A holder funds her part of the cap (`&funded=SAT`): her coin is spent whole
+in F, paying the price and, as that part, all the rest of it but less than
+dust (no change comes back), at `--contracts-rate-funded` millionths of it a
+year (none by default). Once F is 3 blocks deep (and as deep as the hub's
+funding depth) the hub issues her notes of that value at
 `/v1/contracts/openings/{id}/funded`, through a lock of its own settled at
 once; never issued, the wallet's claim names them, and a recovery pays
-them. A hub that takes no deposits (`--deposit-sweep-address`) opens no
-contract and says so at startup: every contract's default returns the
-holder's reserve to a deposit of the hub's (below). `/v1/info` then names that range,
-its largest cap no more than the contracts' wallet funds (its confirmed
-balance, asked each minute with `getbalances`, less the hub's reserve
-and 50,000 sat for fees): a larger cap is refused as unavailable. A
-login limited by `-rpcwhitelist` needs `getbalances` among its calls, or
-the hub advertises the range's largest cap whatever its wallet holds.
+them. The hub lends the rest of the cap, as its operator lets it:
+`--contracts-lend` sat of one contract at most and `--contracts-lend-total`
+sat of all its live contracts together (signed or under way, not ended or
+given up), both 0 by default. So by default it lends nothing but the few
+sat (511 at most) that round a holder's part up to a cap, and a hub's own
+liquidity at stake is its reserve in each contract alone: what it can lose
+of one is that reserve and what it lent. What it lends is also no more than
+the contracts' wallet holds past the hub's reserve and 50,000 sat for fees
+(its confirmed balance, asked each minute with `getbalances`). A quote or an
+opening asking more is refused as unavailable (HTTP 503), checked again
+under the funding lock as F is funded. A login limited by `-rpcwhitelist`
+needs `getbalances` among its calls, or the hub lends as if its wallet held
+enough. The app and `licash-wallet` open by default a contract of the
+deposit alone, less its price; a wallet asks for more room to receive, the
+hub lending it at its interest if it lends that much; a wallet opens
+unasked no contract whose fee and interest are more than half the coin
+paying it. A hub that takes no deposits (`--deposit-sweep-address`) opens
+no contract and says so at startup: every contract's default returns the
+holder's reserve to a deposit of the hub's (below).
+
 For a wallet to choose a hub by before it pays a deposit, `/v1/info` also
-says, under `contracts`, `funds`: the most of a cap its wallet funds now,
-of the caps it offers and no more of its balance than those tell (absent
-until `getbalances` answered), and `full: true` while a new opening is
-refused (as many contracts live, or openings under way or unfunded, as it
-takes; absent otherwise). They are hints, up to a minute old: the offer is
-what binds. A hub saying neither, as one of an earlier version, reads as
-having room; the app grays a recommended or announced hub that is full or
-funds none of its smallest cap, and `licash-wallet contract-terms` prints
-`room none` with why (`room` and `funds` with `--json`).
+says, under `contracts`, `funds`: the most it lends of one contract's cap
+now, and `full: true` while a new opening is refused (as many contracts
+live, or openings under way or unfunded, as it takes, or its wallet short
+of its reserve; absent otherwise). They are hints, up to a minute old: the
+offer is what binds. A hub lending less than 512 sat (none, by default) is
+`unfunded`: only a contract its holder funds whole opens there. A hub saying
+neither reads as having room; the app grays a recommended or announced hub
+that is full, and `licash-wallet contract-terms` prints `room none` with why
+(`room` and `funds` with `--json`). This release drops a hub's fixed terms
+(and `--contracts-fixed-only`): `/v1/info` no longer says `cap`, `price`,
+`reserve` or `blocks` beside `range`, and wallets of an earlier release that
+read them do not open contracts at an upgraded hub. Upgrade the apps with
+the hub.
 The collateral of a contract is its cap exactly: its graph's payout pays in
 one output each of `2^i` sat for its bits (17 to 31, the most whose outputs
 pay at most the cap together), and one output more of the rest, `cap - (2^bits
@@ -604,7 +614,7 @@ Every live contract (signed and not ended, or under way) is an exit the hub
 may have to prove at once, should all its holders force their contracts
 closed together. `--contracts-max-live` (32 by default, sized for a prover
 with a GPU) bounds them. Up to half of it, contracts cost what the hub's
-terms say. Past half, the hub's fee (the fixed one and its yearly rate
+terms say. Past half, the hub's fee (its opening fee and its yearly rate
 alike, not the holder's reserve) doubles at each eighth more: 2, 4, 8, then
 16 times at 87.5%. At the maximum it opens none until one ends. So the half
 it can always defend pays its way, and the rest pays for more or better
@@ -655,8 +665,8 @@ refuses to run.
 
 Mutinynet rehearses those terms: the same blocks and the same reserve, a
 twentieth of the time, but for what a proof takes, 2,880 blocks to prove and
-assert, the day that Bitcoin's 144 are, with the fixed contract and the
-shortest chosen as many blocks longer (4,752 and 4,032); it is 3 blocks deep,
+assert, the day that Bitcoin's 144 are, with the shortest contract as many
+blocks longer (4,032); it is 3 blocks deep,
 as signet, and its caps are bounded by `--contracts-max-cap` alone. Its days
 to respond and to answer a challenge are 144 blocks there, 72 minutes: a
 drill of a hub brought back in time is that much harsher than on Bitcoin's
@@ -1308,9 +1318,9 @@ Before starting it:
 - On Mutinynet, new contracts take the terms of Bitcoin's network (above):
   144 blocks at least to respond, 2,880 to prove and assert, 288 for the
   holder to challenge and 144 for the hub to answer, a 60,000 sat reserve,
-  4,032 blocks at least and 4,752 for the fixed terms. A hub there refuses to start, saying which,
+  4,032 blocks at least. A hub there refuses to start, saying which,
   with a `--lock-window` below 144 blocks (the default) or a
-  `--contracts-max-blocks` below 4,752 (the default is 52,560). Contracts
+  `--contracts-max-blocks` below 4,032 (the default is 52,560). Contracts
   open keep their terms. Signet's and regtest's terms are unchanged.
 - Openings speak version 3 of the opening protocol: she signs her deposit
   into F before the hub signs. Upgrade the hub first, then the apps. An app
