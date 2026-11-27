@@ -362,7 +362,13 @@ impl Phone {
         self.tap_id(id).await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
         self.type_text(text).await?;
-        self.hide_keyboard().await
+        self.hide_keyboard().await?;
+        // Its screen still up: a keyboard closed, not a sheet typed in.
+        ensure!(
+            self.has(id).await?,
+            "{id:?} gone once its keyboard was hidden: its screen dismissed"
+        );
+        Ok(())
     }
 
     /// Tap the field tagged `id` and paste what was copied into it, as a
@@ -384,10 +390,14 @@ impl Phone {
 
     pub async fn hide_keyboard(&self) -> anyhow::Result<()> {
         // Escape closes an on-screen keyboard, not the screen, but only if
-        // one is shown: typed through a hardware keyboard, none is, and a
-        // sheet, a dialog, takes Escape as back and is dismissed.
+        // one is drawn: typed through a hardware keyboard, as on CI, none
+        // is, and a sheet, a dialog, takes Escape as back and is dismissed.
+        // The input method says it is shown then all the same
+        // (`mInputShown=true`): its keyboard's view and window say whether
+        // it is drawn, as `InputMethodService::isInputViewShown` does.
         let ime = self.shell("dumpsys input_method").await?;
-        if !ime.split_whitespace().any(|w| w == "mInputShown=true") {
+        let said = |what: &str| ime.split_whitespace().any(|w| w == what);
+        if !(said("mIsInputViewShown=true") && said("mWindowVisible=true")) {
             return Ok(());
         }
         self.shell("input keyevent 111").await?;
