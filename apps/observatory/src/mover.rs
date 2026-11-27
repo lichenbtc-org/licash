@@ -707,8 +707,10 @@ impl<T: Transport + 'static> Mover<T> {
             Kind::Swap => {
                 let provider = self.provider_url(plan)?;
                 let limits = self.limits(plan.amount);
+                // Within what the budget took it for: a provider asking
+                // more since is refused, nothing locked.
                 let mut swap = wallet
-                    .swap(&provider, from, to, plan.amount, limits)
+                    .swap_within(&provider, from, to, plan.amount, limits, Some(plan.quoted))
                     .await
                     .map_err(said)?;
                 loop {
