@@ -1298,7 +1298,9 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     );
     let first = amount(&phone.by_id("quote-price", 10).await?.text);
     ensure!(first > OPENING, "{first} for {wanted}");
-    phone.tagged("contract-reserve", "20,000 sat", 10).await?;
+    phone
+        .tagged("contract-reserve", &format!("{} sat", digits(RESERVE)), 10)
+        .await?;
     phone.by_id("cash-out-first", 10).await?;
     let words = phone.scroll_to_text("Cash out ").await?;
     let asked = amount(&words.text);
@@ -1405,7 +1407,9 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     // Its reserve apart from its cost, hers, and her part, in sight with
     // what the hub protects then; its size, the coin paying it and how
     // long folded under More.
-    phone.tagged("contract-reserve", "20,000 sat", 10).await?;
+    phone
+        .tagged("contract-reserve", &format!("{} sat", digits(RESERVE)), 10)
+        .await?;
     for shown in ["contract-funded", "contract-after"] {
         phone.by_id(shown, 10).await?;
     }
