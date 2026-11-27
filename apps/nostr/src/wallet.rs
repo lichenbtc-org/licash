@@ -18,9 +18,9 @@ use futures_util::{
 };
 use licash_api::{Info, Payment};
 use licash_wallet::{
-    DonationAddress, Error, HubId, LicashCode, Paid, PaymentCode, PaymentNote, PayoutQuote,
-    PayoutState, ReceiveOffer, Received, SwapLimits, SwapQuote, SwapState, Transport, ViaQuote,
-    Wallet,
+    DepositOffer, DonationAddress, Error, HubId, LicashCode, Paid, PaymentCode, PaymentNote,
+    PayoutQuote, PayoutState, ReceiveOffer, Received, SwapLimits, SwapQuote, SwapState, Transport,
+    ViaQuote, Wallet,
 };
 
 use crate::{mailbox, watch::Watch, Found, Role, Route, LIFETIME};
@@ -1323,6 +1323,49 @@ pub async fn receive_providers_with<T: Transport>(
     let answering = announced.answering(on, &none, ask, |o: &ReceiveOffer| o.info.nostr.as_deref());
     let providers = (answering.await?.into_iter())
         .map(|(service, url, offer)| ReceiveProvider {
+            url,
+            key: service.key,
+            name: service.announcement.name,
+            offer,
+        })
+        .collect();
+    Ok(providers)
+}
+
+/// A swap provider announced on Nostr taking deposits on Bitcoin for notes
+/// at a hub of the wallet's ([`Wallet::deposit_through`]).
+#[derive(Clone, Debug)]
+pub struct DepositProvider {
+    /// The URL that answered as the provider: the first announced that
+    /// does, or where it last answered ([`Announcements`]).
+    pub url: String,
+    /// The key that announced it, x-only in hex.
+    pub key: String,
+    pub name: Option<String>,
+    pub offer: DepositOffer,
+}
+
+/// The swap providers announced on `relays` for `wallet`'s network, as
+/// `announced` keeps them, asked through `route`, that take deposits on
+/// Bitcoin for notes at hub `at` now ([`Wallet::deposit_offer`]), the
+/// newest announced first.
+pub async fn deposit_providers_with<T: Transport>(
+    wallet: &Wallet<T>,
+    announced: &Announcements,
+    (relays, route): (&[String], &Route),
+    at: &str,
+) -> anyhow::Result<Vec<DepositProvider>> {
+    let network = wallet.network().name();
+    // Asked while the wallet's owner waits: a provider not answering
+    // lately is passed over.
+    let ask = |url: String| async move {
+        licash_wallet::in_background(wallet.deposit_offer(&url, at)).await
+    };
+    let on = (relays, route, network);
+    let none = HashSet::new();
+    let answering = announced.answering(on, &none, ask, |o: &DepositOffer| o.info.nostr.as_deref());
+    let providers = (answering.await?.into_iter())
+        .map(|(service, url, offer)| DepositProvider {
             url,
             key: service.key,
             name: service.announcement.name,
