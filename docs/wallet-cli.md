@@ -175,6 +175,10 @@ the provider with the lock, and `resume` asks the provider again until the
 payment settles or fails, so a payment interrupted before the provider
 heard of it is still made. Running it again for the same invoice follows
 the same lock.
+`pay-invoice <address> --amount <sat> --via <provider>` pays a Lightning
+Address or an LNURL-pay code instead: the invoice its service makes for the
+amount, checked to ask exactly it, on the wallet's network, for what the
+service showed.
 A wallet that asked a hub's Lightning gateway for an invoice or a payment
 before its hub dropped the gateway keeps following it with `resume`: a
 payment's lock is refunded once expired if it was never paid.

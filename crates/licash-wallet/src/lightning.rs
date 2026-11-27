@@ -95,7 +95,7 @@ pub struct Payable {
 }
 
 /// An invoice as the wallet reads it.
-fn decode(request: &str) -> Result<Bolt11Invoice, Error> {
+pub(crate) fn decode(request: &str) -> Result<Bolt11Invoice, Error> {
     request
         .trim()
         .parse()
@@ -193,7 +193,7 @@ impl<T: Transport> Wallet<T> {
     }
 
     /// What `invoice` asks, in msat, if this wallet can pay it.
-    fn payable(&self, invoice: &Bolt11Invoice) -> Result<u64, Error> {
+    pub(crate) fn payable(&self, invoice: &Bolt11Invoice) -> Result<u64, Error> {
         let network = licash_onchain::network(self.network());
         if invoice.currency() != lightning_invoice::Currency::from(network) {
             return Err(Error::Invalid(format!(

@@ -47,6 +47,7 @@ mod inquiry;
 mod journal;
 mod lane;
 mod lightning;
+mod lnurl;
 mod locks;
 mod payment_note;
 mod payouts;
@@ -104,6 +105,7 @@ pub use lane::{current_lane, in_background, in_background_now, in_lane, Backgrou
 pub use lightning::{
     refund_blocks, Invoice, InvoiceState, Payable, ReceiveOffer, ViaQuote, ROUTE_BLOCKS,
 };
+pub use lnurl::{pay_target as lnurl_pay_target, PayRequest as LnurlPayRequest};
 pub use locks::{Incoming, Lock, LockState, Via, CLAIM_MARGIN, PROTECTED_MARGIN};
 pub use payment_note::{note_text, PaymentNote, MAX_NOTE};
 pub use payouts::{

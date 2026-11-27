@@ -282,9 +282,13 @@ enum Command {
     /// Pay a Lightning invoice through a swap provider, its fee on top: it
     /// pays the invoice from its own Lightning node for a lock of notes at
     /// a hub to it, refunded once expired if the payment fails. Hubs pay
-    /// no invoices.
+    /// no invoices. A Lightning Address or an LNURL-pay code is paid by the
+    /// invoice its service makes for `--amount`, checked first.
     PayInvoice {
         invoice: String,
+        /// What to pay a Lightning Address or an LNURL, in sat.
+        #[arg(long)]
+        amount: Option<u64>,
         /// From notes at this hub [default: the one holding the most].
         #[arg(long)]
         hub: Option<String>,
@@ -1336,11 +1340,26 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
         }
         Command::PayInvoice {
             invoice,
+            amount,
             hub,
             via,
             max_fee,
             wait,
         } => {
+            let invoice = match (
+                licash_wallet::lnurl_pay_target(&invoice, wallet.network()),
+                amount,
+            ) {
+                (None, None) => invoice,
+                (None, Some(_)) => bail!(
+                    "--amount is for a Lightning Address or an LNURL: an invoice says its own"
+                ),
+                (Some(_), None) => bail!("a Lightning Address or an LNURL is paid an --amount"),
+                (Some(_), Some(amount)) => {
+                    let pay = wallet.lnurl_pay_request(&invoice).await?;
+                    wallet.lnurl_invoice(&pay, amount).await?
+                }
+            };
             let hub = match hub {
                 Some(hub) => hub,
                 None => richest(&wallet)?,
