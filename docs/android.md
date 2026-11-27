@@ -460,8 +460,9 @@ words), then the cover: at first of the smallest coin a contract takes
 whole, her part of it alone, the hub funding only what makes it a cap (the
 least, 131,071 sat, or under 512 sat more; a hub may bound the cap by the
 coin paying, as it announces). Under More, what it is for sizes it otherwise
-(Yours, Pay, Both or Receive: room for what is put in and held at the hub,
-half again, or three times it, the hub funding the rest at its interest),
+(Pay, Both or Receive: her part only, or room for half again what is put in
+and held at the hub, or three times it, the hub funding the rest at its
+interest; a choice kept by an older app as Yours or Pay is Pay),
 the choice kept once tapped, and a slider asks any cover from her part's to
 the largest the hub allows for the coin, in steps of 1,000 sat. Chips choose
 the coin paying it when several do, the smallest at first. Then its cost, the

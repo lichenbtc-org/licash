@@ -110,24 +110,24 @@ internal fun fitAt(q: ContractQuote, range: ContractRange, blocks: UInt, coin: D
     contractFit(range, blocks, coin.value, least, 0uL, q.dust, q.denominations, q.fundedNotes)
 
 /**
- * What protection is mostly for, which sizes it at first: her part only,
- * the hub adding as little as it can, at its interest (`halves` none); or
- * room for what she puts in and holds at the hub (`halves` of it, in
- * halves), to pay with; half as much again, to be paid too; or three times
- * it, to be paid mostly. The hub funds the room beyond her part.
+ * What protection is for, which sizes it at first: to pay, her part only,
+ * the hub adding as little as it can (`halves` none); to pay and receive,
+ * room for half as much again as what she puts in and holds at the hub
+ * (`halves` of it, in halves); or to receive, three times it, the hub
+ * funding most. The hub funds the room beyond her part, at its interest.
  */
 internal enum class Intent(val label: String, val says: String, val halves: ULong) {
-    FITS("Yours", "Your deposit only, the hub adding nothing. It costs the least.", 0uL),
-    PAY("Pay", "Room for what you put in, to pay with.", 2uL),
-    BOTH("Both", "Room for half as much again, to receive.", 3uL),
-    RECEIVE("Receive", "Room to receive twice what you put in.", 6uL),
+    PAY("Pay", "Your deposit only, the hub adding nothing. It costs the least.", 0uL),
+    BOTH("Both", "Room for half as much again, to receive too. The hub funds the rest.", 3uL),
+    RECEIVE("Receive", "Room to receive twice what you put in. The hub funds most of it.", 6uL),
 }
 
 /**
- * The intent the owner last chose, kept only once she taps one: [Intent.FITS]
- * if none, the hub funding as little as it can.
+ * The intent the owner last chose, kept only once she taps one: [Intent.PAY]
+ * if none, the hub funding as little as it can. Kept by an older app, `FITS`
+ * (her part only) and `PAY` (room for what she put in) are both to pay now.
  */
-internal fun intentOf(saved: String?): Intent = Intent.entries.find { it.name == saved } ?: Intent.FITS
+internal fun intentOf(saved: String?): Intent = Intent.entries.find { it.name == saved } ?: Intent.PAY
 
 /**
  * The cap asked at least of a coin of `coin` sat, with `missing` sat at its
@@ -186,7 +186,7 @@ internal fun cashOutRoom(missing: ULong): ULong = minOf(missing, missing / 100uL
  * reserve paid from them and the rest her part, issued back, in the
  * contract of her part (`fit` of a coin at a least cap, as [contractFit]),
  * the hub adding what makes a cap of `least` sat at least, as a coin she
- * holds is sized at first ([Intent.FITS]). The price paid from what she
+ * holds is sized at first ([Intent.PAY]). The price paid from what she
  * holds, the rest is covered. At least what the smallest takes,
  * [FIXED_PART] hers; at most what the `largest` cap takes, all hers. None
  * with nothing missing, or if no contract takes it.
@@ -250,7 +250,7 @@ internal fun ChooseSheet(
     decline: (() -> Unit)? = null,
     payWithNotes: ((cap: ULong, blocks: UInt, coin: ULong) -> Unit)? = null,
     cashOut: ((ULong) -> Unit)? = null,
-    intent: Intent = Intent.FITS,
+    intent: Intent = Intent.PAY,
     chooseIntent: (Intent) -> Unit = {},
 ) {
     Sheet(title, dismiss) {
@@ -289,7 +289,7 @@ internal fun Choosing(
     // With no coin paying it: cashing out a coin of so many sat to herself first, to pay it.
     cashOut: ((ULong) -> Unit)? = null,
     // What it is mostly for, sizing it at first, and where her choice is kept.
-    intent: Intent = Intent.FITS,
+    intent: Intent = Intent.PAY,
     chooseIntent: (Intent) -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme

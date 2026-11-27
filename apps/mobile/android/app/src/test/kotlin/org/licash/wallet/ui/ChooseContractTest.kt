@@ -26,7 +26,7 @@ class ChooseContractTest {
     fun the_cap_offered_is_her_part_or_what_she_asks_else_the_largest_allowed() {
         val most = 4_000_000uL
         // Her part only, the hub adding nothing.
-        assertEquals(970_000uL, intentFit(1_000_000uL, 0uL, Intent.FITS, most, ::fake)?.cap)
+        assertEquals(970_000uL, intentFit(1_000_000uL, 0uL, Intent.PAY, most, ::fake)?.cap)
         // Half again the coin: the hub funding the rest.
         assertEquals(1_500_000uL, intentFit(1_000_000uL, 0uL, Intent.BOTH, most, ::fake)?.cap)
         // Asked any cap: that one.
@@ -44,7 +44,7 @@ class ChooseContractTest {
         val most = 4_000_000uL
         // A small coin, 400,000 sat held there unprotected: half again both.
         assertEquals(1_050_000uL, intentFit(300_000uL, 400_000uL, Intent.BOTH, most, ::fake)?.cap)
-        assertEquals(970_000uL, intentFit(300_000uL, 400_000uL, Intent.FITS, most, ::fake)?.cap)
+        assertEquals(970_000uL, intentFit(300_000uL, 400_000uL, Intent.PAY, most, ::fake)?.cap)
     }
 
     @Test
@@ -125,23 +125,31 @@ class ChooseContractTest {
     fun what_the_vault_is_for_sizes_it() {
         val fit = { least: ULong -> ContractFit(cap = maxOf(least, 131_071uL), funded = 100_000uL) }
         val most = 1_048_575uL
-        // 100,000 put in: room for it, half again, or three times it.
+        // 100,000 put in: her part only, half again, or three times it.
         assertEquals(131_071uL, intentFit(100_000uL, 0uL, Intent.PAY, most, fit)?.cap)
         assertEquals(150_000uL, intentFit(100_000uL, 0uL, Intent.BOTH, most, fit)?.cap)
         assertEquals(300_000uL, intentFit(100_000uL, 0uL, Intent.RECEIVE, most, fit)?.cap)
-        assertEquals(900_000uL, intentFit(500_000uL, 400_000uL, Intent.PAY, most, fit)?.cap)
-        // At first her part only, whatever is not protected yet.
-        assertEquals(0uL, intentLeast(100_000uL, 5_000_000uL, Intent.FITS))
-        assertEquals(131_071uL, intentFit(100_000uL, 5_000_000uL, Intent.FITS, most, fit)?.cap)
-        assertNull(intentFit(100_000uL, 0uL, Intent.FITS, most) { null })
+        assertEquals(1_350_000uL, intentFit(500_000uL, 400_000uL, Intent.BOTH, most, fit)?.cap)
+        // To pay, her part only, whatever is not protected yet.
+        assertEquals(0uL, intentLeast(100_000uL, 5_000_000uL, Intent.PAY))
+        assertEquals(131_071uL, intentFit(100_000uL, 5_000_000uL, Intent.PAY, most, fit)?.cap)
+        assertEquals(131_071uL, intentFit(500_000uL, 400_000uL, Intent.PAY, most, fit)?.cap)
+        assertNull(intentFit(100_000uL, 0uL, Intent.PAY, most) { null })
+    }
+
+    @Test
+    fun only_pay_both_and_receive_are_offered() {
+        assertEquals(listOf("Pay", "Both", "Receive"), Intent.entries.map { it.label })
     }
 
     @Test
     fun no_intent_saved_means_the_smallest_and_one_saved_is_kept() {
-        assertEquals(Intent.FITS, intentOf(null))
-        assertEquals(Intent.FITS, intentOf("something else"))
+        assertEquals(Intent.PAY, intentOf(null))
+        assertEquals(Intent.PAY, intentOf("something else"))
         assertEquals(Intent.RECEIVE, intentOf("RECEIVE"))
         assertEquals(Intent.BOTH, intentOf("BOTH"))
         assertEquals(Intent.PAY, intentOf("PAY"))
+        // Kept by an older app: her part only, now to pay.
+        assertEquals(Intent.PAY, intentOf("FITS"))
     }
 }
