@@ -157,7 +157,7 @@ async fn move_in(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     phone.wait("Not protected", 10).await?;
     phone.tap_id("move-in-anyway").await?;
     phone.gone("move-in-anyway", 30).await?;
-    phone.back_to("onchain").await?;
+    phone.back_past_sheet_to("onchain").await?;
     phone.back_to("receive").await?;
     Ok(())
 }
@@ -824,7 +824,7 @@ async fn bridged(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
         said.text
     );
     phone.tap("Done").await?;
-    phone.back().await?;
+    phone.back_past_sheet_to("bridge").await?;
     phone.scroll_to_id("imported").await?;
     phone.tap("Back").await?;
     phone.back_to("receive").await?;
