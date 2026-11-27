@@ -19,9 +19,7 @@ made for others than the hub`: by default 1 sat, 100 ppm (rounded up) and
 0.1 sat a note (their sum rounded to the nearest sat). `--spend-fee-base`
 and `--spend-fee-ppm` set the first two on a payment, `--lock-fee-*` and
 `--refund-fee-*` in a lock's pay and refund branches, `--output-fee-msat`
-the fee on a note, in thousandths of a sat, for all three. A payment
-received over Lightning costs `--ln-receive-fee-base` and
-`--ln-receive-fee-ppm`, 1 sat and 100 ppm by default. A hub that ran
+the fee on a note, in thousandths of a sat, for all three. A hub that ran
 without these flags charged nothing: upgraded, it charges the defaults
 (`run` logs what it charges as it starts), and 0 on each keeps it free.
 Wallets that predate the fee on notes do not pay it, so a payment of theirs
@@ -45,7 +43,8 @@ targets. Configuration is diagnostic detail (`RUST_LOG=debug`); warnings
 remain visible. `--log json` retains structured logging.
 
 `dashboard` draws the hub's dashboard in the terminal: payments by kind
-(transfers, locks, Lightning out and in, deposits), their failures by
+(transfers, locks, deposits, and Lightning out and in recorded by earlier
+releases), their failures by
 reason and those under way, the fees earned, the notes outstanding and the
 collateral of the contracts that protect them, the notes' anonymity sets,
 health checks, among them whether the hub at `--url` answers `/health`,
@@ -83,32 +82,31 @@ run, and watch its tip against others.
 `<data>/seed` makes every key of the hub: those its notes are issued
 under, its own address, its Nostr key and its deposits' keys. Keep a copy
 offline. Whoever else reads it makes notes the hub takes for its own, and
-spends them at the hub for what it pays out, over Lightning or from its
-contracts' collateral. It is not all there is to guard. Worth funds to
+spends them at the hub, or at swap providers that pay them out, and claims
+its contracts' collateral. It is not all there is to guard. Worth funds to
 whoever reads them too: `hub.sqlite` (the ledger, and the openings and the
-pinned responses the hub signs its contracts with), the LND macaroon, the login of the Bitcoin
-Core wallet that funds contracts (it spends that wallet),
-`swaps/wallet.sqlite` (the provider's notes at other hubs) and `tor/state`
-(the onion address). `init` makes `<data>` its user's alone: keep it so, on
+pinned responses the hub signs its contracts with), the login of the
+Bitcoin Core wallet that funds contracts (it spends that wallet),
+`swaps/wallet.sqlite` if an earlier release's swaps left one (the
+provider's notes at other hubs) and `tor/state` (the onion address). `init` makes `<data>` its user's alone: keep it so, on
 an encrypted disk, and keep on this host only what the hub needs there:
 
-- Channels that hold what the hub pays out in days, not its reserves.
-  `--ln-max-pay` bounds an invoice and `--ln-max-pay-day` a day's (below).
 - A Core wallet of its own for contracts (`--contracts-wallet`), funded
   with what the hub may lock, and what contracts return paid to a wallet
   whose keys are offline (`--contracts-payout-wallet`, below).
-- A macaroon and a Core login that do only what the hub does (below).
+- A Core login that does only what the hub does (below).
 
 Back up `<data>` continuously, to another host. `hub.sqlite` holds the
-ledger, the deposits, the Lightning receipts, the inbox, the openings of
+ledger, the deposits, the Lightning receipts of earlier releases, the inbox, the openings of
 contracts and the responses pinned, in one SQLite database, so that one
 consistent copy of it (`sqlite3 hub.sqlite ".backup FILE"` or
 `VACUUM INTO 'FILE'` while the hub runs, or its files copied with the hub
 stopped) holds all of them as of one moment. It is not all of `<data>`:
 
 - `seed`, once.
-- `hub.sqlite` and `swaps/wallet.sqlite`, each copied as above, never as
-  bare files while the hub runs (they are in WAL mode).
+- `hub.sqlite`, and `swaps/wallet.sqlite` if an earlier release left one,
+  each copied as above, never as bare files while the hub runs (they are
+  in WAL mode).
 - `opening-instances/`: the garbled instances each contract kept, the
   largest part of `<data>`. Without them the hub still responds and
   asserts, but answers no challenge of its assertion, and a challenge
@@ -128,8 +126,7 @@ Copy the database first, then the files: an instance or a receipt is
 written before the database names it, and none is removed, so files
 copied after the database cover all it names. Outside `<data>`, back up
 the Bitcoin Core wallet that funds contracts (`backupwallet`; its keys are
-not made from `seed`, and it holds the fee coins the hub's answers need)
-and LND's channel backup.
+not made from `seed`, and it holds the fee coins the hub's answers need).
 
 What a copy loses grows with its age, so take it as often as the hub
 changes, not daily. Litestream (0.5.18, tested in regtest under payments
@@ -143,6 +140,7 @@ dbs:
     replica:
       type: file
       path: /REPLICA/hub
+  # Only if an earlier release's swaps left this file.
   - path: /DATA/swaps/wallet.sqlite
     replica:
       type: file
@@ -174,7 +172,7 @@ paid in full.
 Restoring on another host, while contracts may be in dispute:
 
 1. Fence the old host's ledger and wallet: stop it, and revoke its Core
-   and LND logins. Two copies answering one claim are kept to the same
+   login (and an LND login an earlier release used). Two copies answering one claim are kept to the same
    answer by the witnesses ([Contract witnesses](#contract-witnesses)),
    and a copy superseded opens no contract ([Taking over](#taking-over)),
    but two copies serving wallets fork the ledger, and two spending one
@@ -189,8 +187,8 @@ Restoring on another host, while contracts may be in dispute:
    plays the disputes that began while it was down, however long ago, as
    far as their windows allow, and serves nothing but `/health`. Read its
    alerts: missing instances, its header chain, its prover, and what its
-   Lightning receipts, deposits and swaps are owed, which no one collects
-   while it responds only. Go on to step 5 before the earliest of their
+   deposits (and an earlier release's Lightning receipts and swaps) are
+   owed, which no one collects while it responds only. Go on to step 5 before the earliest of their
    locks expires.
 5. Start it as a whole (without `--respond-only`), and open its public
    route, only once the copy is known to be the newest: an older ledger
@@ -225,73 +223,55 @@ offer each note's hold key signed (`holds` in `POST /v1/offer`): its
 owner's, which a payer who knows the note, having made it, can't sign, so
 can't use up.
 
-Notes the hub locks for a deposit, a Lightning receipt or a swap into it
-are backed by that payment, recorded in `hub.sqlite` (the deposits and
-the receipts) or in the provider's `swaps/wallet.sqlite`. The hub refuses
-to start while it may yet pay such a lock that none of these records, as
-when the provider's file was restored older than `hub.sqlite`, and names
-the locks: restore `swaps/wallet.sqlite` as recent as `hub.sqlite`.
-`--allow-unbacked-locks` runs it anyway, alerting the operator: it would pay
-those notes unbacked.
+Notes the hub locks for a deposit are backed by its payment, recorded in
+`hub.sqlite`; so were those an earlier release locked for a Lightning
+receipt, in `hub.sqlite` too, or for a swap into it, in its provider's
+`swaps/wallet.sqlite`. The hub refuses to start while it may yet pay such
+a lock that none of these records, as when the provider's file was
+restored older than `hub.sqlite`, and names the locks: restore
+`swaps/wallet.sqlite` as recent as `hub.sqlite`. `--allow-unbacked-locks`
+runs it anyway, alerting the operator: it would pay those notes unbacked.
 
-It also refuses to run with `--lnd` or `--deposit-sweep-address` disabled
-while that gateway still has obligations to collect, including deposits
-settled but not swept and locks left between writes by an interruption.
-The refusal names the file and count. Idle files are inspected read-only,
-never created or upgraded; open unpaid requests only warn. Enable the
-gateway to finish its work. This also applies when upgrading an existing
-installation; no records are discarded or migrated.
+It also refuses to run with `--deposit-sweep-address` disabled while
+deposits still have obligations to collect, including deposits settled
+but not swept and locks left between writes by an interruption
+(`--deposit-sweep-address is off but N obligations in FILE still need
+it`): enable it to follow them. This release runs no Lightning gateway and
+provides no swaps, so it refuses to start while an earlier release's
+gateway or swaps still have obligations (`... this release runs none: run
+the release before it, with --lnd, until they are done`, and `N swaps
+into the hub are under way in FILE, and hubs of this release provide no
+swaps: run the release before it, with --swaps, until they are done`):
+finish them under the release before it (`sha-4dc35057` is the last with
+the Lightning gateway), then upgrade. Idle files are inspected read-only,
+never created or upgraded; open unpaid requests only warn. No records are
+discarded or migrated. Notes an earlier release's swaps left in
+`swaps/wallet.sqlite` are taken on by running a swap provider
+(`licash-swaps`, see [swaps](swaps.md)) on that file. The `--lnd`,
+`--ln-*` and `--swaps*` flags are gone: remove them from the hub's command.
 
-With `--lnd URL --lnd-macaroon FILE` (and `--chain`), the hub also runs a
-Lightning gateway over LND: it pays invoices for locks that pay the hub,
-and makes hold invoices paid with locks of its notes. An invoice of its
-own node, a receipt still open, is paid inside the hub for its amount
-alone: the payer's lock backs the receipt instead of an HTLC, and its
-invoice is canceled. `--lnd-cert` pins
-LND's certificate. The gateway keeps its invoices in
-`hub.sqlite`, with the ledger's records. An alert says when
-LND's channels can no longer pay or receive the most it takes.
-`--ln-max-receipts` bounds open and locked receipts (1024 by default). A
-receipt's invoice may be paid for 15 minutes (`--ln-invoice-expiry`, 900
-seconds), after which an unpaid one frees its place.
-Lowering it blocks new receipts, not retries or following existing ones.
-A receipt may ask for a memo (at most 100 characters, its words one space
-apart, no control characters), which its invoice says to the payer as its
-description; the gateway names the `memo` feature in `/v1/info`, so wallets
-ask older hubs for none. The memo is part of the receipt: the same hash
-asked again with another is refused.
-A receipt may instead ask for an exact invoice total in millisatoshis, the
-gateway's fee taken from it, and a description hash its invoice commits to,
-as LNURL-pay and Nostr zaps need. The total must be at least the notes and
-the fee on them and at most 1999 msat more, which the hub keeps. The
-gateway names the `lnurl` feature in `/v1/info` for these.
-
-`--ln-max-pay-day SAT` bounds what the gateway pays out over the node in
-any 24 hours: the sum of what the locks of the invoices paid, or under way,
-pay the hub, the gateway's fee in it. Past it an invoice is refused and its
-lock refunded, until earlier payments are a day old, and an alert says so
-once a day. Without it there is no limit. It bounds what leaves over
-Lightning in a day whoever asks, a thief of the seed too: set it to a few
-times a busy day's payments.
+Lightning, and moving coins on Bitcoin into notes, are the swap providers'
+([swaps](swaps.md)): they pay and make invoices, and take deposits on
+Bitcoin, for locks of their own notes at the hub. The hub charges for
+payments and locks, and for its contracts.
 
 The hub watches for notes made with its seed outside its ledger. It cannot
 tell one from its own, but it counts: once it retired more notes of a
 denomination than it ever issued to holders, some were forged. It looks
 every 30 seconds. On more such notes than it knows of, it alerts the
-operator and the Lightning gateway pays no more invoices: each is refused
-and its lock refunded, `/v1/info` says it pays none, and payments under way
-and receipts go on. The dashboard's health shows it. Treat the seed as
-stolen: look at the alert and the ledger, then `licash-hub resume-payouts`
-resumes, beside the running hub (within 30 seconds) or without it, taking
-what the ledger shows then as known. This tells late, only once forged
-notes outnumber all the outstanding notes of a denomination, and stops
-only what leaves over Lightning from the hub, not swaps, contract claims
-or the invoices a `licash-swaps --lnd` pays from the same node: it limits
-a theft under way, and is no reason to keep the seed less safe. What it
-knows is in `<data>/payouts.json` (`baseline`, and `paused` with the
-reason). A hub upgraded to this version has none: it takes what its ledger
-shows at its first look as known, alerts if that is any, and pauses
-nothing. A file that does not read pauses, and is left as it is.
+operator, and the watch stays paused, telling of nothing more, until
+resumed. The hub pays nothing out itself (an earlier release paused its
+Lightning gateway with it): warn the providers paying its notes out. The
+dashboard's health shows it. Treat the seed as stolen: look at the alert
+and the ledger, then `licash-hub resume-payouts` resumes the watch,
+beside the running hub (within 30 seconds) or without it, taking what the
+ledger shows then as known. This tells late, only once forged notes
+outnumber all the outstanding notes of a denomination, and is no reason to
+keep the seed less safe. What it knows is in `<data>/payouts.json`
+(`baseline`, and `paused` with the reason). A hub that never ran the watch
+has none: it takes what its ledger shows at its first look as known,
+alerts if that is any, and pauses nothing. A file that does not read
+pauses, and is left as it is.
 
 Only a hub that knows of no such note is told of forged ones alone. A
 `hub.sqlite` restored from an older copy shows the same as a theft: the
@@ -300,21 +280,6 @@ remembers (and it takes again those spent since). And once some are known,
 their count rises as holders spend the hub's own notes, so a resumed hub
 pauses again, and is resumed again, until the most there ever were are
 known. From then on it tells only of more of them.
-
-The gateway calls eight of LND's RPCs: bake it a macaroon for those
-rather than give it `admin.macaroon`.
-
-```sh
-lncli bakemacaroon --save_to=hub.macaroon \
-  uri:/lnrpc.Lightning/GetInfo uri:/lnrpc.Lightning/ChannelBalance \
-  uri:/routerrpc.Router/SendPaymentV2 uri:/routerrpc.Router/TrackPaymentV2 \
-  uri:/invoicesrpc.Invoices/AddHoldInvoice uri:/lnrpc.Lightning/LookupInvoice \
-  uri:/invoicesrpc.Invoices/SettleInvoice uri:/invoicesrpc.Invoices/CancelInvoice
-```
-
-It still pays invoices, so whoever reads it empties the channels' outbound
-side, but it sends no coin on Bitcoin, opens or closes no channel, makes
-no address and bakes no other macaroon.
 
 With `--tweaks` (and `--chain`), the hub indexes the silent payment
 (BIP352) tweaks of the chain's blocks from `--tweaks-from` (by default, the
@@ -396,14 +361,12 @@ deposits before are ordinary ones, claimed under the keys they were.
 A claim left unmined is made again at a
 higher fee rate as the timeout nears (twice the estimate once fewer than 12 blocks
 are left, doubling every 3 blocks, all of the coin but dust at most), and
-whichever of them is mined is the hub's. Alerts say when a claim is late or lost. With
-the gateways and swap issuer sharing one turn, one payment backs each
-lock of the hub's notes. New gateway requests refuse hashes already
-reserved by another service, and a payment made under a hash
-the other already locked for returns to its payer (an alert says so).
-Reservations remain visible while a service is disabled. A swap's hash
-reservation is not by itself proof that it owns a gateway's existing lock:
-the recorded lock id decides ownership during recovery.
+whichever of them is mined is the hub's. Alerts say when a claim is late or lost. One
+payment backs each lock of the hub's notes: new deposits refuse hashes an
+earlier release's Lightning receipts or swaps reserved, and a payment made
+under a hash already locked for returns to its payer (an alert says so).
+A swap's hash reservation is not by itself proof that it owns a deposit's
+existing lock: the recorded lock id decides ownership during recovery.
 
 On the clear web the hub (like the bridge, a swap provider and the
 observatory) speaks HTTP/1.1 to at most 1,024 connections at once,
@@ -413,7 +376,7 @@ between requests. Its onion service takes at most 128 streams, each given
 120 seconds for its headers.
 
 The hub serves at most 256 requests at once (`/health` aside); any past
-them, of its own API or its swaps', receive 503 at once rather than wait
+them receive 503 at once rather than wait
 in a queue. A request whose body is still arriving 60 seconds after its
 head is refused, so stalled uploads keep no place for longer. A swap
 provider serving on its own bounds its requests alike. Contract requests
@@ -935,8 +898,7 @@ enrolls no contract for a copy of an older epoch, so every other copy
 opens none. Each copy that opens contracts asks its witnesses which leads
 at start and every minute; superseded, it alerts and stops, and started
 again it responds only, as `--respond-only` runs it: no API but
-`/health`, no opening, fold, Lightning, deposit, swap, announcement or
-onion service, its responder, fee bumping and alerts on. It keeps what
+`/health`, no opening, fold, deposit, announcement or onion service, its responder, fee bumping and alerts on. It keeps what
 it saw in `<data>/contracts-superseded`, so that started while a witness
 is unreachable it responds only still.
 
@@ -958,7 +920,7 @@ epoch rather than taking the next. Two copies taking over at once may
 both fail; the first witness by pin decides which leads. A witness
 unreachable leaves leadership unknown: the hub runs as it last knew
 itself (superseded or not), signing no contract answer until it is
-reached, though a hub that runs whole still serves wallets and Lightning.
+reached, though a hub that runs whole still serves wallets.
 Until a first takeover no copy is fenced, as before epochs.
 
 A hub of an earlier release ignores epochs: once another copy took over,
@@ -1004,8 +966,9 @@ What it holds:
 - A Bitcoin Core wallet of its own, funded with the fee coins its answers
   need.
 
-Never give it `seed`, `contracts-instance`, `swaps/`, nor a login to the
-hub's Core wallet or LND.
+Never give it `seed`, `contracts-instance`, `swaps/` (if an earlier
+release left one), nor a login to the hub's Core wallet (or an LND an
+earlier release used).
 
 It serves no wallet, so a holder who exits while it alone answers is
 shown neither what it responded on nor its proof: the holder contests each
@@ -1220,69 +1183,38 @@ that has been tried. The execution, the joins and the Groth16 wrap stay on
 the hub, a minute or two of each proof on a GPU that no machine shortens.
 
 The hub stops, with an error, when one of its loops stops: the chain's
-watch, the tweaks' index, the gateways, the contracts' responder and
-sweeper, the swaps. Run it under a supervisor that starts it again (as
-Docker's `restart: unless-stopped`).
+watch, the tweaks' index, the deposits' gateway, the watch over payments
+out, the contracts' responder and sweeper. Run it under a supervisor that
+starts it again (as Docker's `restart: unless-stopped`).
 
-With `--swaps` (and `--chain`), the hub provides the swaps into it from the
-hubs of `--swaps-from URL=CAP`: a wallet locks its notes at such a hub to
-the hub's provider, and the hub locks notes it issues to the wallet under
-the same hash. The wallet reveals the preimage to the hub itself, so the
-provider always learns it in time to claim the wallet's lock. The hub's
-lock expires `--swaps-confirm` (36 by default), `--swaps-margin` and two
-blocks before the wallet's. `--swaps-fee-base`, `--swaps-fee-ppm`,
-`--swaps-min` and `--swaps-max` set the terms. CAP bounds the notes the
-provider holds at that hub, or is owed by the swaps under way: past it,
-swaps from that hub are declined. A cap holds for every URL the provider's
-wallet knows the hub by, such as the URL given and the `https` one it
-moves to, and counts the swaps recorded at each of them. By default it
-also takes in only what recovery contracts at that hub protect, keeping
-them as a standalone provider does (see `docs/swaps.md`): the first
-at each hub opened by the operator with `licash-wallet --wallet
-<data>/swaps/wallet.sqlite open-contract URL --chain URL`, then replaced
-before they end and forced closed at their safe deadline if needed, the
-provider's wallet looking for its coins on the hub's chain. The
-`--swaps-contract-successor-days`, `--swaps-contract-exit-days`,
-`--swaps-contract-max-price` and `--swaps-drain-via` flags match the
-provider's. The hub's own notes, which it issues, need no contract. With
-`--swaps-from`, a hub on a network where no contract opens (only regtest,
-signet and Mutinynet do for now) refuses to start, unless `--swaps-no-contracts`
-runs it unprotected, which is reckless; a hub upgraded to this version
-takes nothing more in from a hub until a contract there is live. Back up
-the contracts (kept in `<data>/swaps/wallet.sqlite`, their instances in
-`<data>/swaps/contracts`) with the provider's wallet. The
-hub locks no hash its Lightning receipts or deposits hold. The provider's
-wallet and swaps are kept in `<data>/swaps/wallet.sqlite`, one file made on
-the first start: back it up with `hub.sqlite`, since an older copy loses
-the claims backing notes the hub locked. The hub refuses to start without `--swaps` while swaps are under
-way. Each round, the provider's wallet also reshapes the notes it was paid,
-as a standalone provider's does (see `docs/swaps.md`). To move the provider's notes out, stop the hub and run `licash-wallet
---wallet <data>/swaps/wallet.sqlite`. The provider's wallet reaches hubs
-directly, so it cannot swap from a hub at an onion service only, unless
-with `--swaps-tor`: then through a Tor client of the hub's own, that of
-`--onion` (its state in `<data>/tor`), to onion services and to the clear
-web alike.
+The hub provides no swaps: a swap provider (`licash-swaps`, see
+[swaps](swaps.md)) run beside it, or by anyone, swaps between hubs, pays
+and makes Lightning invoices and takes deposits on Bitcoin, with notes of
+its own at each hub, which it gets by opening contracts there funded by
+its own coins. It pays the hub's fees like any wallet. An earlier
+release's `--swaps` kept its provider's wallet in
+`<data>/swaps/wallet.sqlite`: once its swaps are done (above), back it up
+and run `licash-swaps` on it to take its notes on.
 
 With `--onion`, the hub also serves its API as an onion service of a Tor
 client of its own (Arti), and announces its URL, reaching the relays
 through Tor too. The service's key is in `<data>/tor/state`: back it up to
 keep the address. Under load, the service asks its clients for a proof of
 work (Tor's onion service defense), unless `--onion-pow false`: each new
-circuit to it then costs work, and the hub caps the deposits and receipts
-asked and unpaid over one circuit (see below). Licash's own clients solve
+circuit to it then costs work, and the hub caps the deposits asked and
+unpaid over one circuit (see below). Licash's own clients solve
 it, as do Tor clients from 0.4.8 on.
 
-From one source, the hub takes at most 8 deposits asked and not paid, and
-apart 8 Lightning receipts: past them it refuses as unavailable, until one
-is paid or its window ends. A source is an onion service's circuit (every
+From one source, the hub takes at most 8 deposits asked and not paid (those
+returning a contract's reserve aside): past them it refuses as
+unavailable, until one is paid or its window ends. A source is an onion service's circuit (every
 stream of one rendezvous shares it, another circuit is another source), or
 else a client's IP address, whatever its ports: an IPv4 address over IPv6
 is that IPv4 address, an IPv6 address is taken exactly. Clients behind one
 NAT share a source. Asking for many thus costs many circuits (over Tor,
 many proofs of work while the service is under load) or many addresses.
-Since addresses are cheap to a botnet or an IPv6 block, the global caps
-(`--deposit-max-open`, and the gateway's for receipts) remain the bound on
-everything asked and not paid.
+Since addresses are cheap to a botnet or an IPv6 block, the global cap
+(`--deposit-max-open`) remains the bound on everything asked and not paid.
 
 Behind a reverse proxy, the hub's TCP peer is the proxy: every client
 would share its one address. Name the proxy with `--trusted-proxy`
@@ -1292,7 +1224,7 @@ comma separated. From a trusted peer only, the hub reads
 first that is not is the client (the leftmost if all are). It ignores the
 header from any other peer. A trusted proxy's header that does not parse
 (an entry that is not a bare IP address, such as one with a port, or more
-than 16 entries) has deposits and receipts refused as invalid, so a
+than 16 entries) has deposits refused as invalid, so a
 misconfigured proxy shows at once. For Traefik:
 
 - set the entry point's `forwardedHeaders.trustedIPs` to nothing (the
@@ -1309,16 +1241,17 @@ request rate at the proxy (Traefik's `rateLimit` middleware, with
 `sourceCriterion.ipStrategy`), keyed by its address, at well above what a
 wallet asks (a few requests a second, in bursts of some tens).
 
-Deposits and receipts recorded by an older release keep the source it
-stored, its peer's address and port: they count against that address
-until paid or ended.
+Deposits recorded by an older release keep the source it stored, its
+peer's address and port: they count against that address until paid or
+ended.
 
 Notification targets are Apprise URLs (`gotify[s]://`, `tgram://`,
 `ntfy[s]://`, `json[s]://`, `apprise[s]://`); `test-notify` checks them.
 Each notification lists the event's figures, ids cut to 12 characters as
 on the dashboard: a spend released or a lock paid or refunded shows the
 hub's income, its fee, and its rate as a percentage of the amount. Costs,
-such as Lightning routing fees, go unrecorded, so no profit is shown.
+such as the miners' fees of its contracts, go unrecorded, so no profit is
+shown.
 `--notify-kinds` picks the kinds of event: by default all but locks
 admitted (`locked`), still under way, whose fee is the hub's only if they
 pay. The high-priority ones need
@@ -1387,6 +1320,19 @@ Before starting it:
   the hub had already signed finishes the old way. Once a hub has stored an
   opening of version 3, do not downgrade it: an earlier release cannot read
   that opening.
+- The hub converts nothing: no Lightning gateway, no swaps, and no new
+  plain deposit, those returning no contract's reserve (refused with
+  `forward`, naming swap providers). Remove `--lnd`, `--ln-*` and
+  `--swaps*` from its command, which it no longer knows. Finish an earlier
+  release's Lightning receipts and payments and swaps under it first (it
+  refuses to start while they have obligations; `sha-4dc35057` is the last
+  release with the Lightning gateway). Plain deposits already asked are
+  answered and followed to the end, with `--deposit-sweep-address` kept on.
+  Wallets of earlier releases ask such hubs in vain, their deposits
+  canceled unpaid; updated ones deposit, and pay and receive over
+  Lightning, through swap providers. Run a provider (`licash-swaps`, with
+  `--deposits` and `--lnd --receive`) at hubs whose users had these from
+  the hub, restocked by contracts it funds.
 
 ### From a ledger of schema 3
 
@@ -1421,8 +1367,7 @@ schema 1 to 3), let every contract close, then make a hub anew with `init`
 in a new `<data>` and a new seed. The provider's swaps wallet,
 `<data>/swaps/wallet.sqlite`, is a wallet of the same release (wallet
 schema 4): spend or pay out its notes at the other hubs with the old
-binary, then move it aside with the rest of `<data>`; the new hub's
-`--swaps` makes a new one.
+binary, then move it aside with the rest of `<data>`.
 
 ### From a ledger of schema 1
 
