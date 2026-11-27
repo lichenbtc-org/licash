@@ -1,5 +1,5 @@
 //! A wallet finds the NWC bridge announced on the stack's relay, keeps an
-//! account there topped up from another hub, and is paid at its Lightning
+//! account there topped up in notes at its hub, and is paid at its Lightning
 //! Address there from outside, on the stack of `apps/e2e/run.sh`, which
 //! runs these.
 
@@ -40,17 +40,17 @@ async fn a_wallet_finds_an_open_bridge_tops_it_up_and_is_paid_at_its_address() -
     assert!(announced.named_by(info["nostr"].as_str()), "{announced:?}");
     assert_eq!(info["open"], true, "{info}");
 
-    // Its notes at hub1, the bridge's at hub2: topped up over Lightning.
+    // Topped up in notes at the bridge's hub, hub2: credited whole.
     let wallet = eco.wallet("bridged")?;
-    let hub = eco.hub(1);
+    let hub = eco.hub(2);
     wallet.add_hub(hub).await?;
     eco.pay_in(&wallet, hub, 5_000).await?;
     let (_, account) = wallet.add_bridge(bridge, None).await?;
     assert_eq!(account.balance, 0);
-    wallet.top_up_bridge(bridge, hub, 1_000, Some(50)).await?;
+    let topped = wallet.top_up_bridge(bridge, 1_000, Some(50)).await?;
+    assert_eq!(topped.credited, Some(1_000_000));
     let topped = credited(&wallet, bridge, 0).await?;
-    // Less hub2's fee on receiving.
-    assert!((900_000..=1_000_000).contains(&topped), "{topped} msat");
+    assert_eq!(topped, 1_000_000);
 
     // Paid at its Lightning Address, from outside.
     let account = wallet.bridge_username(bridge, Some("alice")).await?;

@@ -718,7 +718,7 @@ async fn bridged(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     // Topped up from hub 1 over Lightning, less hub 2's fee on receiving.
     phone.fill_id("bridge-top-up-amount", "2000").await?;
     phone.tap_id("bridge-top-up").await?;
-    phone.wait("Topping up", 60).await?;
+    phone.wait("Topped up", 60).await?;
     let topped = bridge_balance(phone, 0).await?;
     ensure!(
         (1_900..=2_000).contains(&topped),
