@@ -5269,6 +5269,134 @@ async fn a_hub_proves_its_response_by_her_two_signatures_on_e_after_a_reorg_mine
     Ok(())
 }
 
+/// [`a_hub_proves_its_response_by_her_two_signatures_on_e_after_a_reorg_mines_her_other_request`]
+/// of her other request's `E` another claim of hers, as valid (her notes in
+/// the other order), and published: mined in place of hers with her other
+/// request, it is owed nothing by her two signatures on `E` alone.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs bitcoind and a release build"]
+async fn a_hub_proves_its_response_by_her_two_signatures_on_e_after_a_reorg_mines_her_other_valid_claim(
+) -> Result<()> {
+    use licash_contracts::holder::recovery::{self, Stage};
+    use serde_json::{json, Value};
+
+    let _equivocating = Equivocating::of(recovery::Other::Claim);
+    let s = stale_claim([37; 32]).await?;
+    s.openings.refuse_evidence();
+    // A coin for her contest's fee.
+    let to = s.wallet.fallback_address()?.script_pubkey();
+    s.rt.fund(&to, Amount::from_sat(100_000))?;
+    s.rt.mine(1)?;
+    scan(&s.wallet, &s.chain).await?;
+    let told = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let alerts = told.clone();
+    s.openings.alert_with(Arc::new(move |message: &str| {
+        alerts.lock().unwrap().push(message.to_owned())
+    }));
+    let count = |of: &str| {
+        let told = told.lock().unwrap();
+        told.iter().filter(|m| m.contains(of)).count()
+    };
+    let db = s.mine.join("wallet.sqlite");
+    let advance = || recovery::advance(&s.wallet, &s.chain, &db, s.rate);
+    let node = rpc_of(&s.rt, None)?;
+    let mut request = None;
+    let mut response = None;
+    for _ in 0..200 {
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        let r = advance().await?[0].clone();
+        ensure!(!matches!(r.stage, Stage::Lost | Stage::Done), "{r:?}");
+        if let Some(txid) = r.request.filter(|_| r.response.is_none()) {
+            let main = bitcoin::OutPoint { txid, vout: 0 };
+            if let Some(x) = spending_in_mempool(&s.rt, main)? {
+                if s.rt.confirmations(&txid)?.is_some() {
+                    let _: Value = node
+                        .rpc(
+                            "prioritisetransaction",
+                            json!([x.compute_txid().to_string(), 0, -100_000_000]),
+                        )
+                        .await?;
+                    response = Some(x.compute_txid());
+                    request = Some(txid);
+                    break;
+                }
+            }
+        }
+        s.rt.mine(1)?;
+    }
+    let txid = request.context("the hub never responded")?;
+    let x = response.context("no response")?;
+    let other = recovery::take_equivocation().context("no other request")?;
+    ensure!(other.compute_txid() == txid, "the same transaction");
+    ensure!(other.compute_wtxid() != s.rt.get_tx(&txid)?.compute_wtxid());
+    let published = recovery::take_other_publication();
+    ensure!(
+        published.len() == 2,
+        "her other claim unpublished: {published:?}"
+    );
+
+    let at = s.rt.confirmations(&txid)?.context("unconfirmed")?;
+    let hash: Value = node.rpc("getblockhash", json!([at])).await?;
+    let _: Option<Value> = node.rpc_optional("invalidateblock", json!([hash])).await?;
+    let mined: Vec<_> = std::iter::once(other.clone())
+        .chain(published.clone())
+        .collect();
+    s.rt.mine_with(&mined)?;
+    ensure!(
+        s.rt.get_tx(&txid)?.compute_wtxid() == other.compute_wtxid(),
+        "her other request mined"
+    );
+    let p = published.last().unwrap().compute_txid();
+    ensure!(s.rt.confirmations(&p)?.is_some(), "her other claim unmined");
+    // Out of the mempool by the reorg, its fee as good as none: now as
+    // any, for the hub to post again.
+    ensure!(!s.rt.mempool()?.contains(&x));
+    let _: Value = node
+        .rpc(
+            "prioritisetransaction",
+            json!([x.to_string(), 0, 100_000_000]),
+        )
+        .await?;
+
+    // The hub posts its response again, told once; then miners take it.
+    for _ in 0..20 {
+        let round = s.openings.answer_requests().await?;
+        ensure!(round.failed == 0, "{round:?}");
+        if count("another E") > 0 {
+            break;
+        }
+        s.rt.mine(1)?;
+    }
+    ensure!(count("another E") == 1, "{:?}", told.lock().unwrap());
+    ensure!(s.rt.mempool()?.contains(&x), "not posted again");
+
+    let done = played(&s, |_| true).await?;
+    ensure!(
+        done.request == Some(txid) && done.response == Some(x),
+        "{done:?}"
+    );
+    ensure!(done.corrected == Some(98_304), "{done:?}");
+    // Contested and proven, and paid what the response says.
+    ensure!(
+        done.assertion.is_some() && done.challenge.is_none(),
+        "{done:?}"
+    );
+    ensure!(done.payout.is_some() && done.timeout.is_none(), "{done:?}");
+    let received = done.received.context("nothing received")?;
+    ensure!(
+        received < 131_071,
+        "{received} of a claim of 131071: {done:?}"
+    );
+    let told = told.lock().unwrap();
+    ensure!(
+        told.iter()
+            .all(|m| !m.contains("another b or E") && !m.contains("does not hold")),
+        "{told:?}"
+    );
+    Ok(())
+}
+
 /// Her stale claim, published, answered and contested: then a reorg takes
 /// her publication out of the chain, and mines again all that followed it
 /// (her request with it, if in one block), as anyone may, all public, but

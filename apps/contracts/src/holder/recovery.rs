@@ -512,9 +512,33 @@ pub fn doubt_assertions(doubt: bool) {
     DOUBT.store(doubt, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Her equivocation ([`equivocate`]): what she signs besides, and what of
+/// it she signed.
 #[cfg(feature = "faults")]
-static EQUIVOCATE: std::sync::Mutex<(Option<Other>, Option<Transaction>)> =
-    std::sync::Mutex::new((None, None));
+struct Equivocation {
+    other: Option<Other>,
+    /// The other claim's filing ([`Other::Claim`]), made with hers.
+    filing: Option<Filing>,
+    /// The other request's `b` and `E`, once signed.
+    words: Option<(u32, [u8; 32])>,
+    request: Option<Transaction>,
+    /// Its publication ([`Other::Claim`]): her commitment, then it.
+    published: Vec<Transaction>,
+}
+
+#[cfg(feature = "faults")]
+static EQUIVOCATE: std::sync::Mutex<Equivocation> = std::sync::Mutex::new(Equivocation {
+    other: None,
+    filing: None,
+    words: None,
+    request: None,
+    published: Vec::new(),
+});
+
+#[cfg(feature = "faults")]
+fn equivocation() -> std::sync::MutexGuard<'static, Equivocation> {
+    EQUIVOCATE.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// What her other request signs ([`equivocate`]).
 #[cfg(feature = "faults")]
@@ -525,19 +549,25 @@ pub enum Other {
     /// The same `b`, and another `E` (her claim's digest, its last bit
     /// flipped).
     E,
+    /// The same `b`, and the `E` of another claim of hers, as valid: her
+    /// notes in the other order. Its publication signed too
+    /// ([`take_other_publication`]).
+    Claim,
 }
 
 #[cfg(feature = "faults")]
 impl Other {
-    /// The `b` and `E` it signs beside `request`.
-    fn of(self, request: &Request) -> (u32, [u8; 32]) {
+    /// The `b` and `E` it signs beside `request`, and the other claim's
+    /// `filing` ([`Other::Claim`]).
+    fn of(self, request: &Request, filing: Option<&Filing>) -> Option<(u32, [u8; 32])> {
         match self {
-            Other::B(b) => (b, request.claim_digest),
+            Other::B(b) => Some((b, request.claim_digest)),
             Other::E => {
                 let mut e = request.claim_digest;
                 e[31] ^= 1;
-                (request.amount, e)
+                Some((request.amount, e))
             }
+            Other::Claim => Some((request.amount, *filing?.publication().claim().digest())),
         }
     }
 }
@@ -549,17 +579,27 @@ impl Other {
 /// `equiv_b` and of its statement's rule on two claims. None, none.
 #[cfg(feature = "faults")]
 pub fn equivocate(other: Option<Other>) {
-    *EQUIVOCATE.lock().unwrap_or_else(|e| e.into_inner()) = (other, None);
+    let mut equivocation = equivocation();
+    *equivocation = Equivocation {
+        other,
+        filing: None,
+        words: None,
+        request: None,
+        published: Vec::new(),
+    };
 }
 
 /// The other request last signed ([`equivocate`]), if any.
 #[cfg(feature = "faults")]
 pub fn take_equivocation() -> Option<Transaction> {
-    EQUIVOCATE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .1
-        .take()
+    equivocation().request.take()
+}
+
+/// The other request's publication, signed ([`Other::Claim`]): her
+/// commitment, then it. None of another.
+#[cfg(feature = "faults")]
+pub fn take_other_publication() -> Vec<Transaction> {
+    std::mem::take(&mut equivocation().published)
 }
 
 /// Whether the statement of the contract of `base` would owe the claim
@@ -1375,6 +1415,21 @@ impl<'a, T: Transport, C: Chain> Run<'a, T, C> {
         };
         let filed = filing.to_bytes(Format::of(&self.o.base));
         let owed = owed_whole(self.chain, &self.o.base, &request, &filed, tip).await?;
+        // Equivocating of another claim, its filing, as sound.
+        #[cfg(feature = "faults")]
+        if owed.is_ok() && matches!(equivocation().other, Some(Other::Claim)) {
+            let reversed: Vec<_> = notes.iter().rev().cloned().collect();
+            let other = self.filing(&reversed, funded, locks, amount)?;
+            let request = Request {
+                amount,
+                claim_digest: *other.publication().claim().digest(),
+            };
+            ensure!(request.claim_digest != *filing.publication().claim().digest());
+            let filed = other.to_bytes(Format::of(&self.o.base));
+            (owed_whole(self.chain, &self.o.base, &request, &filed, tip).await?)
+                .map_err(|why| anyhow!("her other claim: {why}"))?;
+            equivocation().filing = Some(other);
+        }
         Ok(owed.map(|()| filing))
     }
 
@@ -1534,9 +1589,7 @@ impl<'a, T: Transport, C: Chain> Run<'a, T, C> {
         let mined = graph::requested(&self.o.base, tx)?;
         // Equivocating, she takes either request for hers.
         #[cfg(feature = "faults")]
-        if (EQUIVOCATE.lock().unwrap_or_else(|e| e.into_inner()).0)
-            .is_some_and(|other| mined == other.of(&r))
-        {
+        if equivocation().words == Some(mined) {
             return Ok(true);
         }
         Ok(mined == (r.amount, r.claim_digest))
@@ -1602,15 +1655,9 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
         let r = self
             .o
             .request(&self.keys, request.amount, &request.claim_digest)?;
-        #[cfg(feature = "faults")]
-        {
-            let mut equivocate = EQUIVOCATE.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(other) = equivocate.0 {
-                let (b, e) = other.of(&request);
-                equivocate.1 = Some(self.o.request(&self.keys, b, &e)?);
-            }
-        }
         let filing = self.filing_of(state)?;
+        #[cfg(feature = "faults")]
+        self.equivocate(&request, state)?;
         if let Err(e) = self.build_p(&r, &filing, None, state, false) {
             // Past what she allowed, or failing otherwise: she is told.
             if e.downcast_ref::<Short>().is_none() {
@@ -1632,6 +1679,35 @@ impl<T: Transport, C: Chain> Run<'_, T, C> {
             self.build_p(&r, &filing, None, state, true)?;
         }
         Ok(Next::To(Stage::Irrevocable))
+    }
+    /// Her other request signed ([`equivocate`]), and of another claim
+    /// its publication: made on a copy of `state`, none of it kept there.
+    #[cfg(feature = "faults")]
+    fn equivocate(&self, request: &Request, state: &State) -> Result<()> {
+        let (other, filing) = {
+            let e = equivocation();
+            (e.other, e.filing.clone())
+        };
+        let Some(other) = other else { return Ok(()) };
+        let (b, e) = (other.of(request, filing.as_ref())).context("her other claim unmade")?;
+        let r = self.o.request(&self.keys, b, &e)?;
+        let mut published = Vec::new();
+        if let Some(filing) = &filing {
+            let mut copy = state.clone();
+            copy.c = None;
+            let (p, prevouts, c) = self.build_p(&r, filing, None, &copy, false)?;
+            copy.p = Some(p);
+            copy.prevouts = prevouts;
+            copy.c = c.clone();
+            ensure!(matches!(self.sign(&mut copy)?, Next::To(Stage::Published)));
+            published.extend(c);
+            published.extend(copy.p);
+        }
+        let mut equivocation = equivocation();
+        equivocation.words = Some((b, e));
+        equivocation.request = Some(r);
+        equivocation.published = published;
+        Ok(())
     }
     fn request(&self, state: &mut State) -> Result<Next> {
         let request = self.requested(state)?;
