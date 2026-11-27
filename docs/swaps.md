@@ -214,6 +214,35 @@ A provider with receipts under way refuses to start without
 the provider's file when first taken: an existing provider's file is
 otherwise as it was.
 
+With `--deposits` (and `--chain`), it also takes deposits on Bitcoin for
+wallets, paid on in notes: hubs take new deposits only to return a
+contract's reserve, so coins become notes through providers. Its info names
+the terms under `deposits`. A wallet asks (`POST /v1/swaps/deposit`) for a
+deposit locking `amount` to its address at a hub the provider swaps at,
+under a hash of its own and its refund key; the provider answers the
+address of an HTLC claimed with its own key and the wallet's preimage, or
+refunded to the wallet after a timeout, and the exact amount to pay: the
+amount, its fee (`--deposit-fee-base`, 0 sat, and `--deposit-fee-ppm`,
+5000) and `--deposit-miner` (500 sat) for the miners of its claim, from
+`--deposit-min` (10,000 sat) to `--deposit-max` (1,000,000 sat), and never
+more than it holds at that hub then. The coin must confirm within
+`--deposit-window` blocks (12) of the request. The provider does not watch
+the chain for it: the wallet finds its own payment and tells the provider
+(`POST /v1/swaps/deposit/HASH`) once it is `--deposit-depth` blocks deep
+(3); the provider checks that block, then locks its notes to the wallet
+under the wallet's hash. The wallet claims them with the preimage, which
+the hub shows the provider, who claims the coin within `--deposit-sweep`
+blocks (24). The timeout leaves room for the hub's response window, the
+wallet's claim, the provider's lead and its sweep; deposits at hubs that
+would need more than `--deposit-timeout` blocks (1,008) are declined. A
+coin paid wrong, late or never locked is the wallet's to refund after the
+timeout. At most `--deposit-max-open` deposits are under way at once (100),
+and a provider with deposits under way refuses to start without
+`--deposits`. Deposits are kept in tables of their own, made in the
+provider's file when first taken. A provider restocks at a hub by opening a
+contract there funded by its own coins (`licash-wallet open-contract`),
+whose part comes back to it as notes.
+
 A hub could withhold the notes it holds of the provider's: a recovery
 contract at the hub (`licash-wallet open-contract`) recovers them, up to
 its cap, from its collateral. By default `run` takes in at each hub only
