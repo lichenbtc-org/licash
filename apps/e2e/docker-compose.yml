@@ -149,8 +149,8 @@ services:
     <<: *hub
     # It opens recovery contracts too, F funded by the miner's wallet,
     # which the harness makes once the stack is up: of terms its holders
-    # choose too, caps up to 2^21 - 1 sat over up to 1,000 blocks, besides
-    # its fixed ones, its one-time answers kept in its database alone (no
+    # choose, caps up to 2^21 - 1 sat over up to 1,000 blocks, lending up to
+    # 2^21 sat of each, its one-time answers kept in its database alone (no
     # witnesses, as regtest allows). Its locks may last 240 blocks, longer than hub2's
     # 144: a provider other than hub2 swaps from here to hub2 only if the
     # lock it takes here outlasts its own at hub2 by hub2's window and the
@@ -161,6 +161,7 @@ services:
         --lock-window 240
         --chain http://licash:licash@bitcoind:18443/wallet/miner --contracts
         --contracts-witnesses none --contracts-max-cap 2097151 --contracts-max-blocks 1000
+        --contracts-lend 2097152 --contracts-lend-total 100000000
         --announce-url http://127.0.0.1:${LICASH_E2E_HUB1:-38338} --announce-name hub1
         --name hub1 --notify gotify://gotify/$$(cat /notify/token)
         --deposit-sweep-address bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080
