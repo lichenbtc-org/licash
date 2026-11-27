@@ -194,15 +194,10 @@ impl<T: Transport> Wallet<T> {
         &self,
         chain: &impl Blocks,
     ) -> Result<(Vec<Deposit>, Vec<(String, String)>), Error> {
-        let (mut followed, mut pending) = (Vec::new(), Vec::new());
-        let tip = chain.height().await.map_err(Error::Chain)?;
-        self.saw_tip(tip);
+        let (mut followed, mut pending) = (Vec::new(), self.find_deposit_payments(chain).await?);
         for hash in self.open_deposits()? {
-            let Some(via) = self.store.read(|c| via(c, &hash))? else {
+            if self.store.read(|c| via(c, &hash))?.is_none() {
                 continue;
-            };
-            if let Err(e) = self.find_deposit_payment(&hash, &via, chain, tip).await {
-                pending.push((hex::encode(hash), e.to_string()));
             }
             match self.advance_deposit(&hash).await {
                 Ok(deposit) => followed.push(deposit),
@@ -214,6 +209,28 @@ impl<T: Transport> Wallet<T> {
             }
         }
         Ok((followed, pending))
+    }
+
+    /// Look in `chain`, the application's view of Bitcoin, for the payments
+    /// of the deposits asked of a provider and under way, recorded as
+    /// found, for [`Wallet::resume`] to tell their provider of: why those
+    /// whose payment could not be looked for wait.
+    pub async fn find_deposit_payments(
+        &self,
+        chain: &impl Blocks,
+    ) -> Result<Vec<(String, String)>, Error> {
+        let mut pending = Vec::new();
+        let tip = chain.height().await.map_err(Error::Chain)?;
+        self.saw_tip(tip);
+        for hash in self.open_deposits()? {
+            let Some(via) = self.store.read(|c| via(c, &hash))? else {
+                continue;
+            };
+            if let Err(e) = self.find_deposit_payment(&hash, &via, chain, tip).await {
+                pending.push((hex::encode(hash), e.to_string()));
+            }
+        }
+        Ok(pending)
     }
 
     /// Look in `chain`, whose tip is `tip`, for the payment of the deposit
