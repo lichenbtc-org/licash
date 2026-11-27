@@ -163,5 +163,7 @@ Should the hub carry on after all, the wallet forgets them with
 `licash-wallet bridge discard SOURCE` (refused while a recovery claims
 them), and the operator unfreezes the bridge with `licash-bridge unfreeze
 --yes`. A note claimed by both is lost to both: unfreeze only once the
-wallet discarded the import. The signed export is refused by open bridges:
-their notes are every account's, so only their operator exports them.
+wallet discarded the import. The signed export is refused by open bridges,
+and by any bridge holding more than one account, such as one run with
+`--open` before: their notes are every account's, so only their operator
+exports them. It is refused before anything is frozen.

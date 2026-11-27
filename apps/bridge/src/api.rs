@@ -285,12 +285,12 @@ async fn export<T: Transport>(
     let (admitted, bridge::Empty {}) = s.open(bridge::EXPORT, body)?;
     let key = admitted.key;
     // Its notes are every account's: only its owner's, of a bridge for its
-    // owner alone. An open bridge's operator exports them on its command
-    // line.
+    // owner alone, its one account. An open bridge's operator, or that of
+    // one open before, exports them on its command line.
     if s.bridge.config().open {
         return Err(Error::Restricted("an open bridge exports to its operator only".into()).into());
     }
-    s.bridge.account(&key)?;
+    s.bridge.sole_account(&key)?;
     json(s.bridge.export(&key).await)
 }
 

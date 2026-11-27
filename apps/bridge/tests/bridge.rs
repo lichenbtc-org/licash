@@ -1149,6 +1149,44 @@ async fn an_open_bridge_exports_to_its_operator_only() {
     );
 }
 
+/// An open bridge run again for its owner alone keeps the accounts anyone
+/// registered: none of them exports every account's notes by signing, and
+/// the bridge is not frozen. Its operator still exports them.
+#[tokio::test]
+async fn a_bridge_once_open_exports_to_its_operator_only_run_closed() {
+    let net = Net::new(true).await;
+    let (one, two) = (net.user(9, 50).await, net.user(10, 50).await);
+    one.add_bridge(BRIDGE, None).await.unwrap();
+    two.add_bridge(BRIDGE, None).await.unwrap();
+    // Run again over the same file, without --open.
+    let path = net.dir.path().join("bridge.sqlite");
+    let wallet = Wallet::open(&path, Local(net.app.clone(), None)).unwrap();
+    let config = Config {
+        open: false,
+        ..net.bridge.config().clone()
+    };
+    let closed = Arc::new(Bridge::open(wallet, config).unwrap());
+    let both = Both {
+        hub: net.app.clone(),
+        bridge: licash_bridge::router(closed.clone()),
+        top_up: Arc::default(),
+    };
+    for user in [&one, &two] {
+        let user = Wallet::open(user.path(), both.clone()).unwrap();
+        let refused = user.export_bridge(BRIDGE).await;
+        assert!(
+            matches!(&refused, Err(licash_wallet::Error::Invalid(m)) if m.contains("operator")),
+            "{refused:?}"
+        );
+    }
+    assert!(!closed.status().unwrap().frozen);
+    let key = one.bridge_key(&closed.info().unwrap()).unwrap();
+    let mut to = [0u8; 32];
+    hex::decode_to_slice(&key, &mut to).unwrap();
+    closed.export(&to).await.unwrap();
+    assert!(closed.status().unwrap().frozen);
+}
+
 #[tokio::test]
 async fn an_open_bridge_registers_so_many_accounts_an_hour_and_in_all() {
     let net = Net::with(Config {

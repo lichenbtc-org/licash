@@ -480,6 +480,23 @@ impl<T: Transport> Bridge<T> {
         }
     }
 
+    /// Refused unless `key` holds the bridge's only account: its notes are
+    /// every account's, so its holder exports them by its signature only
+    /// where it is the one account. Accounts are never forgotten, so a
+    /// bridge that was ever open keeps refusing, whatever it runs as now.
+    pub(crate) fn sole_account(&self, key: &[u8; 32]) -> Result<(), Error> {
+        self.account_id(key)?;
+        let accounts: i64 = self
+            .store
+            .read(|c| Ok(c.query_row("SELECT COUNT(*) FROM bridge_accounts", [], |r| r.get(0))?))?;
+        if accounts != 1 {
+            return Err(Error::Restricted(
+                "a bridge of several accounts exports to its operator only".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn account_id(&self, key: &[u8; 32]) -> Result<i64, Error> {
         self.store
             .read(|c| store::account_of(c, key))?
