@@ -438,7 +438,9 @@ async fn donated(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     let request = eco.get_json(&url).await?;
     ensure!(request["tag"] == "payRequest", "{request}");
     let callback = request["callback"].as_str().context("a callback")?;
-    let donated = 1_000;
+    // Enough that the provider's fee on it covers the hub's on the notes
+    // it spends, 100 ppm of those notes, however large: else it declines.
+    let donated = 10_000;
     let invoice = eco
         .get_json(&format!("{callback}?amount={}", donated * 1_000))
         .await?;
