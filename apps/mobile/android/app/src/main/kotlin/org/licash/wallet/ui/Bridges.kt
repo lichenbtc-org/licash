@@ -227,7 +227,7 @@ private fun BridgePage(engine: Engine, start: Bridge, gone: () -> Unit) {
     error?.let { Problem(it) }
     Group("Move") {
         AmountAction("Top up", "bridge-top-up") { amount ->
-            engine.topUpBridge(url, amount, null).map { "Topping up: ${sat(it.credits)} credited once paid" }
+            engine.topUpBridge(url, amount, null).map { "Topped up: ${sat(it.credits)}" }
                 .also { reload() }
         }
         AmountAction("Withdraw", "bridge-withdraw") { amount ->

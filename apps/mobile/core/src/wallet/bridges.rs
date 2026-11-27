@@ -35,7 +35,7 @@ pub struct Bridge {
 
 /// When to top up a bridge account, each round: once it holds less than
 /// `below`, up to `up_to`, at most `daily` in any day, each top-up's
-/// Lightning fee at most `max_fee` if given.
+/// hub fee at most `max_fee` if given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct TopUpRules {
     pub below: u64,
@@ -118,7 +118,8 @@ pub struct BridgeLine {
 }
 
 /// A top-up made, by hand or by the rules ([`Wallet::top_up_bridges`]):
-/// what the account is credited once paid, or why it was not made.
+/// what the account is credited, once the bridge is told of its payment,
+/// or why it was not made.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct BridgeTopUp {
     pub url: String,
@@ -263,9 +264,9 @@ impl Wallet {
         Ok(account_of(account))
     }
 
-    /// Top the account at the bridge at `url` up by `amount`, out of the
-    /// notes at the hub holding the most, its Lightning fee at most
-    /// `max_fee` if given. The bridge's hub keeps its fee on receiving.
+    /// Top the account at the bridge at `url` up by `amount`, in notes at
+    /// its hub, the hub's fee at most `max_fee` on top if given: credited
+    /// whole.
     pub fn top_up_bridge(
         &self,
         url: String,
@@ -273,43 +274,30 @@ impl Wallet {
         max_fee: Option<u64>,
     ) -> Result<BridgeTopUp, LicashError> {
         let _timed = crate::log::timed("top_up_bridge");
-        let hub = self.richest()?;
-        let topped = self.operation(self.wallet.top_up_bridge(&url, &hub, amount, max_fee))?;
-        Ok(BridgeTopUp {
-            url: topped.url,
-            credits: topped.invoice.credits / 1000,
-            error: None,
-        })
+        let topped = self.operation(self.wallet.top_up_bridge(&url, amount, max_fee))?;
+        Ok(top_up_of(topped))
     }
 
     /// Have the bridge at `url` pay `amount` of the account back to the
-    /// wallet, at the hub holding the most: where its payment stands.
+    /// wallet in notes at its hub, the hub's fee on top out of the
+    /// account: where its payment stands.
     pub fn withdraw_bridge(&self, url: String, amount: u64) -> Result<State, LicashError> {
         let _timed = crate::log::timed("withdraw_bridge");
-        let hub = self.richest()?;
-        let (_, payment) = self.operation(self.wallet.withdraw_bridge(&url, &hub, amount))?;
-        Ok(state_of(payment.state))
+        let paid = self.operation(self.wallet.withdraw_bridge(&url, amount))?;
+        Ok(state_of(paid.state))
     }
 
-    /// Top up each bridge whose rules say so, out of the notes at the hub
-    /// holding the most: none while no hub holds any.
+    /// Top up each bridge whose rules say so, in notes at its hub.
     pub fn top_up_bridges(&self) -> Result<Vec<BridgeTopUp>, LicashError> {
         if !self.wallet.bridges()?.iter().any(|b| b.rules.is_some()) {
             return Ok(Vec::new());
         }
-        let Ok(hub) = self.richest() else {
-            return Ok(Vec::new());
-        };
         let _timed = crate::log::timed("top_up_bridges");
         let _background = licash_wallet::Background::enter();
-        let done = self.runtime.block_on(self.wallet.top_up_bridges(&hub))?;
+        let done = self.runtime.block_on(self.wallet.top_up_bridges())?;
         Ok((done.into_iter())
             .map(|(url, topped)| match topped {
-                Ok(topped) => BridgeTopUp {
-                    url,
-                    credits: topped.invoice.credits / 1000,
-                    error: None,
-                },
+                Ok(topped) => top_up_of(topped),
                 Err(e) => BridgeTopUp {
                     url,
                     credits: 0,
@@ -461,5 +449,13 @@ fn imported_of(imported: licash_wallet::Imported) -> ImportedNotes {
         unknown: count(imported.unknown),
         locks: count(imported.locks),
         locked: imported.locked,
+    }
+}
+
+fn top_up_of(topped: licash_wallet::BridgeTopUp) -> BridgeTopUp {
+    BridgeTopUp {
+        url: topped.url,
+        credits: topped.amount,
+        error: None,
     }
 }
