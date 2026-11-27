@@ -550,9 +550,10 @@ async fn used(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     move_in(eco, phone).await?;
     settle(eco, phone, 1).await?;
     let moved = phone.balance().await?;
-    // Less the provider's fee and the fees of the move on Bitcoin.
+    // Less the provider's fee (5000 ppm and 500 for its claim's miners)
+    // and the miners' of the move on Bitcoin, at 2 sat/vB.
     ensure!(
-        (25_000..29_000).contains(&moved),
+        (28_500..29_400).contains(&moved),
         "{moved} of 30000 moved in"
     );
     // Opened, the move shows what it cost and through whom: the
@@ -590,7 +591,7 @@ async fn used(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     settle(eco, phone, 2).await?;
     let held = phone.balance().await?;
     ensure!(
-        (15_000..19_000).contains(&(held - moved)),
+        (18_500..19_500).contains(&(held - moved)),
         "{} moved in",
         held - moved
     );
@@ -1177,6 +1178,8 @@ async fn cashed_out(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
         "what was cashed out moved back in by itself"
     );
     phone.by_id("kept", 10).await?;
+    // The provider able to take it back in at hub1.
+    eco.stock_at(eco.hub(1), cashed + 1_000).await?;
     // Asked to, once warned: moved in, none left on Bitcoin.
     phone.tap_id("move-in").await?;
     phone.tap_id("move-in-anyway").await?;
@@ -1255,6 +1258,8 @@ async fn contracted(eco: &Eco, phone: &Phone) -> anyhow::Result<()> {
     let code: PaymentCode = phone.bitcoin_code().await?.parse()?;
     let fallback = code.address.context("a fallback address")?;
     let held = phone.balance().await?;
+    // The provider able to take it in at hub1.
+    eco.stock_at(eco.hub(1), 101_000).await?;
     eco.send_to(&fallback.assume_checked().to_string(), 100_000)
         .await?;
     // Worth protecting, its fee and interest well within half of it:
