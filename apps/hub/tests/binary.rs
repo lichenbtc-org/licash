@@ -33,8 +33,6 @@ fn hub(data: &Path, args: &[&str]) -> Command {
         .env_remove("LICASH_HUB_NOSTR_RELAYS")
         .env_remove("LICASH_HUB_ANNOUNCE_URLS")
         .env_remove("LICASH_HUB_ONION")
-        .env_remove("LICASH_HUB_SWAPS")
-        .env_remove("LICASH_HUB_SWAPS_FROM")
         .env_remove("LICASH_HUB_ALLOW_UNBACKED_LOCKS")
         .env("RUST_LOG", "info");
     command
@@ -322,52 +320,6 @@ fn failures_exit_nonzero_and_log_as_asked() {
         (
             &[relay[0], relay[1], "--announce-url", "https://hub.example"][..],
             "needs --chain",
-        ),
-    ] {
-        let out = output(&missing, &[&["run"], args].concat());
-        assert!(!out.status.success());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains(says), "{args:?}: {stderr}");
-    }
-    // Swaps into the hub are of the chain it follows, from hubs it caps.
-    let from = ["--swaps-from", "http://a.example=100"];
-    for (args, says) in [
-        (&from[..], "--swaps-from needs --swaps"),
-        (&["--swaps-tor"][..], "--swaps-tor needs --swaps"),
-        (&["--swaps"][..], "--swaps) needs --chain"),
-        (
-            &["--swaps", "--swaps-from", "http://a.example"][..],
-            "URL=CAP",
-        ),
-        (
-            &["--swaps", "--swaps-from", "a.example=1"][..],
-            "not a hub URL",
-        ),
-        (
-            &["--swaps", "--swaps-from", "http://a.example=-1"][..],
-            "cap",
-        ),
-        (
-            &["--swaps", "--swaps-margin", "2"][..],
-            "--swaps-margin must exceed",
-        ),
-        (
-            &["--swaps", "--swaps-min", "2", "--swaps-max", "1"][..],
-            "--swaps-min must not exceed",
-        ),
-        (
-            &["--swaps-no-contracts"][..],
-            "--swaps-no-contracts needs --swaps",
-        ),
-        (
-            &["--swaps-drain-via", "http://b.example"][..],
-            "--swaps-drain-via needs --swaps",
-        ),
-        // Contracts protect the notes it takes in from other hubs, and none
-        // opens on Bitcoin yet.
-        (
-            &["--swaps", from[0], from[1], "--chain", "http://127.0.0.1:1"][..],
-            "none opens on bitcoin: --swaps-no-contracts runs it unprotected",
         ),
     ] {
         let out = output(&missing, &[&["run"], args].concat());
@@ -854,106 +806,54 @@ fn a_hub_refuses_to_run_with_own_locks_nothing_backs() {
     drop(serving(&data, free_port(), &[]));
 }
 
+/// A hub of this release provides no swaps. The provider an earlier one
+/// ran, its wallet left in `<data>/swaps`, is read and never opened: the
+/// hub runs beside it once its swaps into the hub are done, and refuses to
+/// while they are not, or it cannot tell.
 #[test]
-fn a_hub_provides_the_swaps_into_it_from_a_wallet_of_its_own() {
+fn a_hub_runs_beside_the_swap_provider_of_an_earlier_release_once_its_swaps_are_done() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("hub");
     stdout(&data, &["init", "--max-pow", "6"]);
-    let chain = ["--chain", "http://127.0.0.1:1", "--network", "regtest"];
-    let swaps = ["--swaps", "--swaps-from", "http://a.example/=500"];
     let run = |port: u16, args: &[&str]| {
         let listen = format!("127.0.0.1:{port}");
-        let args = [&["run", "--listen", &listen][..], &chain[..], args].concat();
-        hub(&data, &args)
+        hub(&data, &[&["run", "--listen", &listen][..], args].concat())
     };
-    let port = free_port();
-    let mut running = Running(
-        run(port, &[&swaps[..], &["--swaps-fee-base", "7"]].concat())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
-    until("health", || get(port, "/health"));
-    let body = |response: String| response.split("\r\n\r\n").nth(1).unwrap().to_owned();
-    let info: licash_api::swaps::Info =
-        serde_json::from_str(&body(get(port, licash_api::swaps::SWAPS_INFO).unwrap())).unwrap();
-    let hub_info: licash_api::Info =
-        serde_json::from_str(&body(get(port, licash_api::INFO).unwrap())).unwrap();
-    // A wallet of its own, beside the hub's notes.
-    assert_ne!(info.address, hub_info.address);
-    assert_eq!(info.fee.base, 7);
-    // Following no chain yet, the hub swaps nothing into itself.
-    let own = info.hub(&hub_info.address).unwrap();
-    assert_eq!(own.max, 0);
-    let swaps_dir = data.join("swaps");
-    assert!(swaps_dir.join("wallet.sqlite").exists());
-    assert!(!swaps_dir.join("swaps.sqlite").exists());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&swaps_dir).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700);
-    }
-    let pid = running.0.id().to_string();
-    let killed = Command::new("kill").args(["-TERM", &pid]).status();
-    assert!(killed.unwrap().success());
-    assert!(until("stop", || running.0.try_wait().unwrap()).success());
-    let mut logs = String::new();
-    let mut stderr = running.0.stderr.take().unwrap();
-    stderr.read_to_string(&mut logs).unwrap();
-    assert!(logs.contains("swap provider created"), "{logs}");
-    // Contracts protect what it takes in from the hubs swapped from.
-    assert!(logs.contains("keeping the contracts"), "{logs}");
-    assert!(!logs.contains("Reckless"), "{logs}");
+    let stderr = refused(&data, &["run", "--swaps"]);
+    assert!(stderr.contains("--swaps"), "{stderr}");
 
-    // Started again on the same wallet, unprotected as told: warned of.
-    // Without --swaps, no swaps served, the operator warned of them.
+    // As the provider an earlier release made left it.
+    let swaps = data.join("swaps");
+    std::fs::create_dir(&swaps).unwrap();
+    let file = swaps.join("wallet.sqlite");
+    let transport = licash_transport::Http::new(None).unwrap();
+    let network = ChainProfile::Core30DefaultRegtest;
+    let wallet = licash_wallet::Wallet::create(&file, &[7; 32], network, transport).unwrap();
+    drop(licash_swaps::Provider::create(wallet, licash_swaps::Config::default()).unwrap());
+    let left = std::fs::read(&file).unwrap();
+
+    // Idle: the operator is told what to do with its notes, and the file
+    // is left as it was.
     let port = free_port();
-    let unprotected = [&swaps[..], &["--swaps-no-contracts"]].concat();
-    let mut again = Running(
-        run(port, &unprotected)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
-    until("restart", || get(port, "/health"));
-    let response = get(port, licash_api::swaps::SWAPS_INFO).unwrap();
-    let same: licash_api::swaps::Info = serde_json::from_str(&body(response)).unwrap();
-    assert_eq!(same.address, info.address);
-    again.0.kill().unwrap();
-    let mut logs = String::new();
-    let mut stderr = again.0.stderr.take().unwrap();
-    stderr.read_to_string(&mut logs).unwrap();
-    assert!(
-        logs.contains("Reckless") && !logs.contains("keeping the contracts"),
-        "{logs}"
-    );
-    drop(again);
-    let port = free_port();
-    let mut off = Running(
+    let mut idle = Running(
         run(port, &[])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap(),
     );
-    until("run without swaps", || get(port, "/health"));
-    let response = get(port, licash_api::swaps::SWAPS_INFO).unwrap();
-    assert!(response.starts_with("HTTP/1.1 404"), "{response}");
-    off.0.kill().unwrap();
+    until("health", || get(port, "/health"));
+    idle.0.kill().unwrap();
     let mut logs = String::new();
-    off.0
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut logs)
-        .unwrap();
-    assert!(logs.contains("--swaps is off"), "{logs}");
-    // Nor at all while a swap into it is under way: its notes are backed
-    // once the provider claims the client's lock.
-    let db = rusqlite::Connection::open(swaps_dir.join("wallet.sqlite")).unwrap();
+    let mut stderr = idle.0.stderr.take().unwrap();
+    stderr.read_to_string(&mut logs).unwrap();
+    assert!(logs.contains("the hub provides no swaps"), "{logs}");
+    drop(idle);
+    assert_eq!(std::fs::read(&file).unwrap(), left);
+
+    // A swap into the hub under way: its notes are backed once the
+    // provider claims the client's lock, which only an earlier release does.
+    let db = rusqlite::Connection::open(&file).unwrap();
     db.execute(
         "INSERT INTO provider_swaps (id, hash, from_url, to_url, address, amount, fee, paid,
             expiry_from_height, expiry_height, state, created_at, updated_at, kind)
@@ -962,20 +862,30 @@ fn a_hub_provides_the_swaps_into_it_from_a_wallet_of_its_own() {
         [],
     )
     .unwrap();
-    drop(db);
-    let out = run(free_port(), &[]).output().unwrap();
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let port = free_port().to_string();
+    let stderr = refused(&data, &["run", "--listen", &format!("127.0.0.1:{port}")]);
     assert!(
-        stderr.contains("--swaps is off") && stderr.contains("1 swaps"),
+        stderr.contains("1 swaps") && stderr.contains("release before it"),
         "{stderr}"
     );
+    // Done, it runs again.
+    db.execute("UPDATE provider_swaps SET state = 'done'", [])
+        .unwrap();
+    drop(serving(&data, free_port(), &[]));
+
+    // Of a layout it does not read: refused, as it cannot tell.
+    db.execute(
+        "UPDATE schema_versions SET version = version + 1 WHERE component = 'provider'",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let stderr = refused(&data, &["run", "--listen", &format!("127.0.0.1:{port}")]);
+    assert!(stderr.contains("cannot establish"), "{stderr}");
 
     // A file of an earlier layout beside its wallet is refused by name.
-    std::fs::write(swaps_dir.join("swaps.sqlite"), b"an earlier provider's").unwrap();
-    let out = run(free_port(), &swaps).output().unwrap();
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    std::fs::write(swaps.join("swaps.sqlite"), b"an earlier provider's").unwrap();
+    let stderr = refused(&data, &["run", "--listen", &format!("127.0.0.1:{port}")]);
     assert!(
         stderr.contains("earlier layout") && stderr.contains("swaps.sqlite"),
         "{stderr}"

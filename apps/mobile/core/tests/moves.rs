@@ -123,7 +123,6 @@ impl Hubs {
                 inbox: None,
                 relays: relays.clone(),
                 contracts: None,
-                swaps: None,
                 urls: Default::default(),
                 ingress: Default::default(),
             };

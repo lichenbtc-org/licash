@@ -28,15 +28,7 @@ use licash_hub_service::{
 };
 use licash_nostr::{Announcement, Route};
 use licash_notify::{Message, Priority, Target};
-use licash_swaps::{Config as SwapsConfig, Issuer, Provider};
-use licash_swaps_service::{
-    keeper::{self, Keeper},
-    notify::Notifier as SwapsNotifier,
-};
 use licash_tor::{Onion, Tor};
-use licash_transport::Http;
-use licash_wallet::Wallet;
-use rand_core::{OsRng, RngCore};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -728,215 +720,6 @@ fn ppm() -> clap::builder::RangedU64ValueParser<u64> {
     clap::value_parser!(u64).range(0..=1_000_000)
 }
 
-/// The swaps into the hub, which it provides, locking notes it issues.
-#[derive(Args)]
-struct SwapsArgs {
-    /// Provide the swaps into the hub from the hubs of `--swaps-from`: the
-    /// hub locks notes it issues to the client, against the client's lock
-    /// there. The provider's wallet, which claims those locks, and its
-    /// swaps are kept in `<data>/swaps`, made on the first start. Needs
-    /// `--chain`.
-    #[arg(long, env = "LICASH_HUB_SWAPS",
-          value_parser = clap::builder::BoolishValueParser::new())]
-    swaps: bool,
-    /// Take swaps from the hub at URL while the provider holds, or is owed
-    /// by the swaps under way, at most CAP of its notes: `URL=CAP`. Repeat
-    /// it, or separate them with commas, for more hubs.
-    #[arg(
-        long = "swaps-from",
-        value_name = "URL=CAP",
-        env = "LICASH_HUB_SWAPS_FROM",
-        value_delimiter = ','
-    )]
-    swaps_from: Vec<String>,
-    /// Reach the hubs of `--swaps-from`, onion services among them, through
-    /// a Tor client of the hub's own (that of `--onion`, its state in
-    /// `<data>/tor`) rather than directly.
-    #[arg(long, env = "LICASH_HUB_SWAPS_TOR",
-          value_parser = clap::builder::BoolishValueParser::new())]
-    swaps_tor: bool,
-    /// The fee on each swap, in the smallest unit.
-    #[arg(long, env = "LICASH_HUB_SWAPS_FEE_BASE",
-          default_value_t = SwapsConfig::default().fee.base)]
-    swaps_fee_base: u64,
-    /// The fee on each swap, in parts per million of its amount.
-    #[arg(long, env = "LICASH_HUB_SWAPS_FEE_PPM",
-          default_value_t = SwapsConfig::default().fee.ppm, value_parser = ppm())]
-    swaps_fee_ppm: u64,
-    /// The least swapped at once.
-    #[arg(long, env = "LICASH_HUB_SWAPS_MIN", default_value_t = SwapsConfig::default().min)]
-    swaps_min: u64,
-    /// The most swapped at once.
-    #[arg(long, env = "LICASH_HUB_SWAPS_MAX", default_value_t = SwapsConfig::default().max)]
-    swaps_max: u64,
-    /// Blocks the provider needs to claim the client's lock once it holds
-    /// the preimage.
-    #[arg(long, env = "LICASH_HUB_SWAPS_MARGIN",
-          default_value_t = SwapsConfig::default().margin)]
-    swaps_margin: u32,
-    /// Blocks within which a client's activation of the hub's lock on
-    /// Bitcoin confirms: the hub's lock expires that, the margin and two
-    /// blocks before the client's.
-    #[arg(long, env = "LICASH_HUB_SWAPS_CONFIRM",
-          default_value_t = SwapsConfig::default().confirm,
-          value_parser = clap::value_parser!(u32).range(1..))]
-    swaps_confirm: u32,
-    /// Take the notes of the hubs of `--swaps-from` in with no contract
-    /// protecting them there: reckless, as a hub that withholds them keeps
-    /// them. By default the provider takes in at each only what its
-    /// contracts there protect, the first opened by the operator with
-    /// `licash-wallet --wallet <data>/swaps/wallet.sqlite open-contract`,
-    /// and keeps them: replaced before they end, forced closed at their
-    /// safe deadline if needed. The hub's own notes need none.
-    #[arg(long, env = "LICASH_HUB_SWAPS_NO_CONTRACTS",
-          value_parser = clap::builder::BoolishValueParser::new())]
-    swaps_no_contracts: bool,
-    /// Days before a contract's safe deadline to open its successor.
-    #[arg(
-        long,
-        env = "LICASH_HUB_SWAPS_CONTRACT_SUCCESSOR_DAYS",
-        default_value_t = 14
-    )]
-    swaps_contract_successor_days: u32,
-    /// Days kept for a forced close to play out in (the exit margin),
-    /// before each contract's last request height: its safe deadline comes
-    /// a day earlier.
-    #[arg(
-        long,
-        // As named when it was the proof margin, for deployments that set it.
-        alias = "swaps-contract-proof-days",
-        env = "LICASH_HUB_SWAPS_CONTRACT_PROOF_DAYS",
-        default_value_t = 14
-    )]
-    swaps_contract_exit_days: u32,
-    /// The most a successor costs, in sat [default: what the contract it
-    /// replaces cost, and a quarter].
-    #[arg(long, env = "LICASH_HUB_SWAPS_CONTRACT_MAX_PRICE")]
-    swaps_contract_max_price: Option<u64>,
-    /// Pay out to the provider's own address on Bitcoin, through the swap
-    /// provider at URL, what a contract that could not be replaced leaves
-    /// unprotected [default: only take no more in there].
-    #[arg(long, value_name = "URL", env = "LICASH_HUB_SWAPS_DRAIN_VIA")]
-    swaps_drain_via: Option<String>,
-}
-
-impl SwapsArgs {
-    /// The provider's terms, and the hubs it takes swaps from with their
-    /// caps, if the hub provides swaps.
-    fn terms(&self) -> anyhow::Result<Option<(SwapsConfig, Vec<Capped>)>> {
-        let from: Vec<Capped> = self
-            .swaps_from
-            .iter()
-            .filter(|f| !f.trim().is_empty())
-            .map(|f| capped(f).with_context(|| format!("--swaps-from {f}")))
-            .collect::<anyhow::Result<_>>()?;
-        if !self.swaps {
-            anyhow::ensure!(from.is_empty(), "--swaps-from needs --swaps");
-            anyhow::ensure!(!self.swaps_tor, "--swaps-tor needs --swaps");
-            anyhow::ensure!(
-                !self.swaps_no_contracts,
-                "--swaps-no-contracts needs --swaps"
-            );
-            anyhow::ensure!(
-                self.swaps_drain_via.is_none(),
-                "--swaps-drain-via needs --swaps"
-            );
-            return Ok(None);
-        }
-        anyhow::ensure!(
-            self.swaps_min <= self.swaps_max,
-            "--swaps-min must not exceed --swaps-max"
-        );
-        anyhow::ensure!(
-            self.swaps_margin > licash_wallet::CLAIM_MARGIN + 2,
-            "--swaps-margin must exceed {}",
-            licash_wallet::CLAIM_MARGIN + 2
-        );
-        let config = SwapsConfig {
-            fee: Fee {
-                base: self.swaps_fee_base,
-                ppm: self.swaps_fee_ppm,
-            },
-            min: self.swaps_min,
-            max: self.swaps_max,
-            margin: self.swaps_margin,
-            confirm: self.swaps_confirm,
-        };
-        Ok(Some((config, from)))
-    }
-
-    /// Whether contracts protect the notes the provider takes in from the
-    /// hubs `from`, on `network`: refused where none opens, unless
-    /// --swaps-no-contracts runs it unprotected. None needed from no hub.
-    fn protected(&self, network: ChainProfile, from: &[Capped]) -> anyhow::Result<bool> {
-        if from.is_empty() {
-            return Ok(false);
-        }
-        if self.swaps_no_contracts {
-            tracing::warn!(
-                "--swaps-no-contracts: no contract protects the notes the hub takes in from \
-                 the hubs of --swaps-from, which a hub that withholds them keeps. Reckless \
-                 outside of tests"
-            );
-            return Ok(false);
-        }
-        licash_contracts::trust(network).with_context(|| {
-            format!(
-                "contracts protect the notes taken in from the hubs of --swaps-from, and none \
-                 opens on {network}: --swaps-no-contracts runs it unprotected, recklessly"
-            )
-        })?;
-        Ok(true)
-    }
-
-    /// The keeper of the contracts of `provider`, whose files are in `dir`,
-    /// on `chain`, protecting the notes of the hubs `from`.
-    fn keeper(
-        &self,
-        provider: &Arc<Provider<Http>>,
-        chain: Source,
-        dir: &Path,
-        from: &[Capped],
-    ) -> Keeper<Http> {
-        let wallet = dir.join("wallet.sqlite");
-        let hint = format!(
-            "licash-wallet --wallet {} open-contract {{hub}} --chain CHAIN",
-            wallet.display()
-        );
-        let settings = keeper::Settings::new(
-            self.swaps_contract_exit_days,
-            self.swaps_contract_successor_days,
-            hint,
-        );
-        let settings = keeper::Settings {
-            hubs: Some(from.iter().map(|(url, _)| url.clone()).collect()),
-            max_price: self.swaps_contract_max_price,
-            drain_via: self.swaps_drain_via.clone(),
-            // Nothing else looks for the coins of the swaps' wallet.
-            scan: true,
-            ..settings
-        };
-        let chain = licash_contracts::holder::Node(chain);
-        Keeper::new(provider.clone(), chain, wallet.to_owned(), settings)
-    }
-}
-
-/// A hub swapped from, by URL, and the most of its notes the provider
-/// holds.
-type Capped = (String, u64);
-
-/// A hub's URL and the cap on its notes, of `URL=CAP`.
-fn capped(arg: &str) -> anyhow::Result<Capped> {
-    let (url, cap) = arg.rsplit_once('=').context("not URL=CAP")?;
-    let url = url.trim().trim_end_matches('/');
-    anyhow::ensure!(
-        url.starts_with("http://") || url.starts_with("https://"),
-        "not a hub URL: {url}"
-    );
-    let cap = cap.trim().parse().with_context(|| format!("cap {cap}"))?;
-    Ok((url.to_owned(), cap))
-}
-
 impl PolicyArgs {
     fn policy(&self) -> Policy {
         let fee = |base, ppm| Fee { base, ppm };
@@ -1004,8 +787,6 @@ enum Command {
         deposits: Box<DepositArgs>,
         #[command(flatten)]
         announce: Box<AnnounceArgs>,
-        #[command(flatten)]
-        swaps: Box<SwapsArgs>,
         /// Also serve the API as an onion service of a Tor client of the
         /// hub's own, at the same address on every start (its key in
         /// `<data>/tor`), and announce it, reaching relays through Tor too.
@@ -1210,7 +991,6 @@ fn command(cli: Cli) -> anyhow::Result<()> {
             notify,
             deposits,
             announce,
-            swaps,
             onion,
             onion_pow,
             allow_unbacked_locks,
@@ -1290,26 +1070,11 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 announcing.is_none() || chain.is_some(),
                 "announcing on Nostr (--nostr-relay) needs --chain"
             );
-            let swapping = match respond_only {
-                true => None,
-                false => swaps.terms()?,
-            };
-            let swaps_tor = swaps.swaps_tor && !respond_only;
-            let indexing = indexing && !respond_only;
-            anyhow::ensure!(
-                swapping.is_none() || chain.is_some(),
-                "providing swaps (--swaps) needs --chain"
-            );
-            let swaps_protected = match (&swapping, &chain) {
-                (Some((_, from)), Some((_, profile, _))) => swaps.protected(*profile, from)?,
-                _ => false,
-            };
             let swaps_dir = cli.data.join("swaps");
-            if swapping.is_none() && !respond_only {
-                check_idle(&swaps_dir)?;
+            if !respond_only {
+                check_swaps_idle(&swaps_dir)?;
             }
             let targets = notify.targets()?;
-            let swaps_targets = targets.clone();
             // Before the hub opens, so that new targets hear of its start.
             let notifier = if targets.is_empty() {
                 None
@@ -1324,14 +1089,14 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 // What its gateways and swaps owe is collected by the copy
                 // that leads, if one does: told, as no one here does.
                 let owed = [
-                    check_idle(&swaps_dir),
+                    check_swaps_idle(&swaps_dir),
                     check_gateway_idle(&hub, &db, false),
                     check_gateway_idle(&hub, &db, true),
                 ];
                 for e in owed.into_iter().filter_map(Result::err) {
                     let message = format!(
                         "responding only, this copy collects nothing it is owed: {e:#}. The copy \
-                         that leads must run its gateways and swaps before their locks expire"
+                         that leads must have them done before their locks expire"
                     );
                     tracing::error!("{message}");
                     if let Err(e) = hub.alert(&message) {
@@ -1355,8 +1120,7 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 }
                 None => None,
             };
-            let turn = Arc::new(tokio::sync::Mutex::new(()));
-            peer::coordinate(deposits.as_ref(), &cli.data, turn.clone());
+            peer::coordinate(deposits.as_ref(), &cli.data);
             let tweaks = match indexing {
                 true => {
                     let path = cli.data.join("tweaks.sqlite");
@@ -1474,73 +1238,13 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 ),
                 Err(e) => tracing::warn!("the fees kept in the hub's database: {e:#}"),
             }
-            // One Tor client for the onion service and the swaps' wallet
-            // alike, since its state directory takes only one.
-            let tor = match onion || swaps_tor {
+            let tor = match onion {
                 true => Some(Tor::new(&cli.data.join("tor")).context("a Tor client")?),
                 false => None,
-            };
-            let swapping = match (swapping, &chain) {
-                (Some((config, from)), Some((source, profile, every))) => {
-                    if from.is_empty() {
-                        tracing::warn!("providing swaps from no hub (--swaps-from)");
-                    }
-                    // As clients reach the hub, or at least as it listens.
-                    let url = announcing.as_ref().and_then(|a| a.urls.first().cloned());
-                    let url = url.unwrap_or_else(|| format!("http://{listen}"));
-                    let issuer =
-                        issuer(&hub, url, &from, deposits.clone(), &cli.data, turn.clone());
-                    let transport = match &tor {
-                        Some(tor) if swaps_tor => {
-                            tracing::info!("the swaps' wallet reaches hubs through Tor");
-                            Http::tor(tor.clone())
-                        }
-                        _ => Http::new(None)?,
-                    };
-                    let provider =
-                        swap_provider(&swaps_dir, *profile, config, issuer, transport, cli.log)?;
-                    let provider = Arc::new(provider);
-                    // Before it serves: nothing is taken in unprotected.
-                    let keeper = swaps_protected
-                        .then(|| swaps.keeper(&provider, source.clone(), &swaps_dir, &from));
-                    let notifier = match swaps_targets.is_empty() {
-                        true => None,
-                        false => {
-                            let cursors = swaps_dir.join("notify.json");
-                            let name = format!("{} swaps", notify.name);
-                            let notifier = SwapsNotifier::new(
-                                provider.clone(),
-                                &name,
-                                swaps_targets,
-                                &cursors,
-                                Vec::new(),
-                            )
-                            .context("set up the swaps' notifications")?;
-                            Some(notifier)
-                        }
-                    };
-                    Some(Swapping {
-                        provider,
-                        every: *every,
-                        notifier,
-                        keeper,
-                    })
-                }
-                _ => None,
             };
             // Once the files of what backs them are open, and up to date.
             // Responding only, it pays no lock: it says so, and answers.
             check_backed(&hub, &cli.data, allow_unbacked_locks || respond_only)?;
-            let swaps = match &swapping {
-                Some(Swapping { provider, .. }) => {
-                    let nostr = match &announcing {
-                        Some(_) => Some(licash_nostr::public_key(&provider.nostr_secret()?)?),
-                        None => None,
-                    };
-                    Some(licash_swaps_service::api(provider.clone(), nostr))
-                }
-                None => None,
-            };
             let announced = announcing.as_ref().map(|a| a.urls.clone());
             let urls = Arc::new(std::sync::RwLock::new(announced.unwrap_or_default()));
             // Sweeping idle openings and playing exits as they come.
@@ -1551,7 +1255,6 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 inbox,
                 relays,
                 contracts,
-                swaps,
                 urls: urls.clone(),
                 ingress: Arc::new(licash_hub_service::Ingress::new(ingress.trusted_proxies)),
             };
@@ -1584,7 +1287,6 @@ fn command(cli: Cli) -> anyhow::Result<()> {
                 deposits,
                 announcing,
                 tweaks: tweaks.map(|index| (index, tweaks_from)),
-                swapping,
             };
             let serving = serve(hub, router, listen, policy, tasks);
             runtime.block_on(serving)
@@ -1678,53 +1380,34 @@ fn init(data: &Path, seed: &Path, db: &Path, max_pow: u32, log: Log) -> anyhow::
     Ok(())
 }
 
-/// `hub`, reached at `url`, issuing the locks of the swaps into it from
-/// the hubs of `from` under their caps: under no hash its Lightning
-/// receipts or its deposits hold.
-fn issuer(
-    hub: &Arc<Hub>,
-    url: String,
-    from: &[Capped],
-    deposits: Option<Arc<deposit::Gateway>>,
-    data: &Path,
-    turn: Arc<tokio::sync::Mutex<()>>,
-) -> Issuer {
-    let issuer = from
-        .iter()
-        .fold(Issuer::new(hub.clone(), url), |issuer, (from, cap)| {
-            issuer.cap(from, *cap)
-        });
-    let db = data.join("hub.sqlite");
-    issuer.guard(turn, move |hash| {
-        if lightning::holding(&db, &[*hash])
-            .map_err(|e| e.to_string())?
-            .contains(hash)
-        {
-            return Ok(true);
-        }
-        match &deposits {
-            Some(deposits) => deposits.holds(hash),
-            None => deposit::Gateway::holding(&db, &[*hash])
-                .map(|found| found.contains(hash))
-                .map_err(|e| e.to_string()),
-        }
-    })
-}
-
-/// Refuse to run without `--swaps` while the provider in `dir`, if any,
-/// has swaps into the hub under way: the notes the hub locked for them
-/// are backed once the provider claims the clients' locks, which it then
-/// would not.
-fn check_idle(dir: &Path) -> anyhow::Result<()> {
+/// Refuse to run while the swap provider an earlier release ran in `dir`,
+/// if any, has swaps into the hub under way: the notes the hub locked for
+/// them are backed once the provider claims the clients' locks, which this
+/// release, running none, would not. Read only: an idle one is left as it
+/// is, its notes for the operator to take on.
+fn check_swaps_idle(dir: &Path) -> anyhow::Result<()> {
     licash_store::refuse_legacy(dir, &["swaps.sqlite", "contracts.sqlite"], "wallet.sqlite")?;
     let wallet = dir.join("wallet.sqlite");
     if !wallet.exists() {
         return Ok(());
     }
-    let off = "--swaps is off";
-    let wallet = Wallet::open(&wallet, Http::new(None)?).context(off)?;
-    Provider::open(wallet, SwapsConfig::default()).context(off)?;
-    tracing::warn!(dir = %dir.display(), "{off}: the swap provider takes no swaps");
+    let open = licash_swaps::own_under_way(&wallet).with_context(|| {
+        format!(
+            "cannot establish that the swaps of {} are done",
+            wallet.display()
+        )
+    })?;
+    anyhow::ensure!(
+        open == 0,
+        "{open} swaps into the hub are under way in {}, and hubs of this release provide no \
+         swaps: run the release before it, with --swaps, until they are done",
+        wallet.display()
+    );
+    tracing::warn!(
+        file = %wallet.display(),
+        "the hub provides no swaps: the notes of the wallet its provider left are taken on \
+         by running a swap provider (licash-swaps) on it"
+    );
     Ok(())
 }
 
@@ -1890,53 +1573,6 @@ fn check_backed(hub: &Hub, data: &Path, allow: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The provider of the swaps into the hub, on its files in `dir`: made on
-/// the first start, its wallet's on `network`, and never replaced. Its
-/// wallet reaches hubs through `transport`.
-fn swap_provider(
-    dir: &Path,
-    network: ChainProfile,
-    config: SwapsConfig,
-    issuer: Issuer,
-    transport: Http,
-    log: Log,
-) -> anyhow::Result<Provider<Http>> {
-    licash_store::refuse_legacy(dir, &["swaps.sqlite", "contracts.sqlite"], "wallet.sqlite")?;
-    let wallet = dir.join("wallet.sqlite");
-    if wallet.exists() {
-        let wallet = Wallet::open(&wallet, transport).context("open the swaps' wallet")?;
-        anyhow::ensure!(
-            wallet.network() == network,
-            "the swaps' wallet is of {}, the hub of {network}",
-            wallet.network()
-        );
-        return Provider::open_issuing(wallet, config, issuer).context("open the swap provider");
-    }
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder
-        .create(dir)
-        .with_context(|| format!("create {}", dir.display()))?;
-    let mut seed = [0; 32];
-    OsRng.fill_bytes(&mut seed);
-    let wallet =
-        Wallet::create(&wallet, &seed, network, transport).context("create the swaps' wallet")?;
-    let address = hex::encode(wallet.address().to_bytes());
-    let provider =
-        Provider::create_issuing(wallet, config, issuer).context("create the swap provider")?;
-    if matches!(log, Log::Json) {
-        tracing::info!(dir = %dir.display(), %address, "swap provider created: back up its wallet file");
-    } else {
-        eprintln!(
-            "swap provider created: back up wallet.sqlite in {}.",
-            dir.display()
-        );
-    }
-    Ok(provider)
-}
-
 /// What runs beside the API, if configured.
 struct Tasks {
     /// The contracts, their exits played every so often.
@@ -1952,18 +1588,6 @@ struct Tasks {
     announcing: Option<Announcing>,
     /// With the first block to index if the index is new.
     tweaks: Option<(Arc<Tweaks>, Option<u32>)>,
-    swapping: Option<Swapping>,
-}
-
-/// The provider of the swaps into the hub, which takes them on every
-/// `every`, and tells the operator of them through `notifier`.
-struct Swapping {
-    provider: Arc<Provider<Http>>,
-    every: Duration,
-    notifier: Option<SwapsNotifier>,
-    /// The keeper of the contracts protecting the notes it takes in from
-    /// other hubs, unless run unprotected.
-    keeper: Option<Keeper<Http>>,
 }
 
 async fn serve(
@@ -1982,7 +1606,6 @@ async fn serve(
         deposits,
         announcing,
         tweaks,
-        swapping,
     } = tasks;
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -2059,37 +1682,6 @@ async fn serve(
         tracing::info!("taking deposits on Bitcoin");
         critical.spawn("the deposits", deposits.run());
     }
-    let mut swaps = Vec::new();
-    // Stopped as the hub stops: dropped on return.
-    let mut _keeping = None;
-    if let Some(Swapping {
-        provider,
-        every,
-        notifier,
-        keeper,
-    }) = swapping
-    {
-        if let Some(keeper) = keeper {
-            tracing::info!("keeping the contracts protecting the notes of the hubs swapped from");
-            let running = keeper.spawn(keeper::EVERY);
-            _keeping = Some(running.context("a thread for the swaps' contracts")?);
-        }
-        let address = hex::encode(provider.wallet().address().to_bytes());
-        tracing::debug!(%address, config = %serde_json::to_string(provider.config())?, "swap configuration");
-        tracing::info!("providing swaps");
-        critical.spawn(
-            "the swaps",
-            licash_swaps_service::step(provider.clone(), every),
-        );
-        // Its events not yet sent go out after the next start.
-        swaps.extend(notifier.map(|notifier| tokio::spawn(notifier.run())));
-        if let Some(a) = &announcing {
-            let (relays, route) = (a.relays.clone(), a.route.clone());
-            let (urls, name) = (a.urls.clone(), a.name.clone());
-            let announcing = licash_swaps_service::announce(provider, relays, route, urls, name);
-            swaps.push(tokio::spawn(announcing));
-        }
-    }
     let announcing = announcing.map(|a| {
         let (relays, urls) = (a.relays.join(", "), a.urls.join(", "));
         tracing::debug!(%relays, %urls, "announcement configuration");
@@ -2113,7 +1705,7 @@ async fn serve(
     // address, or its client's behind a trusted proxy
     // (licash_hub_service::AdmissionSource).
     licash_serve::listen(listener, router, stop).await;
-    for task in announcing.into_iter().chain(swaps) {
+    if let Some(task) = announcing {
         task.abort();
     }
     // A standby stopping for a newer ledger is started again at once: not
@@ -2434,20 +2026,6 @@ mod tests {
             Command::Run { announce, .. } => announce.mailboxes(),
             _ => unreachable!(),
         }
-    }
-
-    #[test]
-    fn the_swaps_exit_margin_keeps_its_name_as_the_proof_margin() {
-        let days = |args: &[&str]| {
-            let cli = Cli::try_parse_from([&["licash-hub", "run"], args].concat()).unwrap();
-            match cli.command {
-                Command::Run { swaps, .. } => swaps.swaps_contract_exit_days,
-                _ => unreachable!(),
-            }
-        };
-        assert_eq!(days(&[]), 14);
-        assert_eq!(days(&["--swaps-contract-exit-days", "9"]), 9);
-        assert_eq!(days(&["--swaps-contract-proof-days", "9"]), 9);
     }
 
     /// Contracts are of terms holders choose, a deposit funding her part,

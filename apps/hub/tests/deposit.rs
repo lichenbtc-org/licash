@@ -327,11 +327,7 @@ async fn gateways_refuse_every_hash_reserved_by_a_swap_even_when_swaps_are_off()
         db.execute("DELETE FROM deposits WHERE hash = ?1", [hash])
             .unwrap();
         swap_record(&net, hash, state, None);
-        peer::coordinate(
-            Some(&net.deposits),
-            net.dir.path(),
-            Arc::new(tokio::sync::Mutex::new(())),
-        );
+        peer::coordinate(Some(&net.deposits), net.dir.path());
         assert!(net
             .deposits
             .deposit(&body, None)
@@ -356,11 +352,7 @@ async fn an_earlier_gateways_receipts_still_reserve_their_hashes() {
     // Asked over Lightning of the gateway of an earlier release, never paid.
     let receipts = receipts::made(&net.dir.path().join("hub.sqlite"));
     receipts::record(&receipts, hash, "open", None);
-    peer::coordinate(
-        Some(&net.deposits),
-        net.dir.path(),
-        Arc::new(tokio::sync::Mutex::new(())),
-    );
+    peer::coordinate(Some(&net.deposits), net.dir.path());
     assert!(net
         .deposits
         .deposit(&body, None)
@@ -372,38 +364,10 @@ async fn an_earlier_gateways_receipts_still_reserve_their_hashes() {
     assert!(!net.dir.path().join("swaps").exists());
 }
 
-#[tokio::test]
-async fn a_gateway_waits_for_the_issuers_turn_and_then_sees_its_reservation() {
-    let net = Net::new().await;
-    let alice = net.wallet("alice");
-    let deposit = alice.deposit(HUB, 3_000).await.unwrap();
-    let (_, body) = net.asked("alice", &deposit.hash);
-    let hash = bytes(&deposit.hash);
-    let db = rusqlite::Connection::open(net.dir.path().join("hub.sqlite")).unwrap();
-    db.execute("DELETE FROM deposits WHERE hash = ?1", [hash])
-        .unwrap();
-    let turn = Arc::new(tokio::sync::Mutex::new(()));
-    peer::coordinate(Some(&net.deposits), net.dir.path(), turn.clone());
-    let held = turn.lock_owned().await;
-    let gateway = net.deposits.clone();
-    let receiving = tokio::spawn(async move { gateway.deposit(&body, None).await });
-    tokio::task::yield_now().await;
-    assert!(!receiving.is_finished());
-    swap_record(&net, hash, "accepted", None);
-    drop(held);
-    assert!(receiving
-        .await
-        .unwrap()
-        .unwrap_err()
-        .0
-        .message
-        .contains("another payment"));
-}
-
-/// The chain's tip is asked outside the turn every payment of the hub
-/// waits on: a chain source that never answers holds up the deposit that
-/// asks it alone, not the receipts, swaps and deposits waiting on that
-/// turn. A deposit asked again asks it nothing, and is answered at once.
+/// The chain's tip is asked outside the turn every deposit waits on: a
+/// chain source that never answers holds up the deposit that asks it
+/// alone, not the others waiting on that turn. A deposit asked again asks
+/// it nothing, and is answered at once.
 #[tokio::test]
 async fn a_stalled_chain_tip_holds_up_no_other_payment() {
     let net = Net::new().await;
@@ -426,26 +390,23 @@ async fn a_stalled_chain_tip_holds_up_no_other_payment() {
         &source,
         &net.dir.path().join("hub.sqlite"),
     ));
-    let turn = Arc::new(tokio::sync::Mutex::new(()));
-    peer::coordinate(Some(&gateway), net.dir.path(), turn.clone());
-    let again = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        gateway.deposit(&recorded, None),
-    )
-    .await
-    .expect("a deposit asked again waits on no chain source")
-    .unwrap();
-    assert_eq!(again, net.deposits.deposit(&recorded, None).await.unwrap());
+    peer::coordinate(Some(&gateway), net.dir.path());
     let asking = tokio::spawn({
         let gateway = gateway.clone();
         async move { gateway.deposit(&body, None).await }
     });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert!(!asking.is_finished());
-    assert!(
-        turn.try_lock().is_ok(),
-        "the turn is free while the tip is asked"
-    );
+    // Through the turn while the other asks the tip.
+    let again = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        gateway.deposit(&recorded, None),
+    )
+    .await
+    .expect("a deposit asked again waits on no chain source, nor on the turn")
+    .unwrap();
+    assert_eq!(again, net.deposits.deposit(&recorded, None).await.unwrap());
+    assert!(!asking.is_finished());
     asking.abort();
 }
 
@@ -479,11 +440,7 @@ async fn adoption_with_a_swap_row(state: &str, recorded: bool) {
     let hash = bytes(&deposit.hash);
     let id = own_lock(&net, &body);
     swap_record(&net, hash, state, recorded.then_some(id));
-    peer::coordinate(
-        Some(&net.deposits),
-        net.dir.path(),
-        Arc::new(tokio::sync::Mutex::new(())),
-    );
+    peer::coordinate(Some(&net.deposits), net.dir.path());
     net.mine(2, vec![payment(&deposit.terms.unwrap().address, 3_100, 1)]);
     net.deposits.round().await;
     let status = net.deposits.deposit_status(&hash).unwrap().status;
@@ -610,11 +567,7 @@ async fn a_duplicate_deposit_is_canceled_when_its_receipt_locked_first() {
     let lock = own_lock(&net, &body);
     let receipts = receipts::made(&net.dir.path().join("hub.sqlite"));
     receipts::record(&receipts, hash, "locked", Some(lock.as_bytes()));
-    peer::coordinate(
-        Some(&net.deposits),
-        net.dir.path(),
-        Arc::new(tokio::sync::Mutex::new(())),
-    );
+    peer::coordinate(Some(&net.deposits), net.dir.path());
     net.mine(2, vec![payment(&deposit.terms.unwrap().address, 3_100, 1)]);
     net.deposits.round().await;
     let status = net.deposits.deposit_status(&hash).unwrap().status;

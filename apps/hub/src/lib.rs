@@ -225,8 +225,6 @@ pub struct Services {
     pub relays: Vec<String>,
     /// The recovery contracts it opens, funded by its node's wallet.
     pub contracts: Option<Arc<licash_contracts::hub::Openings>>,
-    /// The API of the provider of the swaps into it, if it is one.
-    pub swaps: Option<Router>,
     /// The URLs wallets reach it at, named in its info: those it
     /// announces, and its onion service's once that runs.
     pub urls: Arc<std::sync::RwLock<Vec<String>>>,
@@ -248,7 +246,6 @@ pub fn router(hub: Arc<Hub>, services: Services) -> Router {
         tweaks,
         inbox,
         contracts,
-        swaps,
         ingress,
         ..
     } = services.clone();
@@ -295,10 +292,6 @@ pub fn router(hub: Arc<Hub>, services: Services) -> Router {
                 .route(licash_api::TWEAKS, get(chain_tweaks))
                 .with_state(index),
         );
-    }
-    if let Some(swaps) = swaps {
-        // Its own body limit, of a provider's requests.
-        api = api.merge(swaps);
     }
     let api = api.layer(DefaultBodyLimit::max(BODY_LIMIT));
     let mut api = licash_serve::shed(api, MAX_SERVING, "the hub is too busy now");

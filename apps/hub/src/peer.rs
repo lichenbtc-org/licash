@@ -1,9 +1,10 @@
-//! The hub's deposits and swap issuer share one turn: a hash backs one own
-//! lock of the hub's notes ([`licash_hub::Hub::lock_own`]), by one payment.
-//! The wallet that asks for a deposit picks its hash, so it may pick one a
-//! swap, or a Lightning receipt of an earlier release's gateway, holds:
-//! the deposits refuse a hash held so, and leave a lock under it to the
-//! payment it was recorded for.
+//! A hash backs one own lock of the hub's notes
+//! ([`licash_hub::Hub::lock_own`]), by one payment. The wallet that asks
+//! for a deposit picks its hash, so it may pick one a swap of the provider
+//! an earlier release embedded, or a Lightning receipt of its gateway,
+//! holds: the deposits refuse a hash held so, and leave a lock under it to
+//! the payment it was recorded for. They take their turns at checking a
+//! hash and recording what they hold under it one at a time.
 
 use std::{
     collections::HashSet,
@@ -31,8 +32,8 @@ pub struct Peer(OnceLock<Paired>);
 type Lookup = dyn Fn(&[u8; 32]) -> Result<Recorded, String> + Send + Sync;
 
 struct Paired {
-    /// Held by either gateway from checking a hash with the peer to
-    /// recording what it holds under it: a payment, or the lock it backs.
+    /// Held from checking a hash with the peer to recording what the
+    /// deposits hold under it: a payment, or the lock it backs.
     turn: Arc<Mutex<()>>,
     recorded: Box<Lookup>,
     swaps: Option<PathBuf>,
@@ -138,10 +139,9 @@ pub(crate) fn recorded_in(
     Ok(found)
 }
 
-/// Coordinate the deposits, if the hub takes them, with the swap issuer
-/// by `turn`, and with what the swaps and the receipts of an earlier
-/// gateway recorded in `data`.
-pub fn coordinate(deposits: Option<&Arc<deposit::Gateway>>, data: &Path, turn: Arc<Mutex<()>>) {
+/// Coordinate the deposits, if the hub takes them, with what the swaps and
+/// the receipts of an earlier release recorded in `data`.
+pub fn coordinate(deposits: Option<&Arc<deposit::Gateway>>, data: &Path) {
     let Some(deposits) = deposits else { return };
     // The swap provider's tables are in its wallet's file.
     let swaps = Some(data.join("swaps/wallet.sqlite"));
@@ -155,7 +155,7 @@ pub fn coordinate(deposits: Option<&Arc<deposit::Gateway>>, data: &Path, turn: A
         )
     };
     let paired = Paired {
-        turn,
+        turn: Arc::default(),
         recorded: Box::new(recorded),
         swaps,
     };

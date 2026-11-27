@@ -154,7 +154,6 @@ impl Net {
             }),
             relays,
             contracts: None,
-            swaps: None,
             urls: Default::default(),
             ingress: Default::default(),
         };
