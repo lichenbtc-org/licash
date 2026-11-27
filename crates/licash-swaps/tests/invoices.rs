@@ -764,21 +764,6 @@ async fn a_payment_the_provider_never_heard_of_is_asked_for_again() {
 }
 
 #[tokio::test]
-async fn an_invoice_paid_through_a_provider_is_not_paid_through_the_hub_too() {
-    let (_net, _dir, node, _provider, client) = via().await;
-    let request = node.invoice(1_000_000, lock_hash(&[6; 32]), DELTA, Outcome::Hang);
-    let lock = client
-        .pay_invoice_via(PROVIDER, A, &request, 100)
-        .await
-        .unwrap();
-    match client.pay_invoice(A, &request).await {
-        Err(Error::Invalid(why)) => assert!(why.contains(&lock.id), "{why}"),
-        other => panic!("{other:?}"),
-    }
-    assert_eq!(client.locks().unwrap().len(), 1);
-}
-
-#[tokio::test]
 async fn the_provider_pays_no_more_than_its_channels_do() {
     let eco = Eco::new().await;
     // As the operator set it, while the channels pay more.

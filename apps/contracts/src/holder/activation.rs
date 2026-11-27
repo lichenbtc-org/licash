@@ -306,49 +306,6 @@ async fn activation_of<C: Chain>(
     })
 }
 
-/// Blocks past the tip a contract's forced close must be planned after for
-/// it to protect a Lightning receipt's lock made at the tip: the lock, its
-/// activation buried at its depth, and a margin.
-pub const PROTECTING: u32 = 36;
-
-/// Whether a Lightning receipt of `amount` at the hub at `url` is worth
-/// protecting at `tip` ([`Wallet::invoice_protected`]): a contract of hers
-/// in `wallet_file` at that hub would claim its lock's notes should the hub keep
-/// them (one live, not under recovery, of a Base valuing a pay branch by
-/// its activation, whose forced close her exit plans [`PROTECTING`]
-/// blocks on at the earliest), and a coin of hers free of contracts
-/// activates the lock at `rate` for less than `amount`.
-pub fn protects<T: Transport>(
-    wallet: &Wallet<T>,
-    wallet_file: &Path,
-    url: &str,
-    amount: u64,
-    rate: FeeRate,
-    tip: u32,
-) -> Result<bool> {
-    let Some(store) = Store::existing(wallet_file)? else {
-        return Ok(false);
-    };
-    let fee = (rate.fee_vb(ACTIVATION_VB)).context("an activation's fee overflows")?;
-    if amount <= fee.to_sat() || super::coin(wallet, wallet_file, fee.to_sat())?.is_none() {
-        return Ok(false);
-    }
-    let urls = wallet.hub_urls(url)?;
-    let recovering: HashSet<[u8; 32]> = store.recoveries()?.iter().map(|r| r.id).collect();
-    let (seed, network) = (wallet.contract_secrets().seed, wallet.network());
-    for c in store.list()? {
-        if !c.at(&urls) || !c.live(tip) || recovering.contains(&c.id) {
-            continue;
-        }
-        if exit::planned_force_at(&seed, network, wallet_file, &c.id, tip)?
-            >= tip.saturating_add(PROTECTING)
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 /// The contract of hers in `wallet_file` that claims owed lock `o` once
 /// activated, at `tip`: of those at its hub protecting notes, not under
 /// recovery, of a Base of its keyset valuing a pay branch by its

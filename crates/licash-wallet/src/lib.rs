@@ -19,11 +19,11 @@
 //!
 //! A timed lock pays a payee on the preimage of a hash, or returns to the
 //! wallet once it expired unpaid: see [`Wallet::lock`] and
-//! [`Wallet::claim`]. Through a hub's Lightning gateway, the wallet pays
-//! invoices with locks and is paid with locks of the hub's notes: see
-//! [`Wallet::pay_invoice`] and [`Wallet::invoice`]. Through a swap
-//! provider, it swaps notes at one hub for notes at another with a lock at
-//! each: see [`Wallet::swap`]. Silent payments to its address are found
+//! [`Wallet::claim`]. Through a swap provider, the wallet pays Lightning
+//! invoices with locks and is paid with locks of the provider's notes: see
+//! [`Wallet::pay_invoice_via`] and [`Wallet::invoice_through`]. It also
+//! swaps notes at one hub for notes at another with a lock at each: see
+//! [`Wallet::swap`]. Silent payments to its address are found
 //! with a hub's tweaks and the application's light client: see
 //! [`Wallet::scan_silent`].
 //!

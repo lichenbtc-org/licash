@@ -1,43 +1,31 @@
-//! Lightning, through a hub's gateway ([`licash_api::Lightning`]).
+//! Lightning, through swap providers: hubs pay and make no invoices.
 //!
-//! Paying an invoice locks notes worth it and the gateway's fee to the hub
-//! alone, under the invoice's hash, recording the invoice with the lock.
-//! Once the lock is certified the wallet asks the hub to pay the invoice:
-//! the preimage the payment buys settles the lock, and a failed payment
-//! refunds it. Following the lock asks again until one or the other. An
-//! invoice of the gateway's own node, a receipt at the same hub, is paid
-//! inside the hub, for its amount alone: the lock backs the receipt, and
-//! the preimage its payee reveals to claim it settles the lock.
+//! A wallet of an older version paid and was paid through a hub's gateway
+//! ([`licash_api::Lightning`]): such a lock records its invoice, and once
+//! certified the wallet asked the hub to pay it; such a receipt has no
+//! provider beside it. Both are still followed to their end, as they were.
 //!
-//! Paying through a swap provider instead ([`Wallet::pay_invoice_via`]):
-//! the wallet locks the invoice's amount and the provider's fee to the
-//! provider, under the invoice's hash, and asks it to pay the invoice from
-//! its own node. The preimage the payment buys claims the lock. The lock
-//! expires soon after the provider's routes end, so that its notes return
-//! soon if the payment fails. When the invoice is a hub's, the payee's
-//! wallet chose its preimage: the provider cannot keep it from the payee.
+//! Paying ([`Wallet::pay_invoice_via`]): the wallet locks the invoice's
+//! amount and the provider's fee to the provider, under the invoice's
+//! hash, and asks it to pay the invoice from its own node. The preimage
+//! the payment buys claims the lock. The lock expires soon after the
+//! provider's routes end, so that its notes return soon if the payment
+//! fails. When the invoice is a wallet's, its payee chose its preimage:
+//! the provider cannot keep it from the payee.
 //!
-//! Getting paid: the wallet draws a preimage, records it with the receipt
-//! it asks for, then asks the hub for an invoice under its hash. Once the
-//! invoice is paid, the hub locks notes of its own to the wallet, which
-//! claims them with the preimage: that settles the invoice.
-//!
-//! Or getting paid through a swap provider ([`Wallet::invoice_through`]),
-//! at a hub with no gateway: the provider's node makes the invoice under
-//! the wallet's hash, asking exactly the amount and its fee, and once it is
-//! paid locks notes of its own to the wallet at the hub, which the wallet
-//! claims as it claims a hub's. The provider is recorded beside the
-//! invoice, in a table made when first used: a wallet's file of an older
-//! version holds hub invoices alone, followed as they were.
+//! Getting paid ([`Wallet::invoice_through`]): the wallet draws a
+//! preimage, records it with the receipt it asks for, and the provider's
+//! node makes the invoice under the wallet's hash, asking exactly the
+//! amount and its fee. Once it is paid the provider locks notes of its own
+//! to the wallet at the hub, which the wallet claims with the preimage.
+//! The provider is recorded beside the invoice, in a table made when first
+//! used: a wallet's file of an older version holds hub invoices alone,
+//! followed as they were.
 
-use licash::{
-    address::Ephemeral,
-    claim::Branch,
-    spend::{lock_hash, ProposalId},
-};
+use licash::spend::{lock_hash, ProposalId};
 use licash_api::{
     swaps::{self, LightningRequest, LightningSwap, ReceiveRequest},
-    Lightning, Pay, PayState, Paying, Receive, ReceiveState, ReceiveStatus, Receiving,
+    Pay, PayState, Paying, Receive, ReceiveState, ReceiveStatus, Receiving,
 };
 use lightning_invoice::Bolt11Invoice;
 use rand_core::{OsRng, RngCore};
@@ -75,9 +63,9 @@ pub struct Invoice {
     /// When its notes were taken, if they were.
     pub received_at: Option<i64>,
     /// Its lock's preimage revealed only with [`crate::PROTECTED_MARGIN`]
-    /// blocks left ([`Wallet::invoice_protected`]).
+    /// blocks left (as a hub's gateway made them before).
     pub protected: bool,
-    /// What it says to its payer, if asked ([`Wallet::invoice_saying`]).
+    /// What it says to its payer, if asked ([`Wallet::invoice_through`]).
     pub memo: Option<String>,
 }
 
@@ -96,7 +84,7 @@ pub enum InvoiceState {
 /// A Lightning invoice to pay, as [`Wallet::read_invoice`] reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Payable {
-    /// The BOLT11 invoice, to pay with [`Wallet::pay_invoice`].
+    /// The BOLT11 invoice, to pay with [`Wallet::pay_invoice_via`].
     pub request: String,
     /// What it asks, in sat: rounded up from millisatoshis.
     pub amount: u64,
@@ -159,7 +147,7 @@ fn committed(invoice: &Bolt11Invoice) -> Option<[u8; 32]> {
 }
 
 /// An invoice's exact total, in millisatoshis, and the description hash it
-/// commits to ([`Wallet::invoice_exact`]).
+/// commits to ([`Wallet::invoice_exact_through`]).
 #[derive(Clone, Copy)]
 struct Exact {
     msat: u64,
@@ -221,82 +209,6 @@ impl<T: Transport> Wallet<T> {
         }
         Ok(msat)
     }
-
-    /// What paying `request` through the hub at `url` costs on top of what
-    /// it asks, with the notes held now, as the hub last said: its
-    /// gateway's fee, and its fee on a payment to this wallet making notes
-    /// worth the lock exactly, if it holds none. Refused as
-    /// [`Error::Insufficient`] if it holds not that much at the hub.
-    pub fn invoice_fee(&self, url: &str, request: &str) -> Result<u64, Error> {
-        let url = hub_url(url)?;
-        let invoice = decode(request)?;
-        let msat = self.payable(&invoice)?;
-        let (hub, info) = self.hub(&url)?;
-        let (lock, _) = gateway_lock(&url, &info, &invoice, msat)?;
-        self.gateway_fee((&url, hub), lock, msat)
-    }
-
-    /// What a lock of `lock` sat at the hub at `url`, paying an invoice of
-    /// `msat` through its gateway, costs on top of the invoice: the
-    /// gateway's fee in it, and the hub's fee on a payment to this wallet
-    /// making notes worth it exactly, if it holds none.
-    fn gateway_fee(&self, (url, hub): (&str, i64), lock: u64, msat: u64) -> Result<u64, Error> {
-        let exact = match self.exact(hub, lock)? {
-            Some(_) => 0,
-            None => self.send_fee(url, lock)?,
-        };
-        Ok(lock - msat.div_ceil(1000) + exact)
-    }
-}
-
-/// The amount and expiry of a lock paying `invoice`, of `msat`, through
-/// the hub at `url` saying `info`. An invoice of its gateway's own node,
-/// a receipt there, is paid inside the hub: for its amount alone. Any
-/// other, over Lightning: for its amount and the gateway's fee, if the
-/// latest expiry the hub admits leaves its gateway room for the invoice's
-/// final delta.
-fn gateway_lock(
-    url: &str,
-    info: &licash_api::Info,
-    invoice: &Bolt11Invoice,
-    msat: u64,
-) -> Result<(u64, u32), Error> {
-    let lightning = info
-        .lightning
-        .as_ref()
-        .ok_or_else(|| Error::Invalid(format!("hub {url} pays no Lightning invoices")))?;
-    let locks = info
-        .locks
-        .as_ref()
-        .ok_or_else(|| Error::Invalid(format!("hub {url} follows no chain: it takes no locks")))?;
-    let expiry = locks
-        .latest_expiry(locks.min_depth.max(1))
-        .map_err(|p| unavailable(url, p))?;
-    if pays_inside(lightning, invoice) {
-        return Ok((msat.div_ceil(1000), expiry));
-    }
-    if msat > lightning.max_pay.saturating_mul(1000) {
-        return Err(Error::Invalid(format!(
-            "hub {url} pays invoices of at most {} sat",
-            lightning.max_pay
-        )));
-    }
-    let room = expiry
-        .saturating_sub(locks.height)
-        .saturating_sub(lightning.pay_slack);
-    let delta = invoice.min_final_cltv_expiry_delta();
-    if u64::from(room) < delta.saturating_add(CLTV_MARGIN) {
-        return Err(Error::Invalid(format!(
-            "the invoice's final delta of {delta} blocks outlasts the locks of hub {url}"
-        )));
-    }
-    Ok((lightning.pay_lock(msat), expiry))
-}
-
-/// Whether `invoice` is of the node of the gateway `lightning`: a receipt
-/// at its hub, which the hub pays inside it.
-fn pays_inside(lightning: &Lightning, invoice: &Bolt11Invoice) -> bool {
-    hex::encode(invoice.get_payee_pub_key().serialize()) == lightning.node
 }
 
 fn hash_id(hash: &str) -> Result<[u8; 32], Error> {
@@ -308,90 +220,6 @@ fn hash_id(hash: &str) -> Result<[u8; 32], Error> {
 
 /// Paying invoices.
 impl<T: Transport> Wallet<T> {
-    /// Pay `request`, a BOLT11 invoice, through the hub at `url`: lock
-    /// notes worth it and the hub's fee to the hub, until the latest expiry
-    /// it admits, for the hub to pay it. Where the lock stands: paid on the
-    /// invoice's preimage, refunded once the payment failed, or
-    /// [`crate::LockState::Locked`] while it is under way, which
-    /// [`Wallet::follow_lock`] follows.
-    pub async fn pay_invoice(&self, url: &str, request: &str) -> Result<Lock, Error> {
-        self.pay_invoice_within(url, request, None).await
-    }
-
-    /// [`Wallet::pay_invoice`], refused as [`Error::FeeRose`] if it costs
-    /// more than `max_fee` on top of what the invoice asks
-    /// ([`Wallet::invoice_fee`]), as the hub says now: what was quoted.
-    pub async fn pay_invoice_within(
-        &self,
-        url: &str,
-        request: &str,
-        max_fee: Option<u64>,
-    ) -> Result<Lock, Error> {
-        let url = hub_url(url)?;
-        let invoice = decode(request)?;
-        let msat = self.payable(&invoice)?;
-        let hash: [u8; 32] = *invoice.payment_hash().as_ref();
-        if let Some(lock) = self.live_lock(&hash, |l| l.via.is_some())? {
-            return Err(Error::Invalid(format!(
-                "the invoice is being paid through a swap provider, by lock {}",
-                lock.id
-            )));
-        }
-        // Asked again: the lock made before, live or paid, not another.
-        if let Some(lock) = self.live_lock(&hash, |l| l.invoice.is_some())? {
-            return self.follow_lock(&lock.id).await;
-        }
-        let (hub, info) = self.refresh(&url).await?;
-        let (amount, expiry) = gateway_lock(&url, &info, &invoice, msat)?;
-        if let Some(agreed) = max_fee {
-            let asked = self.gateway_fee((&url, hub), amount, msat)?;
-            if asked > agreed {
-                return Err(Error::FeeRose {
-                    who: url.clone(),
-                    agreed,
-                    asked,
-                    reason: format!(
-                        "hub {url} asks {asked} sat to pay the invoice, more than {agreed}"
-                    ),
-                });
-            }
-            // The exact notes to lock made first, within what is left of
-            // the fee once the gateway's: a hub refusing the fee it
-            // advertised is paid its new one only that far.
-            if self.exact(hub, amount)?.is_none() {
-                let gateway = amount - msat.div_ceil(1000);
-                let left = Some(agreed.saturating_sub(gateway));
-                tracing::info!(%url, amount, "making exact notes to lock");
-                let me = self.address();
-                match self.send_with(&url, &me, amount, None, None, left).await {
-                    Err(Error::FeeRose { asked, .. }) => {
-                        let asked = gateway.saturating_add(asked);
-                        return Err(Error::FeeRose {
-                            who: url.clone(),
-                            agreed,
-                            asked,
-                            reason: format!(
-                                "hub {url} asks {asked} sat to pay the invoice, more than {agreed}"
-                            ),
-                        });
-                    }
-                    made => made.map(drop)?,
-                }
-            }
-        }
-        let request = invoice.to_string();
-        tracing::info!(%url, msat, amount, "paying an invoice");
-        self.lock_paying(
-            (&url, hub, &info),
-            &info.address,
-            amount,
-            hash,
-            Some(expiry),
-            Pays::Gateway(&request),
-        )
-        .await
-    }
-
     /// Ask the hub at `url` to pay `invoice` for lock `id`, certified: a
     /// failure or a refusal is recorded, and the lock followed to its
     /// refund. No answer is retried when the lock is followed again.
@@ -947,175 +775,6 @@ impl<T: Transport> Wallet<T> {
 
 /// Getting paid over Lightning.
 impl<T: Transport> Wallet<T> {
-    /// Ask the hub at `url` for an invoice paying this wallet `amount`, its
-    /// fee on top, to hand the payer. [`Wallet::follow_invoice`] claims the
-    /// payment once made.
-    pub async fn invoice(&self, url: &str, amount: u64) -> Result<Invoice, Error> {
-        self.invoice_with(url, amount, false, None).await
-    }
-
-    /// [`Wallet::invoice`], or [`Wallet::invoice_protected`] if
-    /// `protected`, saying `memo` to its payer, if given: in its
-    /// description, which the hub and its Lightning node see too. Refused
-    /// at a hub not naming [`licash_api::FEATURE_MEMO`], which would leave
-    /// it out, and checked in the invoice it answers.
-    pub async fn invoice_saying(
-        &self,
-        url: &str,
-        amount: u64,
-        memo: Option<&str>,
-        protected: bool,
-    ) -> Result<Invoice, Error> {
-        if protected {
-            self.chain_known_to_protect()?;
-        }
-        self.invoice_with(url, amount, protected, memo).await
-    }
-
-    /// An invoice from the hub at `url` asking exactly `msat`, the hub's
-    /// fee taken from it: this wallet is paid the most whole notes the rest
-    /// comes to, and the hub keeps the under 2 sat beyond. Committing to
-    /// `description_hash`, if given, as LNURL-pay and Nostr zaps want, or
-    /// else saying `memo`, if given ([`Wallet::invoice_saying`]). Refused
-    /// at a hub not naming [`licash_api::FEATURE_LNURL`], and checked in
-    /// the invoice it answers.
-    pub async fn invoice_exact(
-        &self,
-        url: &str,
-        msat: u64,
-        memo: Option<&str>,
-        description_hash: Option<[u8; 32]>,
-    ) -> Result<Invoice, Error> {
-        if memo.is_some() && description_hash.is_some() {
-            return Err(Error::Invalid(
-                "a memo or a description hash, not both".into(),
-            ));
-        }
-        let exact = Exact {
-            msat,
-            description_hash,
-        };
-        self.invoice_asking(url, None, false, memo, Some(exact))
-            .await
-    }
-
-    /// [`Wallet::invoice`], its lock's preimage revealed only with
-    /// [`crate::PROTECTED_MARGIN`] blocks left at the higher of its hub's
-    /// height and the chain's as the wallet knows it of itself
-    /// ([`Wallet::tip`]): should the hub keep the notes, the wallet
-    /// activates the lock on Bitcoin in time for a contract's recovery at
-    /// the hub to claim them; a lock shown later is left to expire, the
-    /// payment failing back to its payer. Only worth asking with such a
-    /// contract, and a coin to activate with: without, a protected invoice
-    /// only fails more often. Refused of a wallet that does not know the
-    /// chain's height of itself, whose hub's word for it protects nothing:
-    /// its payment waits, unclaimed, while it does not.
-    pub async fn invoice_protected(&self, url: &str, amount: u64) -> Result<Invoice, Error> {
-        self.chain_known_to_protect()?;
-        self.invoice_with(url, amount, true, None).await
-    }
-
-    fn chain_known_to_protect(&self) -> Result<(), Error> {
-        match self.tip()? {
-            Some(_) => Ok(()),
-            None => Err(Error::Chain(
-                "the chain's height is not known to the wallet itself, to protect an \
-                 invoice by: tell it, or scan"
-                    .into(),
-            )),
-        }
-    }
-
-    async fn invoice_with(
-        &self,
-        url: &str,
-        amount: u64,
-        protected: bool,
-        memo: Option<&str>,
-    ) -> Result<Invoice, Error> {
-        self.invoice_asking(url, Some(amount), protected, memo, None)
-            .await
-    }
-
-    /// An invoice for `amount`, or for what `exact` leaves of its total.
-    async fn invoice_asking(
-        &self,
-        url: &str,
-        amount: Option<u64>,
-        protected: bool,
-        memo: Option<&str>,
-        exact: Option<Exact>,
-    ) -> Result<Invoice, Error> {
-        let memo = memo
-            .map(licash_api::memo)
-            .transpose()
-            .map_err(|p| Error::Invalid(p.message))?;
-        let url = hub_url(url)?;
-        self.not_visited(&url)?;
-        let (hub, info) = self.refresh(&url).await?;
-        let lightning = info
-            .lightning
-            .as_ref()
-            .ok_or_else(|| Error::Invalid(format!("hub {url} takes no Lightning payments")))?;
-        if memo.is_some() && !info.features.iter().any(|f| f == licash_api::FEATURE_MEMO) {
-            return Err(Error::Invalid(format!(
-                "hub {url} puts no memo in its invoices"
-            )));
-        }
-        let amount = match (amount, exact) {
-            (Some(amount), _) => amount,
-            (None, Some(exact)) => {
-                if !info.features.iter().any(|f| f == licash_api::FEATURE_LNURL) {
-                    return Err(Error::Invalid(format!(
-                        "hub {url} makes no invoices of an exact amount"
-                    )));
-                }
-                licash_api::receivable(exact.msat, &lightning.receive).ok_or_else(|| {
-                    Error::Invalid(format!(
-                        "hub {url} takes all of {} msat in fees",
-                        exact.msat
-                    ))
-                })?
-            }
-            (None, None) => return Err(Error::Invalid("an invoice of no amount".into())),
-        };
-        if amount < lightning.min_receive || amount > lightning.max_receive {
-            return Err(Error::Invalid(format!(
-                "hub {url} takes {} to {} over Lightning",
-                lightning.min_receive, lightning.max_receive
-            )));
-        }
-        let keysets = info.keysets().map_err(|p| unavailable(&url, p))?;
-        let (ephemeral, me) = (Ephemeral::random(), self.address());
-        let (keyset, outputs) = keysets
-            .iter()
-            .find_map(|k| {
-                let outputs = crate::outputs(k, &ephemeral, Branch::Pay, &[(&me, amount)]);
-                Some((k, outputs.ok()?))
-            })
-            .ok_or_else(|| Error::Invalid(format!("hub {url} has no keyset making {amount}")))?;
-        let mut preimage = [0; 32];
-        OsRng.fill_bytes(&mut preimage);
-        let hash = lock_hash(&preimage);
-        let body = Receive::new(keyset.id(), &ephemeral.public(), &outputs, &hash)
-            .with_memo(memo)
-            .with_lnurl(
-                exact.map(|e| e.msat),
-                exact.and_then(|e| e.description_hash),
-            );
-        let body = serde_json::to_string(&body).map_err(invalid)?;
-        self.store.write(|tx| {
-            tx.execute(
-                "INSERT INTO invoices (hash, hub, preimage, amount, body, created_at, protected)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![hash, hub, preimage, sql(amount)?, body, now(), protected],
-            )?;
-            Ok(())
-        })?;
-        tracing::info!(hash = %hex::encode(hash), %url, amount, protected, "asking for an invoice");
-        self.advance_invoice(&hash).await
-    }
-
     /// Take the invoice of `hash` on: have its hub make it, then claim the
     /// notes its hub locks to the wallet once it is paid. Where it stands.
     pub async fn follow_invoice(&self, hash: &str) -> Result<Invoice, Error> {

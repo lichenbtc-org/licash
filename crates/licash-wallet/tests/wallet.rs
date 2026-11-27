@@ -606,7 +606,11 @@ async fn a_hub_visited_proves_it_is_the_one_a_code_names_and_is_not_trusted() {
     assert!(matches!(code, Err(Error::UnknownHub(_))), "{code:?}");
     // Nor asked for what its proof does not cover.
     refused(bob.deposit(OTHER, 1_000).await, "only visited");
-    refused(bob.invoice(OTHER, 1_000).await, "only visited");
+    refused(
+        bob.invoice_through("https://swaps.example", OTHER, 1_000, None)
+            .await,
+        "only visited",
+    );
 
     // Learned again only as the hub it proved it is: else unavailable,
     // what is under way there waiting for it to prove it again.

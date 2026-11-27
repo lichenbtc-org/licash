@@ -33,8 +33,8 @@ use crate::{
 pub const CLAIM_MARGIN: u32 = 3;
 
 /// Blocks before its expiry within which the wallet reveals no preimage of
-/// a protected lock (a deposit's, or a protected invoice's,
-/// [`Wallet::invoice_protected`]), at the higher of its hub's height and
+/// a protected lock (a deposit's, or a protected invoice's, as a hub's
+/// gateway made them before), at the higher of its hub's height and
 /// the chain's as the wallet knows it of itself ([`Wallet::tip`]): should
 /// the hub not issue its notes, the wallet still activates the lock on
 /// Bitcoin in time for a contract's recovery to claim them. A lock shown
@@ -101,8 +101,6 @@ pub struct Via {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Pays<'a> {
     Nothing,
-    /// Its hub's gateway.
-    Gateway(&'a str),
     /// The swap provider at `provider`, to which it pays.
     Via {
         provider: &'a str,
@@ -162,7 +160,6 @@ pub(crate) struct PreparedLock {
     amount: u64,
     pub(crate) fee: u64,
     request: String,
-    invoice: Option<String>,
     via: Option<Via>,
     inputs: Vec<[u8; 33]>,
     height: u32,
@@ -171,8 +168,10 @@ pub(crate) struct PreparedLock {
 impl PreparedLock {
     pub(crate) fn record(&self, tx: &rusqlite::Transaction<'_>) -> Result<(), Error> {
         // One lock pays an invoice, however often or concurrently asked: a
-        // second under its hash would pay it twice on its one preimage.
-        if self.invoice.is_some() || self.via.is_some() {
+        // second under its hash would pay it twice on its one preimage. A
+        // lock of an older version paying it through its hub's gateway
+        // (`invoice` set) counts as well.
+        if self.via.is_some() {
             let paying: Option<[u8; 32]> = tx
                 .query_row(
                     "SELECT l.id FROM locks l
@@ -194,8 +193,8 @@ impl PreparedLock {
         }
         tx.execute(
             "INSERT INTO locks
-                (id, hub, payee, hash, expiry_height, amount, fee, request, invoice, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                (id, hub, payee, hash, expiry_height, amount, fee, request, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 self.id.as_bytes(),
                 self.hub,
@@ -205,7 +204,6 @@ impl PreparedLock {
                 sql(self.amount)?,
                 sql(self.fee)?,
                 self.request,
-                self.invoice,
                 now()
             ],
         )?;
@@ -395,10 +393,6 @@ impl<T: Transport> Wallet<T> {
             amount,
             fee,
             request,
-            invoice: match pays {
-                Pays::Gateway(invoice) => Some(invoice.to_owned()),
-                _ => None,
-            },
             via: match pays {
                 Pays::Via { provider, invoice } => Some(Via {
                     provider: provider.to_owned(),
