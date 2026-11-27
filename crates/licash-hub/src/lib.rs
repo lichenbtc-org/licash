@@ -428,23 +428,25 @@ fn events(conn: &Connection, after: u64, limit: u32) -> Result<Vec<Event>, Error
 }
 
 /// A hub at work: its keys, derived from its seed, over its database,
-/// which it holds for itself while open.
+/// which it holds for itself while open. Or a standby
+/// ([`Hub::open_standby`]): a copy that holds no seed, and so issues
+/// nothing, spends nothing of the hub's and claims no deposit, but reads
+/// the ledger, retires what claims give up and cites its evidence as the
+/// hub does, to answer its contracts' disputes.
 pub struct Hub {
     store: Store,
-    keysets: BTreeMap<[u8; 32], (IssuerKeys, Keyset)>,
+    /// Each keyset the ledger names: what the hub publishes of it.
+    keysets: BTreeMap<[u8; 32], Keyset>,
     /// The id of the keyset of [`Hub::issuing`].
     issuing: [u8; 32],
-    owner: OwnerKeys,
-    unlock_secret: [u8; 32],
-    /// The Nostr key's secret, and its public key, x-only in hex.
-    nostr: ([u8; 32], String),
-    /// What each deposit's key derives from.
-    deposit: [u8; 32],
+    /// The address the hub is paid at.
+    address: Address,
     /// The key the hub signs what its contract witnesses keep with.
     witness: [u8; 32],
-    /// This process's public boot id and its key, never stored.
+    /// What its seed alone derives: none in a standby.
+    secrets: Option<Secrets>,
+    /// This process's public boot id, never stored.
     boot: [u8; 16],
-    boot_key: [u8; 32],
     /// What this process answered: the hash of each request by its output.
     /// It outlives no nonce, so it is the authority over them.
     answered: Mutex<HashMap<[u8; 32], [u8; 32]>>,
@@ -465,6 +467,87 @@ pub struct Hub {
     reorg_alerted: AtomicBool,
     /// The identity it last proved, and the proof: the same while it is.
     proved: Mutex<Option<([u8; 32], Signature)>>,
+}
+
+/// What a hub derives from its seed and a standby does without: the keys it
+/// issues notes with, those of its own notes and identity, and the secrets
+/// of its grants' unlocks, its Nostr key, its deposits and its unlink
+/// nonces.
+struct Secrets {
+    issuers: BTreeMap<[u8; 32], IssuerKeys>,
+    owner: OwnerKeys,
+    unlock: [u8; 32],
+    /// The Nostr key's secret, and its public key, x-only in hex.
+    nostr: ([u8; 32], String),
+    /// What each deposit's key derives from.
+    deposit: [u8; 32],
+    /// This process's key of its unlink nonces, never stored.
+    boot_key: [u8; 32],
+}
+
+/// What a standby holds in place of the hub's seed
+/// ([`write_standby_keys`]): the hub's keysets and address, which it
+/// publishes, and its witness key, the one secret among them. Whoever
+/// holds it, with a copy of the ledger, answers the contracts' disputes as
+/// the hub (docs/hub.md, The standby), but mints no note: no key here
+/// issues one, opens a grant not released or claims a deposit.
+struct StandbyKeys {
+    keysets: Vec<Keyset>,
+    address: Address,
+    witness: [u8; 32],
+}
+
+/// [`StandbyKeys`] as their file holds them, in hex.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StandbyFile {
+    /// The file's format: 1.
+    standby: u32,
+    keysets: Vec<String>,
+    address: String,
+    witness: String,
+}
+
+impl StandbyKeys {
+    fn read(path: &Path) -> Result<Self, Error> {
+        let bad = |why: &str| Error::Setup(format!("standby keys {}: {why}", path.display()));
+        let text = std::fs::read_to_string(path).map_err(|e| bad(&e.to_string()))?;
+        warn_if_shared(path, "the standby keys are")?;
+        let file: StandbyFile = serde_json::from_str(&text).map_err(|e| bad(&e.to_string()))?;
+        if file.standby != 1 {
+            return Err(bad("not of format 1"));
+        }
+        let keysets = (file.keysets.iter())
+            .map(|k| {
+                let bytes = hex::decode(k).map_err(|_| bad("a keyset not in hex"))?;
+                Keyset::from_bytes(&bytes).map_err(|e| bad(&e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let address = hex::decode(&file.address).map_err(|_| bad("an address not in hex"))?;
+        let address = Address::from_bytes(&address).map_err(|e| bad(&e.to_string()))?;
+        let mut witness = [0; 32];
+        hex::decode_to_slice(&file.witness, &mut witness)
+            .map_err(|_| bad("a witness key not of 32 hex bytes"))?;
+        Ok(Self {
+            keysets,
+            address,
+            witness,
+        })
+    }
+
+    fn write(&self, path: &Path) -> Result<(), Error> {
+        let file = StandbyFile {
+            standby: 1,
+            keysets: (self.keysets.iter())
+                .map(|k| hex::encode(k.to_bytes()))
+                .collect(),
+            address: hex::encode(self.address.to_bytes()),
+            witness: hex::encode(self.witness),
+        };
+        let text = serde_json::to_string_pretty(&file)
+            .map_err(|e| Error::Setup(format!("standby keys: {e}")))?;
+        write_secret(path, &format!("{text}\n"))
+    }
 }
 
 impl Hub {
@@ -501,43 +584,95 @@ impl Hub {
     pub fn open(seed: &Path, db: &Path, policy: Policy) -> Result<Self, Error> {
         let secret = read_seed(seed)?;
         let store = Store::open(db)?;
-        let rows: Vec<([u8; 32], u32, u32)> = store.read(|c| {
-            let mut rows = c.prepare("SELECT id, idx, max_pow FROM keysets ORDER BY idx")?;
-            let rows = rows
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect::<Result<_, _>>()?;
-            Ok(rows)
-        })?;
-        // By index: the first is the one it issues under.
-        let issuing = rows.first().map(|(id, _, _)| *id);
-        let issuing = issuing.ok_or_else(|| Error::Setup("the database has no keyset".into()))?;
-        let mut keysets = BTreeMap::new();
-        for (id, index, max_pow) in rows {
-            let keys = IssuerKeys::from_seed(&secret, index, max_pow)?;
-            if keys.id() != &id {
-                return Err(Error::Setup("the seed does not match the database".into()));
-            }
-            let keyset = keys.keyset()?;
-            keysets.insert(id, (keys, keyset));
-        }
-        if keysets.is_empty() {
-            return Err(Error::Setup("the database has no keyset".into()));
-        }
-        let newest = store.read(locks::newest_checkpoint)?;
-        let (mut boot, mut drawn) = ([0; 16], [0; 32]);
-        OsRng.fill_bytes(&mut boot);
+        let (public, issuers, owner) = derived(&secret, &keyset_rows(&store)?)?;
+        let mut drawn = [0; 32];
         OsRng.fill_bytes(&mut drawn);
-        let hub = Self {
-            store,
-            keysets,
-            issuing,
-            owner: OwnerKeys::from_seed(&tagged_hash("licash-hub/owner", &[&secret]))?,
-            unlock_secret: tagged_hash("licash-hub/unlock", &[&secret]),
+        let secrets = Secrets {
+            issuers,
+            owner,
+            unlock: tagged_hash("licash-hub/unlock", &[&secret]),
             nostr: nostr_key(tagged_hash("licash-hub/nostr", &[&secret]))?,
             deposit: tagged_hash("licash-hub/deposit", &[&secret]),
-            witness: witness_of(&secret),
-            boot,
             boot_key: tagged_hash("licash-hub/boot", &[&secret, &drawn]),
+        };
+        let hub = Self::over(store, public, Some(secrets), policy)?;
+        hub.keep_unlocks()?;
+        hub.started()
+    }
+
+    /// A standby on the copy of the hub's ledger at `db`, with the keys
+    /// its hub wrote at `keys` ([`write_standby_keys`]) in place of
+    /// its seed. Refused unless the keys are of every keyset the ledger
+    /// names, and the ledger keeps the unlock of each grant released, as
+    /// one a hub of this release started on does: a standby cites a
+    /// released spend by it, and a claim of notes whose spend it could not
+    /// cite would be paid for them.
+    pub fn open_standby(keys: &Path, db: &Path, policy: Policy) -> Result<Self, Error> {
+        let keys = StandbyKeys::read(keys)?;
+        let store = Store::open(db)?;
+        let named = keyset_rows(&store)?;
+        let held = |id: &[u8; 32]| keys.keysets.iter().any(|k| k.id() == id);
+        if keys.keysets.len() != named.len() || !named.iter().all(|(id, _, _)| held(id)) {
+            return Err(Error::Setup(
+                "the standby keys do not match the database".into(),
+            ));
+        }
+        let unkept = store.read(|c| {
+            if licash_store::component_version(c, store::UNLOCKS).map_err(store::setup)?
+                != Some(store::UNLOCKS_VERSION)
+            {
+                return Ok(None);
+            }
+            let unkept: i64 = c.query_row(
+                "SELECT count(*) FROM grants g WHERE g.released_at IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM released_unlocks u WHERE u.id = g.id)",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(Some(unkept))
+        })?;
+        if unkept != Some(0) {
+            let which = match unkept {
+                Some(n) => format!("{n} spends it released have none kept"),
+                None => "it is of a release that kept none".into(),
+            };
+            return Err(Error::Setup(format!(
+                "this copy of the ledger does not keep the unlock of every spend released \
+                 ({which}): start the hub of this release on its ledger with its seed, then \
+                 copy the ledger again"
+            )));
+        }
+        Self::over(store, keys, None, policy)?.started()
+    }
+
+    /// Whether this is a standby ([`Hub::open_standby`]), which holds no
+    /// seed.
+    pub fn standby(&self) -> bool {
+        self.secrets.is_none()
+    }
+
+    fn over(
+        store: Store,
+        public: StandbyKeys,
+        secrets: Option<Secrets>,
+        policy: Policy,
+    ) -> Result<Self, Error> {
+        // By index: the first is the one it issues under.
+        let issuing = keyset_rows(&store)?.first().map(|(id, _, _)| *id);
+        let issuing = issuing.ok_or_else(|| Error::Setup("the database has no keyset".into()))?;
+        let newest = store.read(locks::newest_checkpoint)?;
+        let mut boot = [0; 16];
+        OsRng.fill_bytes(&mut boot);
+        Ok(Self {
+            store,
+            keysets: (public.keysets.into_iter())
+                .map(|keyset| (*keyset.id(), keyset))
+                .collect(),
+            issuing,
+            address: public.address,
+            witness: public.witness,
+            secrets,
+            boot,
             answered: Mutex::default(),
             offers: Mutex::default(),
             held_offers: Mutex::default(),
@@ -547,13 +682,26 @@ impl Hub {
             synced_at: Mutex::default(),
             reorg_alerted: AtomicBool::default(),
             proved: Mutex::default(),
-        };
-        hub.keep_unlocks()?;
-        let boot = hex::encode(boot);
-        tracing::info!(keysets = hub.keysets.len(), %boot, "hub started");
-        hub.store
+        })
+    }
+
+    fn started(self) -> Result<Self, Error> {
+        let boot = hex::encode(self.boot);
+        let standby = self.standby();
+        tracing::info!(keysets = self.keysets.len(), %boot, standby, "hub started");
+        self.store
             .write(|tx| notify(tx, &Notice::Started { boot }))?;
-        Ok(hub)
+        Ok(self)
+    }
+
+    /// What the hub's seed derives, which a standby does without: refused
+    /// there, whatever asked for it.
+    fn secrets(&self) -> Result<&Secrets, Error> {
+        self.secrets.as_ref().ok_or_else(|| {
+            Error::Setup(
+                "a standby holds no seed: it answers its contracts' disputes and no more".into(),
+            )
+        })
     }
 
     /// Keep the unlock of each grant released that the ledger does not
@@ -575,7 +723,7 @@ impl Hub {
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect::<Result<Vec<([u8; 32], [u8; 32], [u8; 32])>, _>>()?;
             for (id, keyset, salt) in &missing {
-                let unlock = self.unlock(keyset, &ProposalId::from_bytes(*id), salt);
+                let unlock = self.unlock(keyset, &ProposalId::from_bytes(*id), salt)?;
                 keep_unlock(tx, id, &unlock)?;
             }
             Ok(missing.len())
@@ -593,47 +741,53 @@ impl Hub {
     }
 
     /// The secret key the hub signs its Nostr announcements with: its
-    /// public key is the `nostr` of [`Hub::advertise`].
-    pub fn nostr_secret(&self) -> [u8; 32] {
-        self.nostr.0
+    /// public key is the `nostr` of [`Hub::advertise`]. None in a standby.
+    pub fn nostr_secret(&self) -> Result<[u8; 32], Error> {
+        Ok(self.secrets()?.nostr.0)
     }
 
     /// The secret key the hub signs each entry its contract witnesses keep
     /// with, and they check: of its seed alone, the same across restores,
-    /// and of no use but to them. Not a valid key, by chance of about one
-    /// in 2^128, is the caller's to refuse.
+    /// and of no use but to them; a standby's is its hub's, from its keys.
+    /// Not a valid key, by chance of about one in 2^128, is the caller's
+    /// to refuse.
     pub fn witness_secret(&self) -> [u8; 32] {
         self.witness
     }
 
     /// The secret key the hub claims a deposit on Bitcoin under `hash`
     /// with, each deposit's its own: not a valid key, by chance of about
-    /// one in 2^128, is the caller's to refuse.
-    pub fn deposit_secret(&self, hash: &[u8; 32]) -> [u8; 32] {
-        tagged_hash("licash-hub/deposit-key", &[&self.deposit, hash])
+    /// one in 2^128, is the caller's to refuse. None in a standby.
+    pub fn deposit_secret(&self, hash: &[u8; 32]) -> Result<[u8; 32], Error> {
+        let deposit = &self.secrets()?.deposit;
+        Ok(tagged_hash("licash-hub/deposit-key", &[deposit, hash]))
     }
 
     /// The secret of the hub's deposit root, from which it claims the
     /// deposits that return a contract's reserve, each under a key
     /// derived from the root's public key, which it publishes: not a valid
     /// key, by chance of about one in 2^128, is the caller's to refuse.
-    pub fn deposit_root_secret(&self) -> [u8; 32] {
-        tagged_hash("licash-hub/deposit-root", &[&self.deposit])
+    /// None in a standby.
+    pub fn deposit_root_secret(&self) -> Result<[u8; 32], Error> {
+        let deposit = &self.secrets()?.deposit;
+        Ok(tagged_hash("licash-hub/deposit-root", &[deposit]))
     }
 
     /// What the hub publishes of itself.
     pub fn info(&self) -> Info {
         Info {
-            keysets: self.keysets.values().map(|(_, k)| k.clone()).collect(),
-            address: self.owner.address(),
+            keysets: self.keysets.values().cloned().collect(),
+            address: self.address,
             policy: self.policy,
         }
     }
 
     /// What the hub says of itself at [`licash_api::INFO`]: with the locks
     /// it admits once it follows a chain, and then the proof of its
-    /// identity on that chain's network.
+    /// identity on that chain's network. Not a standby's to say: it serves
+    /// no wallet.
     pub fn advertise(&self) -> Result<licash_api::Info, Error> {
+        let secrets = self.secrets()?;
         let info = self.info();
         let (policy, timing) = (info.policy, info.policy.timing);
         let fees = policy.fees();
@@ -649,7 +803,7 @@ impl Hub {
             _ => None,
         };
         let mut advertised = licash_api::Info::new(&info.keysets, info.address, fees, locks);
-        advertised.nostr = Some(self.nostr.1.clone());
+        advertised.nostr = Some(secrets.nostr.1.clone());
         if let Some(checkpoint) = self.checkpoint() {
             let identity = advertised
                 .identity(checkpoint.profile())
@@ -658,7 +812,7 @@ impl Hub {
             let signature = match &*proved {
                 Some((digest, signature)) if *digest == identity => *signature,
                 _ => {
-                    let signature = schnorr_sign(self.owner.spend_secret(), &identity)?;
+                    let signature = schnorr_sign(secrets.owner.spend_secret(), &identity)?;
                     *proved = Some((identity, signature));
                     signature
                 }
@@ -673,12 +827,12 @@ impl Hub {
     /// makes for now. A wallet names the keyset of what it asks for, and
     /// [`Hub::info`] lists them all, ordered by id.
     pub fn issuing(&self) -> &Keyset {
-        &self.keysets[&self.issuing].1
+        &self.keysets[&self.issuing]
     }
 
     /// The hub's keyset `id`, to decode requests under.
     pub fn keyset(&self, id: &[u8; 32]) -> Option<&Keyset> {
-        self.keysets.get(id).map(|(_, keyset)| keyset)
+        self.keysets.get(id)
     }
 
     /// The events after `seq`, oldest first, at most `limit`.
@@ -699,9 +853,18 @@ impl Hub {
         })
     }
 
+    /// The keyset `id` with the keys the hub issues its notes with: a
+    /// standby has none.
     fn keys(&self, id: &[u8; 32]) -> Result<(&IssuerKeys, &Keyset), Error> {
-        let (keys, keyset) = self.keysets.get(id).ok_or(Refusal::UnknownKeyset)?;
-        Ok((keys, keyset))
+        let keyset = self.keyset_of(id)?;
+        let keys = self.secrets()?.issuers.get(id);
+        Ok((keys.ok_or(Refusal::UnknownKeyset)?, keyset))
+    }
+
+    /// The keyset `id`, to read under what the ledger keeps: a standby's
+    /// as well.
+    pub(crate) fn keyset_of(&self, id: &[u8; 32]) -> Result<&Keyset, Error> {
+        Ok(self.keysets.get(id).ok_or(Refusal::UnknownKeyset)?)
     }
 
     /// The unlock of the grant of `proposal`: a scalar of the hub's secret,
@@ -710,18 +873,27 @@ impl Hub {
     /// ledger once released for the evidence that cites it
     /// ([`keep_unlock`]). Zero with negligible odds, which
     /// [`PreparedGrant::derive`] refuses.
-    fn unlock(&self, keyset: &[u8; 32], proposal: &ProposalId, salt: &[u8; 32]) -> Unlock {
+    fn unlock(
+        &self,
+        keyset: &[u8; 32],
+        proposal: &ProposalId,
+        salt: &[u8; 32],
+    ) -> Result<Unlock, Error> {
         let hash = tagged_hash(
             "licash-hub/grant-unlock",
-            &[&self.unlock_secret, keyset, proposal.as_bytes(), salt],
+            &[&self.secrets()?.unlock, keyset, proposal.as_bytes(), salt],
         );
-        ScalarBytes::from_scalar(&scalar_from_hash(&hash)).0
+        Ok(ScalarBytes::from_scalar(&scalar_from_hash(&hash)).0)
     }
 
     /// The secret of the unlink nonces of `proposal`'s outputs, for this
     /// process only.
-    fn nonce_secret(&self, proposal: &[u8; 32]) -> [u8; 32] {
-        tagged_hash("licash-hub/unlink-nonce", &[&self.boot_key, proposal])
+    fn nonce_secret(&self, proposal: &[u8; 32]) -> Result<[u8; 32], Error> {
+        let boot_key = &self.secrets()?.boot_key;
+        Ok(tagged_hash(
+            "licash-hub/unlink-nonce",
+            &[boot_key, proposal],
+        ))
     }
 }
 
@@ -759,12 +931,17 @@ fn nostr_key(secret: [u8; 32]) -> Result<([u8; 32], String), Error> {
 }
 
 fn write_seed(path: &Path, seed: &[u8; 32]) -> Result<(), Error> {
+    write_secret(path, &format!("{}\n", hex::encode(seed)))
+}
+
+/// `text` in a new file at `path`, its owner's alone to read, and synced.
+fn write_secret(path: &Path, text: &str) -> Result<(), Error> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let mut file = options.open(path).map_err(|e| setup_io(path, e))?;
-    file.write_all(format!("{}\n", hex::encode(seed)).as_bytes())?;
+    file.write_all(text.as_bytes())?;
     file.sync_all()?;
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::File::open(dir)?.sync_all()?;
@@ -791,16 +968,86 @@ pub fn witness_secret_of(seed: &Path) -> Result<[u8; 32], Error> {
     Ok(witness_of(&read_seed(seed)?))
 }
 
-fn read_seed(path: &Path) -> Result<[u8; 32], Error> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| Error::Setup(format!("seed {}: {e}", path.display())))?;
+/// The hub's witness key in the standby keys at `keys`
+/// ([`write_standby_keys`]), without opening a ledger: as
+/// [`witness_secret_of`] of a seed.
+pub fn standby_witness_secret(keys: &Path) -> Result<[u8; 32], Error> {
+    Ok(StandbyKeys::read(keys)?.witness)
+}
+
+/// Write at `path`, which must not exist, the keys a standby of the hub of
+/// the seed at `seed` and the ledger at `db` opens a copy of that ledger
+/// with ([`Hub::open_standby`]), readable by its owner alone: they hold
+/// the hub's witness key. Beside the running hub or with it stopped: the
+/// ledger is read, not written.
+pub fn write_standby_keys(seed: &Path, db: &Path, path: &Path) -> Result<(), Error> {
+    let secret = read_seed(seed)?;
+    let conn = store::inspect(db)?;
+    let (public, _, _) = derived(&secret, &keyset_rows_in(&conn)?)?;
+    public.write(path)
+}
+
+/// What [`derived`] gives.
+type Derived = (StandbyKeys, BTreeMap<[u8; 32], IssuerKeys>, OwnerKeys);
+
+/// What the seed `secret` derives for the ledger's keysets `rows`
+/// ([`keyset_rows`]): what the hub publishes with its witness key, the
+/// keys it issues with by keyset, and those of its own notes. Refused
+/// unless each keyset is the seed's.
+fn derived(secret: &[u8; 32], rows: &[([u8; 32], u32, u32)]) -> Result<Derived, Error> {
+    let mut issuers = BTreeMap::new();
+    let mut keysets = Vec::new();
+    for (id, index, max_pow) in rows {
+        let keys = IssuerKeys::from_seed(secret, *index, *max_pow)?;
+        if keys.id() != id {
+            return Err(Error::Setup("the seed does not match the database".into()));
+        }
+        keysets.push(keys.keyset()?);
+        issuers.insert(*id, keys);
+    }
+    let owner = OwnerKeys::from_seed(&tagged_hash("licash-hub/owner", &[secret]))?;
+    let public = StandbyKeys {
+        keysets,
+        address: owner.address(),
+        witness: witness_of(secret),
+    };
+    Ok((public, issuers, owner))
+}
+
+/// The ledger's keysets, by index: their ids, indices and largest powers.
+fn keyset_rows(store: &Store) -> Result<Vec<([u8; 32], u32, u32)>, Error> {
+    store.read(keyset_rows_in)
+}
+
+fn keyset_rows_in(conn: &rusqlite::Connection) -> Result<Vec<([u8; 32], u32, u32)>, Error> {
+    let mut rows = conn.prepare("SELECT id, idx, max_pow FROM keysets ORDER BY idx")?;
+    let rows = rows
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if rows.is_empty() {
+        return Err(Error::Setup("the database has no keyset".into()));
+    }
+    Ok(rows)
+}
+
+/// Warn of a secret file at `path` that others than its owner read.
+fn warn_if_shared(path: &Path, what: &str) -> Result<(), Error> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         if std::fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
-            tracing::warn!(path = %path.display(), "the seed is readable by others than its owner");
+            tracing::warn!(path = %path.display(), "{what} readable by others than its owner");
         }
     }
+    #[cfg(not(unix))]
+    let _ = (path, what);
+    Ok(())
+}
+
+fn read_seed(path: &Path) -> Result<[u8; 32], Error> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| Error::Setup(format!("seed {}: {e}", path.display())))?;
+    warn_if_shared(path, "the seed is")?;
     let mut seed = [0; 32];
     hex::decode_to_slice(text.trim(), &mut seed)
         .map_err(|_| Error::Setup(format!("seed {}: not 32 hex bytes", path.display())))?;
@@ -872,9 +1119,9 @@ impl Hub {
         }
         let mut salt = [0; 32];
         OsRng.fill_bytes(&mut salt);
-        let unlock = self.unlock(keyset.id(), &id, &salt);
+        let unlock = self.unlock(keyset.id(), &id, &salt)?;
         let grant =
-            PreparedGrant::derive(keys, proposal, unlock, &self.nonce_secret(id.as_bytes()))?
+            PreparedGrant::derive(keys, proposal, unlock, &self.nonce_secret(id.as_bytes())?)?
                 .offer();
         let offer = grant.to_bytes()?;
         // Held over the write: racing offers of a note count to the most.
@@ -989,7 +1236,7 @@ impl Hub {
             .optional()?)
         })?;
         let (offer, salt, boot) = offered.ok_or(Refusal::UnknownOffer)?;
-        let unlock = self.unlock(keyset.id(), &id, &salt);
+        let unlock = self.unlock(keyset.id(), &id, &salt)?;
         Grant::from_bytes(&offer)?.verify_release(keyset, notes, signed, &unlock)?;
         // Refused once known not to be released already: one released is
         // its unlock again, whatever this release would admit.
@@ -1001,6 +1248,7 @@ impl Hub {
             .collect::<Result<Vec<Point>, _>>()?;
         let (amount, fee, _) = self.charge(proposal)?;
         let income = self
+            .secrets()?
             .owner
             .scan_key()
             .receive(proposal)?
@@ -1171,7 +1419,7 @@ impl Hub {
                     }
                     let output = Output::new(request.denomination(), blinded, commitment)?;
                     let nonce =
-                        unlink::Nonce::derive(&self.nonce_secret(&proposal), keyset, &output)?;
+                        unlink::Nonce::derive(&self.nonce_secret(&proposal)?, keyset, &output)?;
                     let record = nonce.answer(keys, request)?;
                     let updated = tx.execute(
                         "UPDATE issued SET answered = ?4
@@ -1195,7 +1443,7 @@ impl Hub {
             .inputs()
             .iter()
             .fold(0u64, |sum, m| sum.saturating_add(m.denomination()));
-        let received = self.owner.scan_key().receive(proposal)?;
+        let received = self.secrets()?.owner.scan_key().receive(proposal)?;
         let fee = received.iter().fold(0u64, |sum, r| {
             sum.saturating_add(r.derivation.message().denomination())
         });

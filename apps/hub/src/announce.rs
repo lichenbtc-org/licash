@@ -26,7 +26,11 @@ pub async fn announce(
         network: profile.name().to_owned(),
         name,
     };
-    match Announcer::new(&hub.nostr_secret(), Role::Hub, &relays, &route).await {
+    let secret = match hub.nostr_secret() {
+        Ok(secret) => secret,
+        Err(e) => return tracing::error!("announcing on Nostr: {e:#}"),
+    };
+    match Announcer::new(&secret, Role::Hub, &relays, &route).await {
         Ok(announcer) => announcer.run(announcement).await,
         Err(e) => tracing::error!("announcing on Nostr: {e:#}"),
     }

@@ -1207,10 +1207,12 @@ impl Gateway {
     /// The secret of the hub's deposit root, which it claims the deposits that
     /// return a contract's reserve with, each under the root tweaked.
     fn root_secret(&self) -> Result<SecretKey, Failure> {
-        SecretKey::from_slice(&self.hub.deposit_root_secret()).map_err(|_| {
+        let unavailable = || {
             tracing::error!("no deposit root");
             Failure(Problem::new(Code::Unavailable, "the hub cannot serve now"))
-        })
+        };
+        let secret = self.hub.deposit_root_secret().map_err(|_| unavailable())?;
+        SecretKey::from_slice(&secret).map_err(|_| unavailable())
     }
 
     /// The hub's deposit root, as it publishes it.
@@ -1232,10 +1234,12 @@ impl Gateway {
 
     /// The key the hub claims the deposit under `hash` with.
     fn claim_key(&self, hash: &[u8; 32]) -> Result<SecretKey, Failure> {
-        SecretKey::from_slice(&self.hub.deposit_secret(hash)).map_err(|_| {
+        let unavailable = || {
             tracing::error!(hash = %hex::encode(hash), "no deposit key under this hash");
             Failure(Problem::new(Code::Unavailable, "the hub cannot serve now"))
-        })
+        };
+        let secret = self.hub.deposit_secret(hash).map_err(|_| unavailable())?;
+        SecretKey::from_slice(&secret).map_err(|_| unavailable())
     }
 }
 

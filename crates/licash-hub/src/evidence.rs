@@ -126,7 +126,7 @@ impl Hub {
                 "too many notes in an inquiry".into(),
             )));
         }
-        self.keys(keyset)?;
+        self.keyset_of(keyset)?;
         let now = u64::try_from(crate::store::now()).unwrap_or(0);
         for (note, sig) in asked {
             inquiry::verify(keyset, at, note, sig, now)?;
@@ -173,7 +173,7 @@ impl Hub {
             if served.contains(&lock.id) {
                 continue;
             }
-            let read = self.keys(&lock.keyset).and_then(|(_, keyset)| {
+            let read = self.keyset_of(&lock.keyset).and_then(|keyset| {
                 let read = evidence_from_bytes(keyset, u32::MAX as usize, &lock.evidence)?;
                 match <[Evidence; 1]>::try_from(read) {
                     Ok([spend @ Evidence::Spend { unlock: None, .. }]) => Ok(spend),
@@ -217,7 +217,7 @@ impl Hub {
             [id.as_bytes()],
             |r| r.get(0),
         )?;
-        let (_, keyset) = self.keys(&keyset_id)?;
+        let keyset = self.keyset_of(&keyset_id)?;
         let mut stmt =
             c.prepare_cached("SELECT note FROM spent WHERE proposal = ?1 ORDER BY position")?;
         let notes = stmt

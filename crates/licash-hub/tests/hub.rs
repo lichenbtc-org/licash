@@ -322,7 +322,7 @@ fn a_hub_names_one_nostr_key_of_its_seed_across_restarts() {
     use bitcoin::secp256k1::{Keypair, Secp256k1};
     let (a, b) = (files(), files());
     let hub = open(&a, Policy::default());
-    let secret = hub.nostr_secret();
+    let secret = hub.nostr_secret().unwrap();
     let named = hub.advertise().unwrap().nostr.unwrap();
     let pair = Keypair::from_seckey_slice(&Secp256k1::new(), &secret).unwrap();
     assert_eq!(named, hex::encode(pair.x_only_public_key().0.serialize()));
@@ -330,21 +330,34 @@ fn a_hub_names_one_nostr_key_of_its_seed_across_restarts() {
     assert_ne!(hex::encode(secret), seed.trim());
     drop(hub);
     let again = open(&a, Policy::default());
-    assert_eq!(again.nostr_secret(), secret);
+    assert_eq!(again.nostr_secret().unwrap(), secret);
     assert_eq!(again.advertise().unwrap().nostr.unwrap(), named);
-    assert_ne!(open(&b, Policy::default()).nostr_secret(), secret);
+    assert_ne!(open(&b, Policy::default()).nostr_secret().unwrap(), secret);
 }
 
 #[test]
 fn a_hub_claims_each_deposit_with_a_key_of_its_own_seed() {
     let (a, b) = (files(), files());
     let hub = open(&a, Policy::default());
-    let (one, two) = (hub.deposit_secret(&[1; 32]), hub.deposit_secret(&[2; 32]));
+    let (one, two) = (
+        hub.deposit_secret(&[1; 32]).unwrap(),
+        hub.deposit_secret(&[2; 32]).unwrap(),
+    );
     assert_ne!(one, two);
-    assert_ne!(one, hub.nostr_secret());
+    assert_ne!(one, hub.nostr_secret().unwrap());
     drop(hub);
-    assert_eq!(open(&a, Policy::default()).deposit_secret(&[1; 32]), one);
-    assert_ne!(open(&b, Policy::default()).deposit_secret(&[1; 32]), one);
+    assert_eq!(
+        open(&a, Policy::default())
+            .deposit_secret(&[1; 32])
+            .unwrap(),
+        one
+    );
+    assert_ne!(
+        open(&b, Policy::default())
+            .deposit_secret(&[1; 32])
+            .unwrap(),
+        one
+    );
 }
 
 #[test]
@@ -508,6 +521,202 @@ fn a_claim_of_notes_the_hub_released_a_spend_of_meets_that_spend_and_its_unlock(
     assert!(matches!(&cited[..], [Against::Spend { unlock: Some(u), .. }] if *u == [7; 32]));
     // Its payee is given the hub's own again all the same.
     assert_eq!(hub.release(&signed, &spend.notes()).unwrap(), unlock);
+}
+
+/// A standby opens a copy of the ledger with the keys its hub wrote for it
+/// and no seed: it cites what the hub cites against a claim, a released
+/// spend with its unlock among it, and retires what a claim gives up, and
+/// signs for the witnesses as the hub. It issues nothing, releases nothing
+/// and has no key of the hub's notes, deposits or Nostr identity.
+#[test]
+fn a_standby_cites_and_retires_as_its_hub_and_holds_no_key_that_issues() {
+    let files = files();
+    let hub = open(&files, Policy::default());
+    assert!(!hub.standby());
+    let (_, keyset) = issuer(&files);
+    let (alice, bob) = (owner(1), owner(2));
+    let [spent, kept, claimed] = [8, 4, 2].map(|denom| mint(&files, &alice, denom));
+    let spend = Spend::new(&keyset, std::slice::from_ref(&spent), &[(bob.address(), 8)]);
+    let grant = spend.offer(&hub).unwrap();
+    let signed = spend.sign(&keyset, Authorization::Granted(Box::new(grant)));
+    let unlock = hub.release(&signed, &spend.notes()).unwrap();
+    let first = filed([7; 32], &keyset, &[&claimed]);
+    hub.retire_claimed(&[1; 32], &first.held(), &[]).unwrap();
+    let claim = claim_of(&keyset, &[&spent, &kept]);
+    let second = filed([9; 32], &keyset, &[&claimed]);
+    let evidence = |hub: &Hub| {
+        [&claim, second.claim()]
+            .map(|claim| licash::recovery::evidence_to_bytes(&hub.evidence(claim).unwrap()))
+    };
+    let found = evidence(&hub);
+    assert!(found.iter().all(|bytes| !bytes.is_empty()));
+    let (info, witness) = (hub.info(), hub.witness_secret());
+    let keys = files.db.with_file_name("standby.json");
+    // Beside the running hub.
+    let write = |path: &Path| licash_hub::write_standby_keys(&files.seed, &files.db, path);
+    write(&keys).unwrap();
+    // Never over a file there, and its owner's alone to read.
+    assert!(setup_error(write(&keys)).contains("exists"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&keys).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    // The witness key and what the hub publishes: nothing of its seed.
+    let text = std::fs::read_to_string(&keys).unwrap();
+    let seed = std::fs::read_to_string(&files.seed).unwrap();
+    assert!(!text.contains(seed.trim()));
+    assert!(text.contains(&hex::encode(witness)));
+    assert_eq!(licash_hub::standby_witness_secret(&keys).unwrap(), witness);
+    drop(hub);
+
+    let standby = Hub::open_standby(&keys, &files.db, Policy::default()).unwrap();
+    assert!(standby.standby());
+    assert_eq!(standby.witness_secret(), witness);
+    assert_eq!(standby.info().keysets, info.keysets);
+    assert_eq!(standby.info().address.to_bytes(), info.address.to_bytes());
+    assert_eq!(standby.issuing().id(), keyset.id());
+    // The same evidence, the released spend's unlock in it.
+    assert_eq!(evidence(&standby), found);
+    let cited = standby.evidence(&claim).unwrap();
+    assert!(matches!(
+        &cited[..],
+        [licash::recovery::Evidence::Spend { unlock: Some(u), .. }] if *u == unlock
+    ));
+    // What a claim gives up is retired, and cited against the next.
+    let third = filed([5; 32], &keyset, &[&kept]);
+    standby
+        .retire_claimed(&[2; 32], &third.held(), &[])
+        .unwrap();
+    let y = kept.note.message().identifier().unwrap();
+    assert_eq!(standby.spent(&[y]).unwrap(), [true]);
+    let again = filed([6; 32], &keyset, &[&kept]);
+    assert_eq!(standby.evidence(again.claim()).unwrap().len(), 1);
+    standby.alert("told").unwrap();
+    // Nothing its seed alone does.
+    let fresh = mint(&files, &alice, 16);
+    let late = Spend::new(
+        &keyset,
+        std::slice::from_ref(&fresh),
+        &[(bob.address(), 16)],
+    );
+    let no_seed = |why: String| assert!(why.contains("a standby holds no seed"), "{why}");
+    no_seed(setup_error(late.offer(&standby)));
+    no_seed(setup_error(standby.release(&signed, &spend.notes())));
+    no_seed(setup_error(standby.nostr_secret()));
+    no_seed(setup_error(standby.deposit_secret(&[1; 32])));
+    no_seed(setup_error(standby.deposit_root_secret()));
+    no_seed(setup_error(standby.advertise()));
+    let y = fresh.note.message().identifier().unwrap();
+    assert_eq!(standby.spent(&[y]).unwrap(), [false]);
+    drop(standby);
+    // The hub, on the ledger its standby wrote: what it retired stands.
+    let hub = open(&files, Policy::default());
+    assert_eq!(hub.evidence(again.claim()).unwrap().len(), 1);
+}
+
+/// A standby is refused a ledger that does not keep the unlock of every
+/// spend released, which it could not cite; keys that are not its hub's;
+/// and a file that is not its keys.
+#[test]
+fn a_standby_opens_only_a_ledger_it_can_cite_from_with_its_hubs_keys() {
+    let files = files();
+    let hub = open(&files, Policy::default());
+    let (_, keyset) = issuer(&files);
+    let (alice, bob) = (owner(1), owner(2));
+    let coin = mint(&files, &alice, 8);
+    let spend = Spend::new(&keyset, std::slice::from_ref(&coin), &[(bob.address(), 8)]);
+    let grant = spend.offer(&hub).unwrap();
+    let signed = spend.sign(&keyset, Authorization::Granted(Box::new(grant)));
+    hub.release(&signed, &spend.notes()).unwrap();
+    // One offered and not released needs no unlock kept.
+    let other = mint(&files, &alice, 4);
+    Spend::new(&keyset, std::slice::from_ref(&other), &[(bob.address(), 4)])
+        .offer(&hub)
+        .unwrap();
+    let keys = files.db.with_file_name("standby.json");
+    licash_hub::write_standby_keys(&files.seed, &files.db, &keys).unwrap();
+    // Not with another hub's seed.
+    let theirs = self::files();
+    let their_keys = theirs.db.with_file_name("standby.json");
+    let mixed = licash_hub::write_standby_keys(&theirs.seed, &files.db, &their_keys);
+    assert!(setup_error(mixed).contains("the seed does not match"));
+    assert!(!their_keys.exists());
+    // While the hub runs on it: one hub a database.
+    let standby = || Hub::open_standby(&keys, &files.db, Policy::default());
+    assert!(setup_error(standby()).contains("another hub"));
+    drop(hub);
+    drop(standby().unwrap());
+
+    // A released spend whose unlock a release of before did not keep.
+    let conn = sql(&files.db);
+    let kept: Vec<u8> = conn
+        .query_row("SELECT unlock FROM released_unlocks", [], |r| r.get(0))
+        .unwrap();
+    conn.execute("DELETE FROM released_unlocks", []).unwrap();
+    drop(conn);
+    let why = setup_error(standby());
+    assert!(why.contains("1 spends it released have none kept"), "{why}");
+    assert!(why.contains("with its seed"), "{why}");
+    // A ledger of a release that kept none: not made here, which a seed
+    // alone fills.
+    let conn = sql(&files.db);
+    conn.execute_batch(
+        "DROP TABLE released_unlocks;
+         DELETE FROM schema_versions WHERE component = 'unlocks';",
+    )
+    .unwrap();
+    drop(conn);
+    let why = setup_error(standby());
+    assert!(why.contains("of a release that kept none"), "{why}");
+    let conn = sql(&files.db);
+    let tables: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'released_unlocks'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0);
+    drop(conn);
+    // The hub's start with its seed keeps them; its standby opens then.
+    drop(open(&files, Policy::default()));
+    let conn = sql(&files.db);
+    let again: Vec<u8> = conn
+        .query_row("SELECT unlock FROM released_unlocks", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(again, kept);
+    drop(conn);
+    drop(standby().unwrap());
+
+    // Another hub's keys.
+    licash_hub::write_standby_keys(&theirs.seed, &theirs.db, &their_keys).unwrap();
+    let why = setup_error(Hub::open_standby(&their_keys, &files.db, Policy::default()));
+    assert!(why.contains("do not match the database"), "{why}");
+    // Not its keys: a seed, a file of another format, none.
+    for (text, why) in [
+        (
+            std::fs::read_to_string(&files.seed).unwrap(),
+            "standby keys",
+        ),
+        (
+            std::fs::read_to_string(&keys)
+                .unwrap()
+                .replace("\"standby\": 1", "\"standby\": 2"),
+            "not of format 1",
+        ),
+    ] {
+        let path = files.db.with_file_name("other.json");
+        std::fs::write(&path, text).unwrap();
+        let error = setup_error(Hub::open_standby(&path, &files.db, Policy::default()));
+        assert!(error.contains(why), "{error}");
+        assert!(licash_hub::standby_witness_secret(&path).is_err());
+        std::fs::remove_file(&path).unwrap();
+    }
+    let none = files.db.with_file_name("none.json");
+    let error = setup_error(Hub::open_standby(&none, &files.db, Policy::default()));
+    assert!(error.contains("standby keys"), "{error}");
 }
 
 /// A ledger of before unlocks were kept has no tables of them: the hub's

@@ -409,7 +409,7 @@ fn check_version(conn: &Connection) -> Result<(), Error> {
     }
 }
 
-fn setup(e: licash_store::Error) -> Error {
+pub(crate) fn setup(e: licash_store::Error) -> Error {
     match e {
         licash_store::Error::Sqlite(e) => e.into(),
         e => Error::Setup(e.to_string()),

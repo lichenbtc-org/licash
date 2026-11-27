@@ -674,7 +674,7 @@ fn hubs_announced_on_nostr_are_discovered_where_they_answer_as_the_announcer() {
         });
     };
     announce(
-        hub.hub.nostr_secret(),
+        hub.hub.nostr_secret().unwrap(),
         &["http://127.0.0.1:1", &hub.url()],
         "regtest",
     );
@@ -694,7 +694,7 @@ fn hubs_announced_on_nostr_are_discovered_where_they_answer_as_the_announcer() {
     assert_eq!(found[0]["urls"], serde_json::json!([hub.url()]));
     assert_eq!(
         found[0]["name"],
-        format!("hub {}", hub.hub.nostr_secret()[0])
+        format!("hub {}", hub.hub.nostr_secret().unwrap()[0])
     );
     assert_eq!(found[0]["fees"]["spend"]["base"], 1);
     assert!(!nowhere.exists());
@@ -875,7 +875,7 @@ fn swap_providers_announced_on_nostr_are_discovered_where_they_answer() {
         swaps.url(),
     );
     // The hub announced as a hub, and another key announcing the provider.
-    announce(a.hub.nostr_secret(), Role::Hub, a.url());
+    announce(a.hub.nostr_secret().unwrap(), Role::Hub, a.url());
     announce([3; 32], Role::Swaps, swaps.url());
 
     let dir = tempfile::tempdir().unwrap();

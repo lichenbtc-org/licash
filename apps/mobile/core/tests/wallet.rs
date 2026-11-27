@@ -1288,8 +1288,8 @@ fn a_phone_finds_the_hubs_announced_on_its_hubs_relays_but_those_it_uses() {
 
     // Her own hub, another, and the other's URL announced by another key:
     // only the other found, at the URL that answered as its key.
-    announce(net.hub.nostr_secret(), &net.url, "hers");
-    announce(other.hub.nostr_secret(), &other.url, "another");
+    announce(net.hub.nostr_secret().unwrap(), &net.url, "hers");
+    announce(other.hub.nostr_secret().unwrap(), &other.url, "another");
     announce([5; 32], &other.url, "not it");
     let found = alice.discover_hubs().unwrap();
     assert_eq!(found.len(), 1, "{found:?}");
@@ -1326,7 +1326,7 @@ fn a_phone_finds_hubs_on_relays_it_is_given_and_is_told_of_those_not_answering()
             assert_eq!(sent.unwrap(), 1);
         })
     };
-    announce(net.hub.nostr_secret(), net.url.clone(), "a hub");
+    announce(net.hub.nostr_secret().unwrap(), net.url.clone(), "a hub");
     // One down, and one an onion service only, out of reach without Tor.
     announce([6; 32], "http://127.0.0.1:9".into(), "down");
     let onion = format!("http://{}.onion", "a".repeat(56));
@@ -1344,7 +1344,7 @@ fn a_phone_finds_hubs_on_relays_it_is_given_and_is_told_of_those_not_answering()
     assert_eq!(bob.hubs().unwrap().len(), 1);
 
     // His own hub announced: neither found nor told of.
-    announce(other.hub.nostr_secret(), other.url.clone(), "his");
+    announce(other.hub.nostr_secret().unwrap(), other.url.clone(), "his");
     let found = bob.find_hubs(relays.clone()).unwrap();
     assert_eq!(found.hubs.len(), 1, "{found:?}");
     assert_eq!((found.silent, found.silent_onion), (2, 1));

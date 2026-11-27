@@ -445,7 +445,8 @@ impl Hub {
                 Err(Refusal::Exists.into())
             };
         }
-        let address = self.owner.address();
+        let owner = &self.secrets()?.owner;
+        let address = self.address;
         let (minting, back) = (Ephemeral::random(), Ephemeral::random());
         let (mut notes, mut owners, mut refund) = (Vec::new(), Vec::new(), Vec::new());
         for (i, output) in pay.iter().enumerate() {
@@ -455,7 +456,7 @@ impl Hub {
                 .issue(keys)?
                 .open(keyset, &d)?;
             notes.push(note);
-            owners.push(d.ownership().owner_secret(self.owner.spend_secret())?);
+            owners.push(d.ownership().owner_secret(owner.spend_secret())?);
             let r = back.derive(&address, denom, Branch::Refund, i)?;
             refund.push(Output::from_derivation(&r)?);
         }
@@ -523,9 +524,10 @@ impl Hub {
         let outputs = lock.proposal.outputs();
         let charge = self.lock_charge(&lock.proposal)?;
         let hub_payee = charge.count(Branch::Pay) == outputs.len();
+        let nonces = self.nonce_secret(id.as_bytes())?;
         let issuances = outputs
             .iter()
-            .map(|o| Nonce::derive(&self.nonce_secret(id.as_bytes()), keyset, o)?.issue(keys))
+            .map(|o| Nonce::derive(&nonces, keyset, o)?.issue(keys))
             .collect::<Result<Vec<_>, _>>()?;
         let income = if lock.own {
             Vec::new()
@@ -621,9 +623,10 @@ impl Hub {
         let (issuances, income) = if lock.own {
             (Vec::new(), Vec::new())
         } else {
+            let nonces = self.nonce_secret(id.as_bytes())?;
             let issuances = outputs
                 .iter()
-                .map(|o| Nonce::derive(&self.nonce_secret(id.as_bytes()), keyset, o)?.issue(keys))
+                .map(|o| Nonce::derive(&nonces, keyset, o)?.issue(keys))
                 .collect::<Result<Vec<_>, _>>()?;
             let income = charge.received(Branch::Refund, |i, d| issuances[i].open(keyset, d))?;
             (issuances, income)
@@ -885,7 +888,7 @@ impl Hub {
         let Some((keyset, proposal, certificate, anchor, own, preimage, settled)) = raw else {
             return Ok(None);
         };
-        let (_, decoded) = self.keys(&keyset)?;
+        let decoded = self.keyset_of(&keyset)?;
         let lock = Lock {
             proposal: Proposal::from_commitment_bytes(&proposal)?,
             certificate: Certificate::from_bytes(decoded, &certificate)?,
@@ -987,7 +990,7 @@ impl Hub {
             .inputs()
             .iter()
             .fold(0u64, |sum, m| sum.saturating_add(m.denomination()));
-        let received = self.owner.scan_key().receive(proposal)?;
+        let received = self.secrets()?.owner.scan_key().receive(proposal)?;
         let value = |branch: Branch| {
             received
                 .iter()
