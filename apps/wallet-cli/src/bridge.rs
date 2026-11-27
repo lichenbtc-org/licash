@@ -76,27 +76,22 @@ pub enum BridgeCommand {
         #[arg(long)]
         bridge: Option<String>,
     },
-    /// Pay AMOUNT sat into the account through a hub, its Lightning fee on
-    /// top; the bridge's hub keeps its fee on receiving out of it.
+    /// Pay AMOUNT sat into the account in notes at the bridge's hub, the
+    /// hub's fee on top, credited whole.
     TopUp {
         amount: u64,
         #[arg(long)]
         bridge: Option<String>,
-        /// Through this hub [default: the one holding the most].
-        #[arg(long)]
-        hub: Option<String>,
-        /// The Lightning fee at most, in sat.
+        /// The hub's fee at most, in sat.
         #[arg(long)]
         max_fee: Option<u64>,
     },
-    /// Have the bridge pay AMOUNT sat of the account back to the wallet.
+    /// Have the bridge pay AMOUNT sat of the account back to the wallet in
+    /// notes at its hub, the hub's fee on top out of the account.
     Withdraw {
         amount: u64,
         #[arg(long)]
         bridge: Option<String>,
-        /// At this hub [default: the only one trusted].
-        #[arg(long)]
-        hub: Option<String>,
     },
     /// Top the account up by `bridge run` or `watch` once it holds less
     /// than --below sat, up to --up-to, at most --daily in any day.
@@ -109,7 +104,7 @@ pub enum BridgeCommand {
         up_to: Option<u64>,
         #[arg(long, required_unless_present = "clear")]
         daily: Option<u64>,
-        /// Each top-up's Lightning fee at most, in sat.
+        /// Each top-up's hub fee at most, in sat.
         #[arg(long)]
         max_fee: Option<u64>,
         /// Top up by hand only.
@@ -117,11 +112,7 @@ pub enum BridgeCommand {
         clear: bool,
     },
     /// Top up the bridges whose rules say so, now.
-    Run {
-        /// Through this hub [default: the one holding the most].
-        #[arg(long)]
-        hub: Option<String>,
-    },
+    Run,
     /// Freeze the bridge for good and import its notes, for a recovery
     /// contract with its hub to claim should the hub stop cooperating.
     /// It pays nothing out from then on. --out keeps the export too.
@@ -281,52 +272,34 @@ pub async fn run(wallet: &Wallet<Http>, command: BridgeCommand, json: bool) -> a
         BridgeCommand::TopUp {
             amount,
             bridge,
-            hub,
             max_fee,
         } => {
             let url = which(wallet, bridge)?;
-            let hub = match hub {
-                Some(hub) => hub,
-                None => crate::richest(wallet)?,
-            };
-            let topped = wallet.top_up_bridge(&url, &hub, amount, max_fee).await?;
+            let topped = wallet.top_up_bridge(&url, amount, max_fee).await?;
             show(json, top_up_json(&topped), top_up_text(&topped));
         }
-        BridgeCommand::Withdraw {
-            amount,
-            bridge,
-            hub,
-        } => {
+        BridgeCommand::Withdraw { amount, bridge } => {
             let url = which(wallet, bridge)?;
-            let hub = match hub {
-                Some(hub) => hub,
-                None => crate::only_hub(wallet)?,
-            };
-            let (invoice, payment) = wallet.withdraw_bridge(&url, &hub, amount).await?;
-            let text = match payment.state {
+            let paid = wallet.withdraw_bridge(&url, amount).await?;
+            let text = match paid.state {
                 State::Settled => format!(
-                    "withdrawn {} to {hub}, {} paid by the bridge on top",
+                    "withdrawn {}, {} of the account paid to its hub on top",
                     say::sat(amount),
-                    msat(payment.fee)
+                    msat(paid.fee)
                 ),
                 State::Pending => format!(
-                    "withdrawing {}: under way, `resume` takes it once paid (invoice {})",
+                    "withdrawing {}: under way, asked again it is taken once paid (payout {})",
                     say::sat(amount),
-                    invoice.hash
+                    paid.id
                 ),
                 _ => format!(
                     "not withdrawn: {}",
-                    payment
-                        .failure
+                    paid.failure
                         .as_deref()
                         .unwrap_or("the bridge's payment failed")
                 ),
             };
-            show(
-                json,
-                json!({ "invoice": invoice.hash, "payment": payment }),
-                text,
-            );
+            show(json, json!(paid), text);
         }
         BridgeCommand::Rules {
             bridge,
@@ -351,12 +324,8 @@ pub async fn run(wallet: &Wallet<Http>, command: BridgeCommand, json: bool) -> a
             let added = wallet.bridge(&url)?;
             show(json, bridge_json(&added), bridge_text(&added));
         }
-        BridgeCommand::Run { hub } => {
-            let hub = match hub {
-                Some(hub) => hub,
-                None => crate::richest(wallet)?,
-            };
-            let done = wallet.top_up_bridges(&hub).await?;
+        BridgeCommand::Run => {
+            let done = wallet.top_up_bridges().await?;
             if done.is_empty() && !json {
                 println!("no top-up due");
             }
@@ -441,14 +410,7 @@ pub async fn top_up_due(wallet: &Wallet<Http>, json: bool) {
     if !ruled {
         return;
     }
-    let done = match crate::richest(wallet) {
-        Ok(hub) => wallet
-            .top_up_bridges(&hub)
-            .await
-            .map_err(anyhow::Error::from),
-        Err(e) => Err(e),
-    };
-    match done {
+    match wallet.top_up_bridges().await {
         Ok(done) => {
             for (url, topped) in done {
                 match topped {
@@ -612,17 +574,22 @@ fn activity_line(a: &Activity) -> String {
 
 fn top_up_json(topped: &BridgeTopUp) -> serde_json::Value {
     json!({
-        "bridge": topped.url, "invoice": topped.invoice, "lock": crate::lock_json(&topped.lock),
+        "bridge": topped.url, "payment": topped.id, "amount": topped.amount,
+        "fee": topped.fee, "credited": topped.credited,
     })
 }
 
 fn top_up_text(topped: &BridgeTopUp) -> String {
+    let credited = match topped.credited {
+        Some(credited) => format!("{} credited", msat(credited)),
+        None => "not credited yet: told the bridge again before the next top-up".to_owned(),
+    };
     format!(
-        "topping up {} with {}, {} credited once paid (lock {})",
+        "topped up {} with {}, {} paid to its hub on top, {credited} (payment {})",
         topped.url,
-        msat(topped.invoice.amount),
-        msat(topped.invoice.credits),
-        topped.lock.id
+        say::sat(topped.amount),
+        say::sat(topped.fee),
+        topped.id
     )
 }
 

@@ -20,7 +20,7 @@ use axum::{
 };
 use licash::spend::ChainProfile;
 use licash_api::{Code, Problem};
-use licash_hub_service::lightning::fake::Fake;
+use licash_lightning::fake::Fake;
 use licash_swaps::{Config, Provider, Record};
 use licash_transport::Http;
 use licash_wallet::Wallet;

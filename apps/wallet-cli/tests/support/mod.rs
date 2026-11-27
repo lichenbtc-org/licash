@@ -1,7 +1,6 @@
 //! A hub service on a local port that can go down and come back, following
-//! a regtest chain of its own, with a Lightning gateway over a fake node, a
-//! deposit gateway or an index of silent payment tweaks if asked, and a
-//! payer outside any wallet.
+//! a regtest chain of its own, with a deposit gateway or an index of silent
+//! payment tweaks if asked, and a payer outside any wallet.
 
 pub mod bridge;
 #[path = "../../../hub/tests/chain/mod.rs"]
@@ -34,11 +33,7 @@ use licash::{
 };
 use licash_api::{Fee, Payment};
 use licash_hub::{Hub, Policy, Timing};
-use licash_hub_service::{
-    deposit,
-    lightning::{fake::Fake, Config, Gateway},
-    tweaks::Tweaks,
-};
+use licash_hub_service::{deposit, tweaks::Tweaks};
 
 const MAX_POW: u32 = 6;
 
@@ -87,8 +82,6 @@ pub const SOURCE_WINDOW: u32 = 46;
 
 pub struct Server {
     pub hub: Arc<Hub>,
-    /// The gateway, and the node it pays and is paid through.
-    pub lightning: Option<(Arc<Gateway>, Arc<Fake>)>,
     /// The deposit gateway, and the URL of the mock Esplora it follows.
     pub deposits: Option<(Arc<deposit::Gateway>, String)>,
     /// The index of silent payment tweaks, following the mock Esplora.
@@ -108,31 +101,25 @@ impl Server {
     /// A hub charging `fee` on spends and in each branch of a lock, at
     /// height 3 of its chain.
     pub fn start(fee: Fee) -> Self {
-        Self::started(fee, false, false, false, Vec::new())
-    }
-
-    /// [`Server::start`], with a gateway charging 2 to pay an invoice and
-    /// 1 to take a payment, of 100 at most.
-    pub fn with_lightning(fee: Fee) -> Self {
-        Self::started(fee, true, false, false, Vec::new())
+        Self::started(fee, false, false, Vec::new())
     }
 
     /// [`Server::start`], taking deposits of 1000 to 4000 for a fee of
     /// 100, paid by block 10 after they are asked for, claimed to
     /// [`SWEEP`] and refundable [`DEPOSIT_TIMEOUT`] blocks after.
     pub fn with_deposits(fee: Fee) -> Self {
-        Self::started(fee, false, true, false, Vec::new())
+        Self::started(fee, true, false, Vec::new())
     }
 
     /// [`Server::with_deposits`], serving the silent payment tweaks of its
     /// chain from its height on, indexed each [`Server::round`].
     pub fn with_tweaks(fee: Fee) -> Self {
-        Self::started(fee, false, true, true, Vec::new())
+        Self::started(fee, true, true, Vec::new())
     }
 
     /// [`Server::start`], naming `relays` for its wallets' mailboxes.
     pub fn with_relays(fee: Fee, relays: Vec<String>) -> Self {
-        Self::started(fee, false, false, false, relays)
+        Self::started(fee, false, false, relays)
     }
 
     /// [`Server::with_relays`], keeping the payments its wallets ask it to
@@ -156,22 +143,16 @@ impl Server {
             window: SOURCE_WINDOW,
             ..TIMING
         };
-        Self::timed(fee, (false, false, false), relays, timing)
+        Self::timed(fee, (false, false), relays, timing)
     }
 
-    fn started(
-        fee: Fee,
-        lightning: bool,
-        deposits: bool,
-        tweaks: bool,
-        relays: Vec<String>,
-    ) -> Self {
-        Self::timed(fee, (lightning, deposits, tweaks), relays, TIMING)
+    fn started(fee: Fee, deposits: bool, tweaks: bool, relays: Vec<String>) -> Self {
+        Self::timed(fee, (deposits, tweaks), relays, TIMING)
     }
 
     fn timed(
         fee: Fee,
-        (lightning, deposits, tweaks): (bool, bool, bool),
+        (deposits, tweaks): (bool, bool),
         relays: Vec<String>,
         timing: Timing,
     ) -> Self {
@@ -188,25 +169,6 @@ impl Server {
         let hub = Arc::new(Hub::open(&seed, &db, policy).unwrap());
         let chain = chain::Chain::new();
         hub.add_checkpoint(&chain.checkpoint(0)).unwrap();
-        let lightning = lightning.then(|| {
-            let config = Config {
-                pay: Fee { base: 2, ppm: 0 },
-                receive: Fee { base: 1, ppm: 0 },
-                max_pay: 100,
-                min_receive: 1,
-                max_receive: 100,
-                pay_slack: 4,
-                hold_delta: 3,
-                downtime: 2,
-                receive_blocks: 6,
-                grace: 0,
-                ..Config::default()
-            };
-            let node = Arc::new(Fake::new());
-            let path = dir.path().join("hub.sqlite");
-            let gateway = Gateway::open(hub.clone(), node.clone(), config, &path).unwrap();
-            (Arc::new(gateway), node)
-        });
         let backend = esplora::backend(chain);
         let deposits = deposits.then(|| {
             let url = esplora::serve(backend.clone());
@@ -233,7 +195,6 @@ impl Server {
         });
         let mut server = Self {
             hub,
-            lightning,
             deposits,
             tweaks,
             relays,
@@ -250,16 +211,13 @@ impl Server {
         server
     }
 
-    /// One round of the gateway, if any: it follows its node and the
-    /// payments under way.
+    /// One round of the deposit gateway, if any, and the index of tweaks
+    /// following it.
     pub fn round(&self) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        if let Some((gateway, _)) = &self.lightning {
-            runtime.block_on(gateway.round());
-        }
         if let Some((gateway, url)) = &self.deposits {
             runtime.block_on(gateway.round());
             if let Some(tweaks) = &self.tweaks {
@@ -268,22 +226,6 @@ impl Server {
                 runtime.block_on(step).unwrap();
             }
         }
-    }
-
-    /// The fake node of the gateway.
-    pub fn node(&self) -> &Fake {
-        &self.lightning.as_ref().expect("a gateway").1
-    }
-
-    /// Another node pays the gateway's held invoice of `hash`, its HTLCs
-    /// lasting the invoice's final delta, and the gateway takes it.
-    pub fn pay_held(&self, hash: &str) {
-        let mut bytes = [0; 32];
-        hex::decode_to_slice(hash, &mut bytes).unwrap();
-        let cltv = self.node().held_cltv(bytes).unwrap() as u32;
-        let height = self.height();
-        self.node().pay_held(bytes, height + cltv);
-        self.round();
     }
 
     /// Mine `blocks`, the first with an activation of `secret` if given,
@@ -305,9 +247,6 @@ impl Server {
             self.hub.observe(chain.height(), &block).unwrap();
         }
         assert!(self.hub.synced(chain.height(), &chain.tip()).unwrap());
-        if let Some((_, node)) = &self.lightning {
-            node.tip(chain.height(), chain.tip());
-        }
     }
 
     pub fn height(&self) -> u32 {
@@ -411,7 +350,6 @@ impl Server {
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let (bound, addr) = std::sync::mpsc::channel();
         let (hub, at) = (self.hub.clone(), self.addr);
-        let gateway = self.lightning.as_ref().map(|(gateway, _)| gateway.clone());
         let deposits = self.deposits.as_ref().map(|(gateway, _)| gateway.clone());
         let tweaks = self.tweaks.clone();
         let relays = self.relays.clone();
@@ -434,7 +372,6 @@ impl Server {
                     licash_hub_service::router(
                         hub,
                         licash_hub_service::Services {
-                            gateway,
                             deposits,
                             tweaks,
                             inbox,
@@ -467,7 +404,7 @@ impl Server {
     /// longer unlinks the notes it issued before. Of a hub without
     /// gateways, which would hold the run before.
     pub fn restarted(mut self) -> Self {
-        assert!(self.lightning.is_none() && self.deposits.is_none());
+        assert!(self.deposits.is_none());
         if self.running.is_some() {
             self.down();
         }

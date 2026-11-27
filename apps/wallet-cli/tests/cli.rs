@@ -2,9 +2,8 @@ mod support;
 
 use std::{path::Path, process::Output};
 
-use licash::{address::Address, spend::lock_hash};
+use licash::address::Address;
 use licash_api::Fee;
-use licash_hub_service::lightning::{fake::Outcome, HeldState};
 use serde_json::Value;
 use support::{bridge::Bridged, swaps::Swaps, sweep, wallet, Server, DEPOSIT_TIMEOUT};
 
@@ -533,127 +532,6 @@ fn a_lock_pays_on_its_preimage_or_returns_once_expired() {
 }
 
 #[test]
-fn owners_pay_invoices_and_get_paid_over_lightning() {
-    let hub = Server::with_lightning(FEE);
-    let dir = tempfile::tempdir().unwrap();
-    let (alice, _) = party(dir.path(), "alice", Some(&hub));
-    assert_eq!(json(&alice, &["hubs"])[0]["lightning"]["max_pay"], 100);
-
-    // Paid 40 over Lightning, the gateway's fee on top, once the payer
-    // pays the invoice and the wallet claims what the hub locks to it.
-    let asked = wallet(&alice, &["invoice", "40"], None);
-    let stderr = String::from_utf8_lossy(&asked.stderr).into_owned();
-    let hash = stderr.trim().strip_prefix("invoice ").unwrap().to_owned();
-    let request = ok(asked);
-    let invoices = json(&alice, &["invoices"]);
-    assert_eq!(
-        (
-            invoices[0]["state"].as_str(),
-            invoices[0]["request"].as_str()
-        ),
-        (Some("open"), Some(request.trim()))
-    );
-    assert_eq!(json(&alice, &["resume"])["invoices"][0]["state"], "open");
-    hub.pay_held(&hash);
-    let resumed = json(&alice, &["resume"]);
-    assert_eq!(resumed["invoices"][0]["state"], "received");
-    assert_eq!(available(&alice), (40, 0));
-    hub.round();
-    let mut held = [0; 32];
-    hex::decode_to_slice(&hash, &mut held).unwrap();
-    assert_eq!(hub.node().held(held).unwrap().0, HeldState::Settled);
-    let text = ok(wallet(&alice, &["invoices"], None));
-    assert!(text.contains("invoice received  40 sat"), "{text}");
-    failed(
-        wallet(&alice, &["invoice", "101"], None),
-        1,
-        "takes 1 to 100",
-    );
-    // With a memo for its payer, listed with it: open, so its invoice says
-    // it (the wallet cancels one that does not).
-    let said = ok(wallet(
-        &alice,
-        &["invoice", "5", "--memo", " Pizza  night"],
-        None,
-    ));
-    let listed = &json(&alice, &["invoices"])[0];
-    assert_eq!(listed["request"].as_str(), Some(said.trim()));
-    assert_eq!(
-        (&listed["state"], &listed["memo"]),
-        (&"open".into(), &"Pizza night".into())
-    );
-    let text = ok(wallet(&alice, &["invoices"], None));
-    assert!(text.contains("\"Pizza night\""), "{text}");
-    failed(
-        wallet(&alice, &["invoice", "5", "--memo", "\u{7}"], None),
-        1,
-        "memo",
-    );
-
-    // Paying an invoice of 20 locks notes of 22 to the hub, its gateway's
-    // fee on top, until the payment buys the preimage. The notes are made
-    // exact by a payment to the wallet itself, for the hub's fee of 1.
-    let preimage = [5; 32];
-    let request = hub
-        .node()
-        .invoice(20_000, lock_hash(&preimage), 6, Outcome::Pay(preimage));
-    let paid = ok(wallet(&alice, &["pay-invoice", &request], None));
-    assert_eq!(
-        paid,
-        format!("paid 22 + 0 sat\npreimage {}\n", hex::encode(preimage))
-    );
-    assert_eq!(available(&alice), (17, 0));
-    let locks = json(&alice, &["locks"]);
-    assert_eq!(locks[0]["invoice"].as_str(), Some(request.as_str()));
-
-    // A failed payment refunds its lock at once, less the hub's refund
-    // fee.
-    let reason = "FAILURE_REASON_NO_ROUTE";
-    let request = hub
-        .node()
-        .invoice(10_000, lock_hash(&[6; 32]), 6, Outcome::Fail(reason.into()));
-    failed(wallet(&alice, &["pay-invoice", &request], None), 1, reason);
-    // The smaller change already holds exact notes for this lock: no
-    // extra normalization payment, only the refund fee of 1.
-    assert_eq!(available(&alice), (16, 0));
-    let text = ok(wallet(&alice, &["locks"], None));
-    assert!(
-        text.contains(&format!("lock refunded ({reason})  12 + 0 sat")),
-        "{text}"
-    );
-
-    // One under way past the wait is pending, and followed by resume.
-    let preimage = [7; 32];
-    let hash = lock_hash(&preimage);
-    let request = hub.node().invoice(5_000, hash, 6, Outcome::Hang);
-    failed(
-        wallet(&alice, &["pay-invoice", &request, "--wait", "1"], None),
-        75,
-        "under way",
-    );
-    // Exact notes were at hand.
-    assert_eq!(available(&alice), (9, 7));
-    hub.node().resolve(hash, Outcome::Pay(preimage));
-    let resumed = json(&alice, &["resume"]);
-    assert_eq!(resumed["locks"][0]["state"], "paid");
-    assert_eq!(available(&alice), (9, 0));
-
-    failed(
-        wallet(&alice, &["pay-invoice", "lnbcrt1nope"], None),
-        1,
-        "not a Lightning invoice",
-    );
-    let request = hub
-        .node()
-        .invoice(101_000, lock_hash(&[8; 32]), 6, Outcome::Hang);
-    failed(
-        wallet(&alice, &["pay-invoice", &request], None),
-        1,
-        "at most 100 sat",
-    );
-}
-
-#[test]
 fn hubs_announced_on_nostr_are_discovered_where_they_answer_as_the_announcer() {
     use licash_nostr::{Announcement, Announcer, Role, Route};
     let hub = Server::start(FEE);
@@ -742,7 +620,7 @@ fn hubs_announced_on_nostr_are_discovered_where_they_answer_as_the_announcer() {
 #[test]
 fn an_invoice_made_by_a_provider_pays_the_wallet_at_a_hub_without_a_gateway() {
     let hub = Server::start(FEE);
-    let node = std::sync::Arc::new(licash_hub_service::lightning::fake::Fake::new());
+    let node = std::sync::Arc::new(licash_lightning::fake::Fake::new());
     node.tip(hub.height(), [0; 32]);
     let swaps = Swaps::receiving(&[&hub], 1_000, node.clone());
     let dir = tempfile::tempdir().unwrap();
@@ -918,9 +796,19 @@ fn swap_providers_announced_on_nostr_are_discovered_where_they_answer() {
 #[test]
 fn open_bridges_announced_on_nostr_are_found_those_at_trusted_hubs_first() {
     use licash_nostr::{Announcement, Announcer, Role, Route};
-    let (a, b) = (Server::with_lightning(FEE), Server::with_lightning(FEE));
-    let (at_a, at_b) = (Bridged::with(&a, true), Bridged::with(&b, true));
-    let owned = Bridged::start(&a);
+    let (a, b) = (Server::start(FEE), Server::start(FEE));
+    // Each paid over Lightning through a provider at its hub.
+    let provider = |hub: &Server| {
+        let node = std::sync::Arc::new(licash_lightning::fake::Fake::new());
+        node.tip(hub.height(), [0; 32]);
+        Swaps::receiving(&[hub], 1_000, node)
+    };
+    let (via_a, via_b) = (provider(&a), provider(&b));
+    let (at_a, at_b) = (
+        Bridged::start(&a, true, via_a.url()),
+        Bridged::start(&b, true, via_b.url()),
+    );
+    let owned = Bridged::start(&a, false, via_a.url());
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let (_relay, relay) = support::relay(&runtime);
     let relays = [relay];
@@ -2368,18 +2256,17 @@ fn recover_takes_a_hubs_address_and_deposit_root_by_url_or_by_name() {
 
 #[test]
 fn owners_top_up_a_bridge_and_connect_apps_on_the_command_line() {
-    let hub = Server::with_lightning(FEE);
-    let bridged = Bridged::start(&hub);
+    let hub = Server::start(FEE);
+    // Paid over Lightning through a provider: for apps, not its owner.
+    let node = std::sync::Arc::new(licash_lightning::fake::Fake::new());
+    node.tip(hub.height(), [0; 32]);
+    let swaps = Swaps::receiving(&[&hub], 1_000, node);
+    let bridged = Bridged::start(&hub, false, swaps.url());
     let url = bridged.url();
     let dir = tempfile::tempdir().unwrap();
-    let (alice, _) = party(dir.path(), "alice", Some(&hub));
-    let asked = wallet(&alice, &["invoice", "80"], None);
-    let stderr = String::from_utf8_lossy(&asked.stderr).into_owned();
-    hub.pay_held(stderr.trim().strip_prefix("invoice ").unwrap());
-    assert_eq!(
-        json(&alice, &["resume"])["invoices"][0]["state"],
-        "received"
-    );
+    let (alice, alice_at) = party(dir.path(), "alice", Some(&hub));
+    let funds = serde_json::to_string(&hub.pay(&address(&alice_at), 80)).unwrap();
+    ok(wallet(&alice, &["receive"], Some(&funds)));
 
     // Its owner's alone: only with the code its operator was given.
     failed(
@@ -2394,20 +2281,11 @@ fn owners_top_up_a_bridge_and_connect_apps_on_the_command_line() {
     assert_eq!(added["account"]["balance"], 0);
     assert_eq!(json(&alice, &["bridge", "list"])[0]["url"], url.as_str());
 
-    // 30 paid in, the hub's 1 on receiving out of it.
+    // 30 paid in notes, credited whole, the hub's fee on top.
     let topped = json(&alice, &["bridge", "top-up", "30"]);
-    assert_eq!(topped["invoice"]["credits"], 29_000);
-    let mut balance = Value::Null;
-    for _ in 0..50 {
-        hub.round();
-        balance = json(&alice, &["bridge", "show"])["balance"].clone();
-        if balance == 29_000 {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    assert_eq!(balance, 29_000);
-    assert_eq!(bridged.bridge.status().unwrap().owed, 29_000);
+    assert_eq!(topped["credited"], 30_000);
+    assert_eq!(json(&alice, &["bridge", "show"])["balance"], 30_000);
+    assert_eq!(bridged.bridge.status().unwrap().owed, 30_000);
 
     let connected = json(&alice, &["bridge", "connect", "Stacker News", "--receive"]);
     let uri = connected["uri"].as_str().unwrap();
@@ -2423,7 +2301,7 @@ fn owners_top_up_a_bridge_and_connect_apps_on_the_command_line() {
     );
     let text = ok(wallet(&alice, &["bridge", "show"], None));
     assert!(text.contains("Stacker News (receives)"), "{text}");
-    assert!(text.contains("Balance  29 sat"), "{text}");
+    assert!(text.contains("Balance  30 sat"), "{text}");
 
     // Below 40, up to 50, but 45 a day, 30 of it topped up already.
     let ruled = json(
@@ -2434,7 +2312,18 @@ fn owners_top_up_a_bridge_and_connect_apps_on_the_command_line() {
     );
     assert_eq!(ruled["rules"]["below"], 40);
     let run = json(&alice, &["bridge", "run"]);
-    assert_eq!(run["invoice"]["amount"], 15_000);
+    assert_eq!(
+        (&run["amount"], &run["credited"]),
+        (&15.into(), &15_000.into())
+    );
+    // Back to the wallet in notes, the hub's fee out of the account too.
+    let paid = json(&alice, &["bridge", "withdraw", "5"]);
+    assert_eq!(
+        (&paid["state"], &paid["amount"]),
+        (&"settled".into(), &5_000.into())
+    );
+    let fee = paid["fee"].as_u64().unwrap();
+    assert_eq!(json(&alice, &["bridge", "show"])["balance"], 40_000 - fee);
     let host = url.strip_prefix("http://").unwrap();
     let named = json(&alice, &["bridge", "address", "Alice"]);
     assert_eq!(named["lightning_address"], format!("alice@{host}"));
@@ -2452,9 +2341,8 @@ fn owners_top_up_a_bridge_and_connect_apps_on_the_command_line() {
     let out = dir.path().join("export.hex");
     let out = out.to_str().unwrap();
     let exported = json(&alice, &["bridge", "export", "--yes", "--out", out]);
-    // What it held then: the 29 credited, and the top-up of `bridge run`
-    // once its round took it.
-    assert!(exported["amount"].as_u64().unwrap() >= 29, "{exported}");
+    // What it held then: the 45 credited, less what it paid out.
+    assert!(exported["amount"].as_u64().unwrap() >= 39, "{exported}");
     assert!(bridged.bridge.status().unwrap().frozen);
     assert_eq!(
         json(&alice, &["bridge", "import", out])["known"],

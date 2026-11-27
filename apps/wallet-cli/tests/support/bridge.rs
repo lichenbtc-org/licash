@@ -21,14 +21,11 @@ pub struct Bridged {
 }
 
 impl Bridged {
-    /// A bridge for its owner alone, paying and paid through `hub`, all in
-    /// the runtime of its own thread, as its wallet's client is.
-    pub fn start(hub: &Server) -> Self {
-        Self::with(hub, false)
-    }
-
-    /// [`Bridged::start`], open to anyone if `open`.
-    pub fn with(hub: &Server, open: bool) -> Self {
+    /// A bridge at `hub`, open to anyone if `open`, else for its owner
+    /// alone, paid over Lightning through the swap provider at `via`, all
+    /// in the runtime of its own thread, as its wallet's client is: once
+    /// it knows its provider's terms.
+    pub fn start(hub: &Server, open: bool, via: String) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wallet.sqlite");
         let url = hub.url();
@@ -53,6 +50,7 @@ impl Bridged {
                 let config = Config {
                     hub: url,
                     open,
+                    via: Some(via),
                     relays: vec!["ws://127.0.0.1:1".into()],
                     public_url: Some(format!("http://{}", listener.local_addr().unwrap())),
                     ..Config::default()
@@ -75,6 +73,13 @@ impl Bridged {
             });
         });
         let (addr, bridge, pairing) = started.recv().unwrap();
+        // Its provider's terms asked by its first rounds.
+        for _ in 0..100 {
+            if bridge.info().is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
         Self {
             bridge,
             pairing,

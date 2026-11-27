@@ -1541,7 +1541,9 @@ async fn run(cli: Cli, collection: &mut Option<background::Collection>) -> anyho
         Command::Onchain { chain, command } => {
             return onchain::run(&wallet, chain, command, json).await;
         }
-        Command::Bridge { command } => return bridge::run(&wallet, command, json).await,
+        Command::Bridge { command } => {
+            return bridge::run(&wallet, command, json).await;
+        }
         Command::Cold { chain, command } => {
             let route = route(tor, cli.proxy.as_deref())?;
             return cold::run(&wallet, chain, route, command, json).await;
