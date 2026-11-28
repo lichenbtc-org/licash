@@ -512,11 +512,15 @@ impl<T: Transport> Wallet<T> {
         if from_hub == to_hub {
             return Err(Error::Invalid("a swap is between two hubs".into()));
         }
-        let info = self.quoted_terms(&provider).await?;
-        let amount = amount.max(info.min);
         let from_at = (from.as_str(), &from_info);
-        let Terms { fee, margin, .. } =
-            terms(&provider, &info, from_at, (&to, &to_info), amount, limits)?;
+        let (info, (amount, fee, margin)) = self
+            .quoted_terms(&provider, |info| {
+                let amount = amount.max(info.min);
+                let Terms { fee, margin, .. } =
+                    terms(&provider, info, from_at, (&to, &to_info), amount, limits)?;
+                Ok((amount, fee, margin))
+            })
+            .await?;
         Ok(SwapQuote {
             info,
             amount,
@@ -543,12 +547,19 @@ impl<T: Transport> Wallet<T> {
         self.fresh_terms(&hub_url(provider)?).await
     }
 
-    /// The terms of the provider at `provider`, a URL as [`hub_url`] makes
-    /// it, for a quote: as it answered within the time they are kept
-    /// ([`Wallet::keep_terms`]), asking it nothing, else asked now. What is
-    /// paid asks again ([`Wallet::fresh_terms`]), and is refused if they
-    /// rose.
-    pub(crate) async fn quoted_terms(&self, provider: &str) -> Result<swaps::Info, Error> {
+    /// What `judge` makes of the terms of the provider at `provider`, a
+    /// URL as [`hub_url`] makes it, for a quote, and those terms: as it
+    /// answered within the time they are kept ([`Wallet::keep_terms`]),
+    /// asking it nothing, else asked now. Terms kept that `judge` refuses
+    /// are asked again, and judged as they are now: a provider funded or
+    /// restocked since is quoted at once, not refused until they age out.
+    /// What is paid asks again ([`Wallet::fresh_terms`]), and is refused if
+    /// they rose.
+    pub(crate) async fn quoted_terms<R>(
+        &self,
+        provider: &str,
+        judge: impl Fn(&swaps::Info) -> Result<R, Error>,
+    ) -> Result<(swaps::Info, R), Error> {
         let fresh = self.terms_for.load(std::sync::atomic::Ordering::Relaxed);
         let fresh = Duration::from_secs(fresh);
         let kept = {
@@ -556,10 +567,14 @@ impl<T: Transport> Wallet<T> {
             let kept = kept.get(provider).filter(|(_, at)| at.elapsed() < fresh);
             kept.map(|(info, _)| info.clone())
         };
-        match kept {
-            Some(info) => Ok(info),
-            None => self.fresh_terms(provider).await,
+        if let Some(info) = kept {
+            if let Ok(judged) = judge(&info) {
+                return Ok((info, judged));
+            }
         }
+        let info = self.fresh_terms(provider).await?;
+        let judged = judge(&info)?;
+        Ok((info, judged))
     }
 
     /// The terms of the provider at `provider`, a URL as [`hub_url`] makes

@@ -1223,6 +1223,26 @@ async fn a_quote_reads_the_terms_kept_and_a_payout_asks_again() {
     assert_eq!(quote().await.unwrap().costs(), usual.costs());
 }
 
+/// Terms kept that refuse a quote are asked again: a provider that pays
+/// out since, funded on Bitcoin, is quoted at once, not once they age out.
+#[tokio::test]
+async fn a_quote_the_terms_kept_refuse_asks_again() {
+    let eco = Eco::new().await;
+    eco.client.keep_terms(licash_wallet::TERMS_FRESH);
+    *eco.desk.terms.lock().unwrap() = None;
+    eco.client.provider_info(PROVIDER).await.unwrap();
+    let quote = || {
+        eco.client
+            .payout_quote(PROVIDER, A, PAYEE, 1000, MAX_FEE, ONE_SAT)
+    };
+    match quote().await {
+        Err(Error::Invalid(reason)) => assert!(reason.contains("pays nothing out"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+    *eco.desk.terms.lock().unwrap() = Some(TERMS);
+    quote().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_payout_is_refused_beyond_its_terms_before_any_lock() {
     let eco = Eco::new().await;

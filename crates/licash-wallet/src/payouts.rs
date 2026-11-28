@@ -334,7 +334,6 @@ impl<T: Transport> Wallet<T> {
         let (script, address, _) = self.payout_payee(to)?;
         self.hub(&from)?;
         let (_, from_info) = self.refresh(&from).await?;
-        let info = self.quoted_terms(&provider).await?;
         let terms = Terms {
             provider: &provider,
             from: (&from, &from_info),
@@ -345,7 +344,8 @@ impl<T: Transport> Wallet<T> {
             rate,
             expiry: None,
         };
-        terms.quote(info, Preimage::draw())
+        let judge = |info: &swaps::Info| terms.quote(info.clone(), Preimage::draw());
+        Ok(self.quoted_terms(&provider, judge).await?.1)
     }
 
     /// The most the provider saying `info` of itself pays out to `to`

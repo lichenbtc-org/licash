@@ -99,19 +99,22 @@ impl<T: Transport> Wallet<T> {
         let provider = hub_url(provider)?;
         let url = hub_url(hub)?;
         let (_, hub_info) = self.hub(&url)?;
-        let info = self.quoted_terms(&provider).await?;
-        let terms = info.deposits.ok_or_else(|| {
-            Error::Invalid(format!("provider {provider} takes no deposits on Bitcoin"))
-        })?;
-        let max = match info.hub(&hub_info.address) {
-            Some(at) => terms.max.min(at.max),
-            None => 0,
+        let judge = |info: &swaps::Info| {
+            let terms = info.deposits.ok_or_else(|| {
+                Error::Invalid(format!("provider {provider} takes no deposits on Bitcoin"))
+            })?;
+            let max = match info.hub(&hub_info.address) {
+                Some(at) => terms.max.min(at.max),
+                None => 0,
+            };
+            if max < terms.min {
+                return Err(Error::Invalid(format!(
+                    "provider {provider} takes no deposits on Bitcoin at hub {url} now"
+                )));
+            }
+            Ok((terms, max))
         };
-        if max < terms.min {
-            return Err(Error::Invalid(format!(
-                "provider {provider} takes no deposits on Bitcoin at hub {url} now"
-            )));
-        }
+        let (info, (terms, max)) = self.quoted_terms(&provider, judge).await?;
         Ok(DepositOffer { info, terms, max })
     }
 
