@@ -16,4 +16,10 @@ cleanup() {
 }
 trap cleanup EXIT
 "${compose[@]}" up -d --build --wait
-cargo test --locked -p licash-e2e -- --ignored --test-threads=1 "$@"
+# Bounded, if LICASH_E2E_TIMEOUT says how long (as `timeout` takes it):
+# tests out of time are stopped, and the stack's logs kept all the same.
+bound=()
+if [[ -n "${LICASH_E2E_TIMEOUT:-}" ]]; then
+    bound=(timeout "$LICASH_E2E_TIMEOUT")
+fi
+"${bound[@]}" cargo test --locked -p licash-e2e -- --ignored --test-threads=1 "$@"

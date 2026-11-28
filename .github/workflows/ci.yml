@@ -224,7 +224,9 @@ jobs:
   app-e2e:
     needs: android
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Some 25 minutes build the stack and boot the emulator; the test, whole,
+    # takes over 35.
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v7
         with:
@@ -243,9 +245,13 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
       - name: The app on an emulator, on the regtest ecosystem
+        timeout-minutes: 90
         uses: reactivecircus/android-emulator-runner@v2
         env:
           LICASH_E2E_APP: ${{ runner.temp }}/app/app-debug.apk
+          # The test stopped before the job is, so that the stack's logs
+          # are kept below, and what it said as it went is in the job's.
+          LICASH_E2E_TIMEOUT: 55m
         with:
           api-level: 34
           arch: x86_64
@@ -256,8 +262,8 @@ jobs:
           # As the test is run locally: typed through a hardware keyboard,
           # with no on-screen keyboard covering the buttons it taps.
           enable-hw-keyboard: true
-          script: apps/e2e/run.sh the_app_is
-      - if: failure()
+          script: apps/e2e/run.sh the_app_is --nocapture
+      - if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: app-e2e-logs
